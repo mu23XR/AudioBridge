@@ -111,6 +111,15 @@ class PlayoutGovernor internal constructor(
 
     fun bufferedMs(): Int = (bufferedFrames() / framesPerMs).toInt()
 
+    /**
+     * Milliseconds since the playback head last advanced while PCM is still
+     * queued. Returns 0 whenever the queue is empty (a silent sender draining
+     * the buffer is healthy, not stalled), so only a wedged OEM track that
+     * refuses to consume queued PCM keeps this growing.
+     */
+    fun stalledForMs(): Long =
+        if (bufferedFrames() > 0) nowMs() - lastProgressAt else 0L
+
     fun noteWritten(bytes: Int) {
         if (bytes > 0 && frameSize > 0) framesWritten += bytes / frameSize
     }

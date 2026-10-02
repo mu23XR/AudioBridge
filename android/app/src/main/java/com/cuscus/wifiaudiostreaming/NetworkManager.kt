@@ -2215,6 +2215,9 @@ object NetworkManager {
         networkInterfaceName: String = "Auto",
         connectionSoundEnabled: Boolean = true,
         disconnectionSoundEnabled: Boolean = true,
+        // Reconnects of an already-announced logical session must not replay
+        // the full chime: rapid drop-reconnect cycles used to ring twice.
+        announceConnectSound: Boolean = true,
         onServerDisconnected: (() -> Unit)? = null
     ) {
         // ── Formato di riproduzione ───────────────────────────────────────────
@@ -2344,11 +2347,18 @@ object NetworkManager {
                         }
                         audioTrack = trackBuilder.build()
                         registerClientPlaybackTrack(audioTrack!!)
-                        val playout = PlayoutGovernor(
+                        // Mutable so the playback watchdog can rebuild the track
+                        // in place without tearing down the whole session.
+                        var playout = PlayoutGovernor(
                             audioTrack!!, sampleRate, frameSize, effectiveLatencyMs, TAG
                         )
 
-                        val prerollLen = (sampleRate * frameSize * 10 / 1000)
+                        // Startup preroll: half of the playout target. 20 ms
+                        // keeps the historical 10 ms; higher targets get
+                        // proportionally more protection so the first seconds
+                        // do not burn underruns while the buffer fills.
+                        val prerollMs = effectiveLatencyMs / 2
+                        val prerollLen = (sampleRate * frameSize * prerollMs / 1000)
                             .coerceIn(0, playbackBufferSize - frameSize)
                             .let { it - (it % frameSize) }
                         if (prerollLen > 0) {
@@ -2500,7 +2510,7 @@ object NetworkManager {
                         var serverEncrypts = sessionEncrypted
 
                         connectionStatus.value = context.getString(R.string.status_streaming)
-                        if (connectionSoundEnabled) playConnectionSound(context)
+                        if (connectionSoundEnabled && announceConnectSound) playConnectionSound(context)
                         connectedSuccessfully = true
 
                         val connectedAt = System.currentTimeMillis()
@@ -2523,7 +2533,47 @@ object NetworkManager {
                         var inSilenceRun = false
                         var versionChecked = false
 
+                        // ── Playback watchdog state ───────────────────────
+                        // The receive loop owns the track and performs rebuilds;
+                        // the watchdog coroutine below only requests them and
+                        // escalates when the loop cannot even consume a request.
+                        var rebuildRequested = false
+                        var rebuildRequestedAt = 0L
+
+                        fun rebuildPlaybackTrack(reason: String): Boolean {
+                            return try {
+                                Log.w(TAG, "[PLAYOUT][WATCHDOG] rebuilding playback track: $reason")
+                                unregisterClientPlaybackTrack(audioTrack)
+                                runCatching { audioTrack?.pause() }
+                                runCatching { audioTrack?.flush() }
+                                runCatching { audioTrack?.stop() }
+                                runCatching { audioTrack?.release() }
+                                val newTrack = trackBuilder.build()
+                                registerClientPlaybackTrack(newTrack)
+                                val newGovernor = PlayoutGovernor(
+                                    newTrack, sampleRate, frameSize, effectiveLatencyMs, TAG
+                                )
+                                val rebornPrerollMs = effectiveLatencyMs / 2
+                                val rebornPrerollLen = (sampleRate * frameSize * rebornPrerollMs / 1000)
+                                    .coerceIn(0, playbackBufferSize - frameSize)
+                                    .let { it - (it % frameSize) }
+                                if (rebornPrerollLen > 0) {
+                                    newGovernor.writePcm(ByteArray(rebornPrerollLen), 0, rebornPrerollLen)
+                                }
+                                newTrack.play()
+                                audioTrack = newTrack
+                                playout = newGovernor
+                                Log.i(TAG, "[PLAYOUT][WATCHDOG] playback track rebuilt")
+                                true
+                            } catch (t: Throwable) {
+                                Log.e(TAG, "[PLAYOUT][WATCHDOG] track rebuild failed", t)
+                                false
+                            }
+                        }
+
                         val watchdogJob = launch {
+                            var lastUnderruns = 0
+                            var underrunStormStreak = 0
                             while (isActive) {
                                 delay(1000)
                                 val now = System.currentTimeMillis()
@@ -2532,6 +2582,36 @@ object NetworkManager {
                                     if (disconnectionSoundEnabled && !ClientSessionController.wantsConnection()) { playDisconnectionSound(context); disconnectionSoundPlayed = true }
                                     transportJob.cancel()
                                     break
+                                }
+                                // Playback health, observed independently of the
+                                // receive loop: the loop itself may be wedged on
+                                // a dead track while packets keep piling up.
+                                if (!connectedSuccessfully) continue
+                                val track = audioTrack ?: continue
+                                val underrunCount = track.underrunCount
+                                val underrunDelta = underrunCount - lastUnderruns
+                                lastUnderruns = underrunCount
+                                val audioFlowing = now - lastAudioAt.get() < 3000
+                                underrunStormStreak = if (audioFlowing && underrunDelta > 200) underrunStormStreak + 1 else 0
+                                val stalledMs = playout.stalledForMs()
+                                if (rebuildRequested) {
+                                    // Not consumed by the receive loop within 5 s:
+                                    // the loop is wedged; only a full session
+                                    // rebuild (through the normal disconnect path)
+                                    // can recover it.
+                                    if (now - rebuildRequestedAt > 5000) {
+                                        markDisconnect("PLAYBACK_WATCHDOG_UNACKNOWLEDGED")
+                                        transportJob.cancel()
+                                        break
+                                    }
+                                } else if (underrunStormStreak >= 3 || stalledMs >= 5000) {
+                                    Log.w(
+                                        TAG,
+                                        "[PLAYOUT][WATCHDOG] requesting track rebuild " +
+                                            "(underrunDelta=$underrunDelta streak=$underrunStormStreak stalledMs=$stalledMs)"
+                                    )
+                                    rebuildRequested = true
+                                    rebuildRequestedAt = now
                                 }
                             }
                         }
@@ -2716,6 +2796,10 @@ object NetworkManager {
 
                         try {
                             while (isActive) {
+                                if (rebuildRequested) {
+                                    rebuildRequested = false
+                                    rebuildPlaybackTrack("watchdog request")
+                                }
                                 val audio = ArrayList<ByteArray>()
                                 var byeReceived = false
                                 var dg: Datagram? = socket.receive()
@@ -2851,10 +2935,18 @@ object NetworkManager {
                         val mcPlayout = PlayoutGovernor(
                             audioTrack, sampleRate, frameSize, mcLatencyMs, TAG
                         )
+                        // Same preroll policy as the unicast path: half of the
+                        // playout target, so higher buffers start protected.
+                        val mcPrerollLen = (sampleRate * frameSize * (mcLatencyMs / 2) / 1000)
+                            .coerceIn(0, playbackBufferSize - frameSize)
+                            .let { it - (it % frameSize) }
+                        if (mcPrerollLen > 0) {
+                            mcPlayout.writePcm(ByteArray(mcPrerollLen), 0, mcPrerollLen)
+                        }
                         audioTrack.play()
                         LinkMetrics.start(if (sessionUsesUsb()) "USB" else "WIFI", sampleRate)
                         connectionStatus.value = context.getString(R.string.status_streaming)
-                        if (connectionSoundEnabled) playConnectionSound(context)
+                        if (connectionSoundEnabled && announceConnectSound) playConnectionSound(context)
                         connectedSuccessfully = true
 
                         multicastSocket.soTimeout = 2000
