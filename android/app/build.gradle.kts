@@ -45,6 +45,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Local acceptance builds install NEXT TO the signed release:
+            // the .debug suffix keeps both packages coexisting, so testing
+            // never requires uninstalling the permanent-signed app.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-localdebug"
+        }
         release {
             signingConfig = signingConfigs.getByName("audiobridgeRelease")
             isMinifyEnabled = false
