@@ -492,6 +492,7 @@ fun ExpressiveSettingsScreen(
     onChannelConfigChange: (String) -> Unit,
     onBufferSizeChange: (Int) -> Unit,
     onAdvancedAudioChange: (Int, Int) -> Unit = { _, _ -> },
+    onAdaptiveLatencyChange: (Boolean) -> Unit = {},
     onSecurityChange: (String, String) -> Unit = { _, _ -> },
     onStreamingPortChange: (Int) -> Unit,
     onMicPortChange: (Int) -> Unit,
@@ -545,6 +546,7 @@ fun ExpressiveSettingsScreen(
             onChannelConfigChange = onChannelConfigChange,
             onBufferSizeChange = onBufferSizeChange,
             onAdvancedAudioChange = onAdvancedAudioChange,
+            onAdaptiveLatencyChange = onAdaptiveLatencyChange,
             onSecurityChange = onSecurityChange,
             onStreamingPortChange = onStreamingPortChange,
             onMicPortChange = onMicPortChange,
@@ -592,6 +594,7 @@ fun SettingsScreenContent(
     onChannelConfigChange: (String) -> Unit,
     onBufferSizeChange: (Int) -> Unit,
     onAdvancedAudioChange: (Int, Int) -> Unit = { _, _ -> },
+    onAdaptiveLatencyChange: (Boolean) -> Unit = {},
     onSecurityChange: (String, String) -> Unit = { _, _ -> },
     onStreamingPortChange: (Int) -> Unit,
     onMicPortChange: (Int) -> Unit,
@@ -875,10 +878,13 @@ fun SettingsScreenContent(
                     // NetworkManager reads it only when THIS device builds its
                     // AudioTrack as a WFAS client, and it never travels to the
                     // peer. The preset/label wording must keep saying that.
-                    val latencyPresetLabel = when (appSettings.latencyMs) {
-                        20 -> stringResource(R.string.settings_latency_preset_fast)
-                        40 -> stringResource(R.string.settings_latency_preset_balanced)
-                        60 -> stringResource(R.string.settings_latency_preset_steady)
+                    // The adaptive preset hands a 20-80 ms target band to the
+                    // receiver watchdog; any manual value turns adaptive off.
+                    val latencyPresetLabel = when {
+                        appSettings.adaptiveLatency -> stringResource(R.string.settings_latency_preset_adaptive)
+                        appSettings.latencyMs == 20 -> stringResource(R.string.settings_latency_preset_fast)
+                        appSettings.latencyMs == 40 -> stringResource(R.string.settings_latency_preset_balanced)
+                        appSettings.latencyMs == 60 -> stringResource(R.string.settings_latency_preset_steady)
                         else -> stringResource(R.string.settings_latency_preset_custom_fmt, appSettings.latencyMs)
                     }
                     SettingsSelectionItem(
@@ -887,16 +893,29 @@ fun SettingsScreenContent(
                         icon = Icons.Outlined.Speed,
                         currentValue = latencyPresetLabel,
                         options = linkedMapOf(
+                            stringResource(R.string.settings_latency_preset_adaptive) to -1,
                             stringResource(R.string.settings_latency_preset_fast) to 20,
                             stringResource(R.string.settings_latency_preset_balanced) to 40,
                             stringResource(R.string.settings_latency_preset_steady) to 60
                         ),
-                        onOptionSelected = { onAdvancedAudioChange(it, appSettings.maxPayloadBytes) }
+                        onOptionSelected = { picked ->
+                            if (picked < 0) {
+                                onAdaptiveLatencyChange(true)
+                            } else {
+                                onAdaptiveLatencyChange(false)
+                                onAdvancedAudioChange(picked, appSettings.maxPayloadBytes)
+                            }
+                        }
                     )
                     var showLatencyEditor by remember { mutableStateOf(false) }
                     SettingsSliderItem(
                         title = stringResource(R.string.settings_item_latency_title),
-                        description = stringResource(R.string.settings_item_latency_desc),
+                        description = stringResource(R.string.settings_item_latency_desc) +
+                            if (appSettings.adaptiveLatency) {
+                                " " + stringResource(R.string.settings_latency_adaptive_hint)
+                            } else {
+                                ""
+                            },
                         icon = Icons.Outlined.Timer,
                         value = appSettings.latencyMs.toFloat(),
                         range = 20f..400f,
@@ -905,7 +924,10 @@ fun SettingsScreenContent(
                         // produced the infamous 21 ms notches.
                         steps = 0,
                         valueSuffix = "ms",
-                        onValueChange = { onAdvancedAudioChange(it.toInt(), appSettings.maxPayloadBytes) },
+                        onValueChange = {
+                            onAdaptiveLatencyChange(false)
+                            onAdvancedAudioChange(it.toInt(), appSettings.maxPayloadBytes)
+                        },
                         onValueClick = { showLatencyEditor = true }
                     )
                     if (showLatencyEditor) {
@@ -944,6 +966,7 @@ fun SettingsScreenContent(
                                     if (parsed == null || parsed !in 20..400) {
                                         invalidInput = true
                                     } else {
+                                        onAdaptiveLatencyChange(false)
                                         onAdvancedAudioChange(parsed, appSettings.maxPayloadBytes)
                                         showLatencyEditor = false
                                     }

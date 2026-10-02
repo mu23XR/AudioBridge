@@ -341,6 +341,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setAdaptiveLatency(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsDataStore.saveAdaptiveLatency(enabled)
+        }
+    }
+
     fun setSecurity(uiMode: String, key: String) {
         viewModelScope.launch {
             val settings = settingsDataStore.settingsFlow.first()

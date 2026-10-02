@@ -54,11 +54,13 @@
     <string name="settings_item_latency_title">Playback buffer (receiver)</string>
     <string name="settings_item_latency_desc">Receiver-side playout buffer. Applies only when this device receives; never synced to the sender. Higher = steadier, more delay.</string>
     <string name="settings_latency_preset_title">Latency preset</string>
-    <string name="settings_latency_preset_desc">Quick pick; the slider below accepts any value from 20 to 400 ms.</string>
+    <string name="settings_latency_preset_desc">Adaptive grows the buffer on demand (20–80 ms); fixed presets 20/40/60; the slider accepts any 20–400 ms value.</string>
+    <string name="settings_latency_preset_adaptive">Adaptive (20–80 ms)</string>
     <string name="settings_latency_preset_fast">Low latency (20 ms)</string>
     <string name="settings_latency_preset_balanced">Balanced (40 ms)</string>
     <string name="settings_latency_preset_steady">Steady (60 ms)</string>
     <string name="settings_latency_preset_custom_fmt">Custom: %1$d ms</string>
+    <string name="settings_latency_adaptive_hint">(Adaptive is on — a manual change switches to a fixed value)</string>
     <string name="settings_latency_edit_hint">Value in ms (20–400)</string>
     <string name="settings_latency_edit_invalid">Enter an integer between 20 and 400</string>
     <string name="ok">OK</string>

@@ -53,11 +53,13 @@
     <string name="settings_item_latency_title">播放缓冲（接收端）</string>
     <string name="settings_item_latency_desc">接收端播放缓冲目标。仅在本机作为接收端时生效，不会同步到发送端。越高越稳定，延迟也越大。</string>
     <string name="settings_latency_preset_title">延迟预设</string>
-    <string name="settings_latency_preset_desc">快速选择；下方滑块可设 20–400 ms 任意值。</string>
+    <string name="settings_latency_preset_desc">自适应按丢包情况自动抬升缓冲（20–80 ms）；固定挡位 20/40/60；滑块可设 20–400 ms 任意值。</string>
+    <string name="settings_latency_preset_adaptive">自适应（20–80 ms）</string>
     <string name="settings_latency_preset_fast">极速（20 ms）</string>
     <string name="settings_latency_preset_balanced">均衡（40 ms）</string>
     <string name="settings_latency_preset_steady">稳定（60 ms）</string>
     <string name="settings_latency_preset_custom_fmt">自定义：%1$d ms</string>
+    <string name="settings_latency_adaptive_hint">（自适应已开启，手动调整将改为固定值）</string>
     <string name="settings_latency_edit_hint">数值，单位 ms（20–400）</string>
     <string name="settings_latency_edit_invalid">请输入 20–400 之间的整数</string>
     <string name="ok">确定</string>

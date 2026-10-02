@@ -171,6 +171,9 @@ data class AppSettings(
     val autoUpdateCheckEnabled: Boolean = true,
     // Balanced 40 ms default: 20 ms burned its whole margin against measured
     // Wi-Fi jitter (9-10 ms average, 29 ms peaks) and underrun-stormed.
+    // adaptiveLatency=true starts at the 20 ms floor and lets the receiver
+    // watchdog lift the buffer on underrun evidence (20-80 ms band).
+    val adaptiveLatency: Boolean = true,
     val latencyMs: Int = 40,
     val maxPayloadBytes: Int = 1390,
     val securityMode: String = "OFF",
@@ -239,6 +242,7 @@ class SettingsDataStore(context: Context) {
         val RTP_SOURCES = stringPreferencesKey("rtp_sources")
         val CLIENT_TILE_IP = stringPreferencesKey("client_tile_ip")
         val AUTO_CONNECT_ENABLED = booleanPreferencesKey("auto_connect_enabled")
+        val ADAPTIVE_LATENCY = booleanPreferencesKey("adaptive_latency")
         val AUTO_CONNECT_LIST = stringPreferencesKey("auto_connect_list")
         val CLIENT_PERSISTENT_CONNECTION = booleanPreferencesKey("client_persistent_connection")
         val CONNECTION_SOUND_ENABLED = booleanPreferencesKey("connection_sound_enabled")
@@ -401,6 +405,7 @@ class SettingsDataStore(context: Context) {
             lastSeenChangelogVersion = preferences[PreferencesKeys.LAST_SEEN_CHANGELOG_VERSION] ?: "",
             autoUpdateCheckEnabled = preferences[PreferencesKeys.AUTO_UPDATE_CHECK_ENABLED] ?: true,
             latencyMs = preferences[PreferencesKeys.LATENCY_MS] ?: 40,
+            adaptiveLatency = preferences[PreferencesKeys.ADAPTIVE_LATENCY] ?: true,
             maxPayloadBytes = preferences[PreferencesKeys.MAX_PAYLOAD] ?: 1390,
             securityMode = preferences[PreferencesKeys.SECURITY_MODE] ?: "OFF",
             authKey = authKeys.authKey,
@@ -523,6 +528,12 @@ class SettingsDataStore(context: Context) {
             preferences[PreferencesKeys.USB_LATENCY_MS] = latencyMs.coerceIn(
                 UsbLink.MIN_USB_LATENCY_MS, UsbLink.MAX_USB_LATENCY_MS
             )
+        }
+    }
+
+    suspend fun saveAdaptiveLatency(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.ADAPTIVE_LATENCY] = enabled
         }
     }
 

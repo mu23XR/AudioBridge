@@ -830,6 +830,7 @@ class MainActivity : AppCompatActivity() {
             onChannelConfigChange = viewModel::setChannelConfig,
             onBufferSizeChange = viewModel::setBufferSize,
             onAdvancedAudioChange = viewModel::setAdvancedAudio,
+            onAdaptiveLatencyChange = viewModel::setAdaptiveLatency,
             onSecurityChange = viewModel::setSecurity,
             onStreamingPortChange = viewModel::setStreamingPort,
             onMicPortChange = viewModel::setMicPort,

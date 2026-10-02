@@ -22,7 +22,8 @@ class PlayoutGovernor internal constructor(
     targetLatencyMs: Int,
     private val tag: String,
     private val nowMs: () -> Long,
-    private val warn: (String) -> Unit
+    private val warn: (String) -> Unit,
+    val adaptive: Boolean = false
 ) {
     internal interface Output {
         val playbackHeadPosition: Int
@@ -34,7 +35,8 @@ class PlayoutGovernor internal constructor(
     }
 
     constructor(track: AudioTrack, sampleRate: Int, frameSize: Int,
-                targetLatencyMs: Int, tag: String = "PLAYOUT") : this(
+                targetLatencyMs: Int, tag: String = "PLAYOUT",
+                adaptive: Boolean = false) : this(
         object : Output {
             override val playbackHeadPosition get() = track.playbackHeadPosition
             override fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int) =
@@ -44,13 +46,35 @@ class PlayoutGovernor internal constructor(
             override fun play() = track.play()
             override fun setPlaybackRate(rate: Int) = track.setPlaybackRate(rate)
         }, sampleRate, frameSize, targetLatencyMs, tag,
-        { SystemClock.elapsedRealtime() }, { Log.w(tag, it) }
+        { SystemClock.elapsedRealtime() }, { Log.w(tag, it) }, adaptive
     )
     private val framesPerMs = (sampleRate / 1000.0).coerceAtLeast(1.0)
 
-    private val targetFrames = (targetLatencyMs * framesPerMs).toLong().coerceAtLeast((15 * framesPerMs).toLong())
-    private val highFrames = targetFrames + (targetFrames / 2).coerceAtLeast((30 * framesPerMs).toLong())
-    private val panicFrames = targetFrames + (180 * framesPerMs).toLong()
+    // Adaptive mode owns a floor-to-ceiling target band that the receiver
+    // watchdog drives from underrun telemetry; fixed mode pins one target.
+    private val targetFloorMs: Int = if (adaptive) 20 else maxOf(15, targetLatencyMs)
+    private val targetCeilingMs: Int = if (adaptive) 80 else maxOf(15, targetLatencyMs)
+    private var currentTargetMs: Int = targetFloorMs
+    private var targetFrames: Long = (currentTargetMs * framesPerMs).toLong()
+    private var highFrames: Long = targetFrames + (targetFrames / 2).coerceAtLeast((30 * framesPerMs).toLong())
+    private var panicFrames: Long = targetFrames + (180 * framesPerMs).toLong()
+
+    fun targetMs(): Int = currentTargetMs
+
+    /**
+     * Shift the playout target by [deltaMs] inside the allowed band. Returns
+     * true when the target actually moved (the caller logs and timestamps
+     * it). Fixed-mode governors have floor == ceiling and never move.
+     */
+    fun retargetMs(deltaMs: Int): Boolean {
+        val next = (currentTargetMs + deltaMs).coerceIn(targetFloorMs, targetCeilingMs)
+        if (next == currentTargetMs) return false
+        currentTargetMs = next
+        targetFrames = (currentTargetMs * framesPerMs).toLong()
+        highFrames = targetFrames + (targetFrames / 2).coerceAtLeast((30 * framesPerMs).toLong())
+        panicFrames = targetFrames + (180 * framesPerMs).toLong()
+        return true
+    }
 
     // Uno scarto ogni tanto e' impercettibile, una raffica no: la correzione fine la
     // fa il playback rate, il drop interviene solo se l'arretrato resta alto.

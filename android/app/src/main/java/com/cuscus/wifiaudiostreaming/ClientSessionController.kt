@@ -275,6 +275,7 @@ object ClientSessionController {
                 networkInterfaceName = currentSettings.networkInterface,
                 connectionSoundEnabled = currentSettings.connectionSoundEnabled,
                 disconnectionSoundEnabled = currentSettings.disconnectionSoundEnabled,
+                adaptiveLatency = currentSettings.adaptiveLatency,
                 announceConnectSound = announceConnectSound,
                 onServerDisconnected = disconnected@{
                     attemptInFlight = false

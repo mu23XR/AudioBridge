@@ -2215,6 +2215,7 @@ object NetworkManager {
         networkInterfaceName: String = "Auto",
         connectionSoundEnabled: Boolean = true,
         disconnectionSoundEnabled: Boolean = true,
+        adaptiveLatency: Boolean = false,
         // Reconnects of an already-announced logical session must not replay
         // the full chime: rapid drop-reconnect cycles used to ring twice.
         announceConnectSound: Boolean = true,
@@ -2315,12 +2316,18 @@ object NetworkManager {
                             withContext(Dispatchers.Main) { onServerDisconnected?.invoke() }
                             return@launch
                         }
-                        val effectiveLatencyMs = UsbLink.effectiveLatencyMs(advSettings.latencyMs)
+                        // Adaptive mode starts at the 20 ms floor and lets the
+                        // watchdog lift the target on underrun evidence; fixed
+                        // mode plays the configured target as-is.
+                        val effectiveLatencyMs = if (adaptiveLatency) 20 else UsbLink.effectiveLatencyMs(advSettings.latencyMs)
                         val targetLatencyFrames = effectiveLatencyMs * sampleRate / 1000
                         // Headroom: la coda di AudioTrack deve poter assorbire un burst senza
                         // bloccare la write, altrimenti l'arretrato migra nel socket dove non e'
                         // misurabile. Il livello reale lo tiene PlayoutGovernor scartando pacchetti.
-                        val headroomFrames = sampleRate * 80 / 1000
+                        // In adaptive mode the governor may lift the target up to 80 ms,
+                        // so the track buffer is planned for that ceiling.
+                        val headroomMs = if (adaptiveLatency) 140 else 80
+                        val headroomFrames = sampleRate * headroomMs / 1000
                         var playbackBufferSize = minBuffer.coerceAtLeast((targetLatencyFrames + headroomFrames) * frameSize)
                         if (playbackBufferSize % frameSize != 0) {
                             playbackBufferSize += frameSize - (playbackBufferSize % frameSize)
@@ -2350,7 +2357,7 @@ object NetworkManager {
                         // Mutable so the playback watchdog can rebuild the track
                         // in place without tearing down the whole session.
                         var playout = PlayoutGovernor(
-                            audioTrack!!, sampleRate, frameSize, effectiveLatencyMs, TAG
+                            audioTrack!!, sampleRate, frameSize, effectiveLatencyMs, TAG, adaptiveLatency
                         )
 
                         // Startup preroll: half of the playout target. 20 ms
@@ -2551,7 +2558,7 @@ object NetworkManager {
                                 val newTrack = trackBuilder.build()
                                 registerClientPlaybackTrack(newTrack)
                                 val newGovernor = PlayoutGovernor(
-                                    newTrack, sampleRate, frameSize, effectiveLatencyMs, TAG
+                                    newTrack, sampleRate, frameSize, effectiveLatencyMs, TAG, adaptiveLatency
                                 )
                                 val rebornPrerollMs = effectiveLatencyMs / 2
                                 val rebornPrerollLen = (sampleRate * frameSize * rebornPrerollMs / 1000)
@@ -2574,6 +2581,7 @@ object NetworkManager {
                         val watchdogJob = launch {
                             var lastUnderruns = 0
                             var underrunStormStreak = 0
+                            var lastTargetChangeAt = 0L
                             while (isActive) {
                                 delay(1000)
                                 val now = System.currentTimeMillis()
@@ -2592,26 +2600,51 @@ object NetworkManager {
                                 val underrunDelta = underrunCount - lastUnderruns
                                 lastUnderruns = underrunCount
                                 val audioFlowing = now - lastAudioAt.get() < 3000
-                                underrunStormStreak = if (audioFlowing && underrunDelta > 200) underrunStormStreak + 1 else 0
                                 val stalledMs = playout.stalledForMs()
-                                if (rebuildRequested) {
+
+                                if (adaptiveLatency) {
+                                    // Buffer too small surfaces as underruns while
+                                    // PCM flows: lift the playout target; a clean
+                                    // stretch lets it decay back toward the floor.
+                                    // A stalled head with queued PCM is a wedged
+                                    // track, not a small buffer, so it still
+                                    // triggers a rebuild below.
+                                    underrunStormStreak = if (audioFlowing && underrunDelta > 100) underrunStormStreak + 1 else 0
+                                    if (underrunStormStreak >= 2) {
+                                        underrunStormStreak = 0
+                                        if (playout.retargetMs(10)) {
+                                            lastTargetChangeAt = now
+                                            Log.w(TAG, "[PLAYOUT][ADAPTIVE] underrun delta=$underrunDelta; target -> ${playout.targetMs()} ms")
+                                        }
+                                    } else if (lastTargetChangeAt > 0 && now - lastTargetChangeAt >= 30_000L && playout.retargetMs(-5)) {
+                                        lastTargetChangeAt = now
+                                        Log.i(TAG, "[PLAYOUT][ADAPTIVE] clean stretch; target -> ${playout.targetMs()} ms")
+                                    }
+                                    if (stalledMs >= 5000 && !rebuildRequested) {
+                                        Log.w(TAG, "[PLAYOUT][WATCHDOG] requesting track rebuild (stalledMs=$stalledMs)")
+                                        rebuildRequested = true
+                                        rebuildRequestedAt = now
+                                    }
+                                } else {
+                                    underrunStormStreak = if (audioFlowing && underrunDelta > 200) underrunStormStreak + 1 else 0
+                                    if ((underrunStormStreak >= 3 || stalledMs >= 5000) && !rebuildRequested) {
+                                        Log.w(
+                                            TAG,
+                                            "[PLAYOUT][WATCHDOG] requesting track rebuild " +
+                                                "(underrunDelta=$underrunDelta streak=$underrunStormStreak stalledMs=$stalledMs)"
+                                        )
+                                        rebuildRequested = true
+                                        rebuildRequestedAt = now
+                                    }
+                                }
+                                if (rebuildRequested && now - rebuildRequestedAt > 5000) {
                                     // Not consumed by the receive loop within 5 s:
                                     // the loop is wedged; only a full session
                                     // rebuild (through the normal disconnect path)
                                     // can recover it.
-                                    if (now - rebuildRequestedAt > 5000) {
-                                        markDisconnect("PLAYBACK_WATCHDOG_UNACKNOWLEDGED")
-                                        transportJob.cancel()
-                                        break
-                                    }
-                                } else if (underrunStormStreak >= 3 || stalledMs >= 5000) {
-                                    Log.w(
-                                        TAG,
-                                        "[PLAYOUT][WATCHDOG] requesting track rebuild " +
-                                            "(underrunDelta=$underrunDelta streak=$underrunStormStreak stalledMs=$stalledMs)"
-                                    )
-                                    rebuildRequested = true
-                                    rebuildRequestedAt = now
+                                    markDisconnect("PLAYBACK_WATCHDOG_UNACKNOWLEDGED")
+                                    transportJob.cancel()
+                                    break
                                 }
                             }
                         }
@@ -2901,12 +2934,13 @@ object NetworkManager {
                             withContext(Dispatchers.Main) { onServerDisconnected?.invoke() }
                             return@launch
                         }
-                        val mcLatencyMs = UsbLink.effectiveLatencyMs(
-                            SettingsDataStore(context).settingsFlow.first().latencyMs
-                        )
+                        val mcSettings = SettingsDataStore(context).settingsFlow.first()
+                        val mcAdaptive = mcSettings.adaptiveLatency
+                        val mcLatencyMs = if (mcAdaptive) 20 else UsbLink.effectiveLatencyMs(mcSettings.latencyMs)
                         val frameSize = if (channelConfig == "STEREO") 4 else 2
+                        val mcHeadroomMs = if (mcAdaptive) 140 else 80
                         var playbackBufferSize = minBuffer.coerceAtLeast(
-                            (mcLatencyMs + 80) * sampleRate / 1000 * frameSize
+                            (mcLatencyMs + mcHeadroomMs) * sampleRate / 1000 * frameSize
                         )
 
                         if (playbackBufferSize % frameSize != 0) {
@@ -2933,7 +2967,7 @@ object NetworkManager {
                         registerClientPlaybackTrack(audioTrack!!)
 
                         val mcPlayout = PlayoutGovernor(
-                            audioTrack, sampleRate, frameSize, mcLatencyMs, TAG
+                            audioTrack, sampleRate, frameSize, mcLatencyMs, TAG, mcAdaptive
                         )
                         // Same preroll policy as the unicast path: half of the
                         // playout target, so higher buffers start protected.
