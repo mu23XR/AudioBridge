@@ -107,8 +107,17 @@
     <string name="settings_group_performance">Prestazioni e Latenza</string>
     <string name="settings_item_buffer_size_title">Dimensione Buffer</string>
     <string name="settings_item_buffer_size_desc">Un buffer piccolo riduce la latenza ma può causare interruzioni</string>
-    <string name="settings_item_latency_title">Latenza</string>
-    <string name="settings_item_latency_desc">Profondità del buffer di riproduzione. Più alta = più stabile, più ritardo.</string>
+    <string name="settings_item_latency_title">Buffer di riproduzione (ricevitore)</string>
+    <string name="settings_item_latency_desc">Obiettivo del buffer di riproduzione lato ricevitore. Vale solo quando questo dispositivo riceve; non viene mai sincronizzato con il mittente. Più alto = più stabile, più ritardo.</string>
+    <string name="settings_latency_preset_title">Preset di latenza</string>
+    <string name="settings_latency_preset_desc">Scelta rapida; il cursore qui sotto accetta qualsiasi valore da 20 a 400 ms.</string>
+    <string name="settings_latency_preset_fast">Reattivo (20 ms)</string>
+    <string name="settings_latency_preset_balanced">Equilibrato (40 ms)</string>
+    <string name="settings_latency_preset_steady">Stabile (60 ms)</string>
+    <string name="settings_latency_preset_custom_fmt">Personalizzato: %1$d ms</string>
+    <string name="settings_latency_edit_hint">Valore in ms (20–400)</string>
+    <string name="settings_latency_edit_invalid">Inserisci un intero tra 20 e 400</string>
+    <string name="ok">OK</string>
     <string name="settings_group_advanced">Avanzate</string>
     <string name="settings_item_packet_size_title">Dimensione pacchetto</string>
     <string name="settings_item_packet_size_desc">Byte di audio per pacchetto di rete (stream e microfono). Più basso = pacchetti più piccoli, es. per microcontrollori.</string>

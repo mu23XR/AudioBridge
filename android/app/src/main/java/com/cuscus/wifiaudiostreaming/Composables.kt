@@ -871,16 +871,93 @@ fun SettingsScreenContent(
                         ),
                         onOptionSelected = onBufferSizeChange
                     )
+                    // WFAS latencyMs is a per-device receiver playout target:
+                    // NetworkManager reads it only when THIS device builds its
+                    // AudioTrack as a WFAS client, and it never travels to the
+                    // peer. The preset/label wording must keep saying that.
+                    val latencyPresetLabel = when (appSettings.latencyMs) {
+                        20 -> stringResource(R.string.settings_latency_preset_fast)
+                        40 -> stringResource(R.string.settings_latency_preset_balanced)
+                        60 -> stringResource(R.string.settings_latency_preset_steady)
+                        else -> stringResource(R.string.settings_latency_preset_custom_fmt, appSettings.latencyMs)
+                    }
+                    SettingsSelectionItem(
+                        title = stringResource(R.string.settings_latency_preset_title),
+                        description = stringResource(R.string.settings_latency_preset_desc),
+                        icon = Icons.Outlined.Speed,
+                        currentValue = latencyPresetLabel,
+                        options = linkedMapOf(
+                            stringResource(R.string.settings_latency_preset_fast) to 20,
+                            stringResource(R.string.settings_latency_preset_balanced) to 40,
+                            stringResource(R.string.settings_latency_preset_steady) to 60
+                        ),
+                        onOptionSelected = { onAdvancedAudioChange(it, appSettings.maxPayloadBytes) }
+                    )
+                    var showLatencyEditor by remember { mutableStateOf(false) }
                     SettingsSliderItem(
                         title = stringResource(R.string.settings_item_latency_title),
                         description = stringResource(R.string.settings_item_latency_desc),
                         icon = Icons.Outlined.Timer,
                         value = appSettings.latencyMs.toFloat(),
                         range = 20f..400f,
-                        steps = ((400f - 40f) / 20f).toInt() - 1,
+                        // Continuous drag: the old step grid was computed for a
+                        // 40 ms floor while the range started at 20, which
+                        // produced the infamous 21 ms notches.
+                        steps = 0,
                         valueSuffix = "ms",
-                        onValueChange = { onAdvancedAudioChange(it.toInt(), appSettings.maxPayloadBytes) }
+                        onValueChange = { onAdvancedAudioChange(it.toInt(), appSettings.maxPayloadBytes) },
+                        onValueClick = { showLatencyEditor = true }
                     )
+                    if (showLatencyEditor) {
+                        var editedValue by remember(showLatencyEditor) {
+                            mutableStateOf(appSettings.latencyMs.toString())
+                        }
+                        var invalidInput by remember(showLatencyEditor) { mutableStateOf(false) }
+                        AlertDialog(
+                            onDismissRequest = { showLatencyEditor = false },
+                            title = { Text(stringResource(R.string.settings_item_latency_title)) },
+                            text = {
+                                Column {
+                                    OutlinedTextField(
+                                        value = editedValue,
+                                        onValueChange = { input ->
+                                            editedValue = input.filter { it.isDigit() }.take(3)
+                                            invalidInput = false
+                                        },
+                                        label = { Text(stringResource(R.string.settings_latency_edit_hint)) },
+                                        isError = invalidInput,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        singleLine = true
+                                    )
+                                    if (invalidInput) {
+                                        Text(
+                                            text = stringResource(R.string.settings_latency_edit_invalid),
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    val parsed = editedValue.toIntOrNull()
+                                    if (parsed == null || parsed !in 20..400) {
+                                        invalidInput = true
+                                    } else {
+                                        onAdvancedAudioChange(parsed, appSettings.maxPayloadBytes)
+                                        showLatencyEditor = false
+                                    }
+                                }) {
+                                    Text(stringResource(R.string.ok))
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showLatencyEditor = false }) {
+                                    Text(stringResource(R.string.cancel))
+                                }
+                            }
+                        )
+                    }
                     SettingsSliderItem(
                         title = stringResource(R.string.settings_item_packet_size_title),
                         description = stringResource(R.string.settings_item_packet_size_desc),
@@ -1873,7 +1950,8 @@ fun SettingsSliderItem(
     range: ClosedFloatingPointRange<Float>,
     steps: Int,
     valueSuffix: String = "B",
-    onValueChange: (Float) -> Unit
+    onValueChange: (Float) -> Unit,
+    onValueClick: (() -> Unit)? = null
 ) {
     var sliderValue by remember(value) { mutableFloatStateOf(value) }
     val appHaptics = rememberAppHaptics()
@@ -1902,7 +1980,12 @@ fun SettingsSliderItem(
                 text = "${sliderValue.toInt()} $valueSuffix",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Light
+                fontWeight = FontWeight.Light,
+                modifier = if (onValueClick != null) {
+                    Modifier.clickable { onValueClick() }
+                } else {
+                    Modifier
+                }
             )
         }
 

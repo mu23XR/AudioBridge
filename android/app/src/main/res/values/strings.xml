@@ -51,8 +51,17 @@
     <string name="settings_group_performance">Performance</string>
     <string name="settings_item_buffer_size_title">Buffer Size</string>
     <string name="settings_item_buffer_size_desc">A smaller buffer reduces latency but may cause dropouts</string>
-    <string name="settings_item_latency_title">Latency</string>
-    <string name="settings_item_latency_desc">Playback buffer depth. Higher = more stable, more delay.</string>
+    <string name="settings_item_latency_title">Playback buffer (receiver)</string>
+    <string name="settings_item_latency_desc">Receiver-side playout buffer. Applies only when this device receives; never synced to the sender. Higher = steadier, more delay.</string>
+    <string name="settings_latency_preset_title">Latency preset</string>
+    <string name="settings_latency_preset_desc">Quick pick; the slider below accepts any value from 20 to 400 ms.</string>
+    <string name="settings_latency_preset_fast">Low latency (20 ms)</string>
+    <string name="settings_latency_preset_balanced">Balanced (40 ms)</string>
+    <string name="settings_latency_preset_steady">Steady (60 ms)</string>
+    <string name="settings_latency_preset_custom_fmt">Custom: %1$d ms</string>
+    <string name="settings_latency_edit_hint">Value in ms (20–400)</string>
+    <string name="settings_latency_edit_invalid">Enter an integer between 20 and 400</string>
+    <string name="ok">OK</string>
     <string name="settings_group_advanced">Advanced</string>
     <string name="settings_item_packet_size_title">Packet size</string>
     <string name="settings_item_packet_size_desc">Bytes of audio per network packet (stream and mic). Lower = smaller packets, e.g. for microcontrollers.</string>

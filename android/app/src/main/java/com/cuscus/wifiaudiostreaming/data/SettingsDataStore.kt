@@ -169,7 +169,9 @@ data class AppSettings(
     val disconnectionSoundEnabled: Boolean = true,
     val lastSeenChangelogVersion: String = "",
     val autoUpdateCheckEnabled: Boolean = true,
-    val latencyMs: Int = 20,
+    // Balanced 40 ms default: 20 ms burned its whole margin against measured
+    // Wi-Fi jitter (9-10 ms average, 29 ms peaks) and underrun-stormed.
+    val latencyMs: Int = 40,
     val maxPayloadBytes: Int = 1390,
     val securityMode: String = "OFF",
     val authKey: String = "",
@@ -398,7 +400,7 @@ class SettingsDataStore(context: Context) {
             noiseReductionStrength = preferences[PreferencesKeys.NOISE_REDUCTION_STRENGTH] ?: 50,
             lastSeenChangelogVersion = preferences[PreferencesKeys.LAST_SEEN_CHANGELOG_VERSION] ?: "",
             autoUpdateCheckEnabled = preferences[PreferencesKeys.AUTO_UPDATE_CHECK_ENABLED] ?: true,
-            latencyMs = preferences[PreferencesKeys.LATENCY_MS] ?: 20,
+            latencyMs = preferences[PreferencesKeys.LATENCY_MS] ?: 40,
             maxPayloadBytes = preferences[PreferencesKeys.MAX_PAYLOAD] ?: 1390,
             securityMode = preferences[PreferencesKeys.SECURITY_MODE] ?: "OFF",
             authKey = authKeys.authKey,
@@ -526,7 +528,9 @@ class SettingsDataStore(context: Context) {
 
     suspend fun saveAdvancedAudio(latencyMs: Int, maxPayloadBytes: Int) {
         dataStore.edit { preferences ->
-            preferences[PreferencesKeys.LATENCY_MS] = latencyMs
+            // 20..400 matches the settings slider/input; PlayoutGovernor still
+            // enforces its own 15 ms floor downstream.
+            preferences[PreferencesKeys.LATENCY_MS] = latencyMs.coerceIn(20, 400)
             preferences[PreferencesKeys.MAX_PAYLOAD] = maxPayloadBytes
         }
     }
