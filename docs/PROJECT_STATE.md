@@ -98,8 +98,17 @@ AudioPolicy and exit.
 - Shizuku silence is not a disconnect condition.
 - During capture silence, the sender emits a header-only liveness packet once per second.
 - Receiver liveness is independent of PCM availability.
-- New Android installs default to 20 ms WFAS target latency.
-- Receiver startup preroll is 10 ms; excessive AudioTrack backlog is corrected aggressively.
+- New Android installs default to 40 ms WFAS target latency; settings offer 20/40/60 ms presets plus a continuous 20–400 ms slider with direct numeric entry.
+- Receiver startup preroll is half of the playout target; excessive AudioTrack backlog is corrected aggressively.
+
+## test.17 latency/stability changes (2026-10-02, branch feat/test17-latency-stability)
+
+Implemented on-device fixes for the double connect chime and the underrun-driven playback death; all pending real-device acceptance:
+
+- Latency setting relabeled as the receiver-side playout buffer (WFAS `latencyMs` is per-device, never synced to the peer; the tablet→phone path uses the phone's value). Slider is now continuous (the previous fixed grid mixed a 40 ms floor with a 20 ms range and produced 21.1 ms notches), and the value text opens a numeric entry dialog clamped to 20–400 ms.
+- Startup preroll is now half of the playout target (20 ms keeps the historical 10 ms) on both unicast and multicast receivers, so higher buffers start protected instead of burning underruns at 10 ms.
+- Receiver playback watchdog (unicast): every second it samples `AudioTrack.underrunCount` and `PlayoutGovernor.stalledForMs()`. An underrun storm (>200/s for 3 s while audio flows) or a 5 s playback-head stall with queued PCM requests an in-place track rebuild (release + rebuild `AudioTrack` and a fresh governor, re-prerolled); if the receive loop cannot consume the request within 5 s, the session is torn down through the normal disconnect path so reconnect logic takes over.
+- Reconnects of an already-announced logical session no longer replay the full connection chime (`announceConnectSound=false` for `reconnectAttempt > 0`); rapid drop-reconnect cycles therefore cannot ring twice. The disconnect chime gating is unchanged.
 
 ## Next validation build: test.15
 
