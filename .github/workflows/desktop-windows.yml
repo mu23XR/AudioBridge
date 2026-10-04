@@ -1,9 +1,14 @@
-name: Build Desktop Windows
+name: Validate Desktop Windows
 
 on:
   workflow_dispatch:
   push:
     branches: [ "main" ]
+    paths:
+      - "desktop/**"
+      - "WFAS_PROTOCOL.md"
+      - ".github/workflows/desktop-windows.yml"
+  pull_request:
     paths:
       - "desktop/**"
       - "WFAS_PROTOCOL.md"
@@ -23,7 +28,6 @@ defaults:
 jobs:
   windows:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,14 +43,8 @@ jobs:
         with:
           validate-wrappers: true
 
+      - name: Run Desktop checks
+        run: .\gradlew.bat check
+
       - name: Build Windows portable package
         run: .\gradlew.bat createReleaseDistributable packagePortableArchives
-
-      - name: Upload Windows package
-        uses: actions/upload-artifact@v4
-        with:
-          name: AudioBridge-Desktop-Windows
-          path: |
-            desktop/build/packages/*.zip
-            desktop/build/compose/binaries/main-release/app/**
-          if-no-files-found: error
