@@ -66,14 +66,19 @@ Desktop 代码已经并入本仓库，后续在这里直接维护，不再拆成
 
 Android 与 Windows Desktop 共用同一个 GitHub Releases 页面。
 
-在仓库创建一个 `v*` 标签（例如 `v1.2.1`）后，统一发布流水线会：
+后续版本统一采用 **Pre-release → Release 原地转正**：
 
-1. 运行 Android 单元测试并构建带固定签名的 APK。
-2. 构建 Windows Desktop 便携 ZIP。
-3. 使用同一个版本号生成两端产物。
-4. 将 APK 与 Windows ZIP 一起发布到同一个 GitHub Release。
+1. 在 Actions 的发布工作流中选择 `prepare`，填写最终版本号（例如 `1.4.0`）和源码引用。
+2. GitHub Actions 在固定环境中测试、编译并签名 Android APK，同时构建 Windows 便携 ZIP。
+3. 两端产物**直接上传到同一个 GitHub Pre-release**，不再用 Actions Artifact 长期保存或中转。
+4. 测试通过后，在同一个发布工作流选择 `promote`，将现有 Pre-release 直接转为正式 Release；**不会重新编译，也不会替换原二进制文件**。
+5. 如果候选版有问题，不覆盖已有版本，修复后使用新的版本号重新发布。
 
-这样 Android 与 Desktop 的应用内更新检查都会指向同一个版本源。
+旧 Pre-release 和正式 Release 均保留，不做自动清理。
+
+### Stable #153 签名说明
+
+历史 `AudioBridge Stable 153` 使用一套**独立历史签名**。它仅用于保留和识别该历史版本，后续测试版和正式版均不再沿用这套签名，也不以它作为未来升级/发布基线。Stable #153 的签名链和相关历史资源单独保留。
 
 ## 构建
 
