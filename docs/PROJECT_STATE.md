@@ -2,6 +2,24 @@
 
 Last governance refresh: 2026-09-29
 
+## Active implementation (2026-10-04)
+
+`fix/test17-adaptive-notifications` retains the local test.17 work and implements Issues #14/#15/#16: playback health/recovery corrections, selectable adaptive versus continuous manual latency, consolidated runtime/mode controls, and independent test identities. Debug is `.debug`; signed preview is `.test` with the existing permanent signer; stable release keeps the permanent package. test.16 need not be uninstalled. New regression tests and debug builds have passed; lint reports 11 errors and has not passed. Full real-device longevity and notification acceptance remain pending. See `docs/handoffs/2026-10-04-test17-implementation.md`.
+
+After plan review the user authorized implementation. Playback/latency/notification corrections are committed as b3d64d0; isolated same-signer preview/channel selection and lint corrections as df460af. 39 unit tests and lintDebug pass (0 errors, 230 warnings, 20 hints); assemblePreview and lintVitalPreview also passed. APK verification and real-device acceptance continue. The earlier local debug attempt was canceled, and neither installed test.16 has been replaced.
+
+Issue #17 tracks test.16 stable promotion and the independent same-signer preview channel. `release/test16-stable` is isolated at test.16 source @60137ef with release-flow-only commit 18ea088; v1.3.1 was published by release.yml run37181009171 after Android/Windows/governance/publish jobs all succeeded. The baseline retains reported long-run/OEM/VPN limitations; open runtime Issues remain open. Both device packages were rechecked at test.16, and phone wireless ADB reconnected at 192.168.10.3:41947. GitHub has no test.13 Release; user authorized historical archive upload and download verification before deleting local duplicates. Upload waits for GitHub browser login, and both APKs remain. Independent preview update selection excludes older permanent-package test assets and stable releases; private-key backup in the workspace root is verified, never tracked.
+
+## Latest device diagnosis (2026-10-04)
+
+Both real devices still run test.16 (609301952). The receiver phone was force-stopped by HyperOS/MIUI `AutoPowerKill` at 03:41:03 CST; system logs and ApplicationExitInfo agree, and its process/service are absent with the package stopped. The sender tablet remains alive after its 02:26 SEND restart. Its separate low-importance mode-control notification being folded into more notifications does not mean its foreground capture service stopped. The user places the earlier both-roles-OFF event between 01:00 and 02:30, followed by manual SEND/RECEIVE recovery; its cause remains unconfirmed because relevant app logs have rotated. It must be distinguished from the later 03:41 receiver force-stop.
+
+Local `feat/test17-latency-stability` @ 46490fd is seven commits ahead of fetched `origin/fix/android-test15-stability` @ 54a416f, remains unpublished, and is not installed on these devices. Its playback watchdog/adaptive buffer changes do not address an OEM force-stop. See `docs/handoffs/2026-10-04-runtime-exit-diagnosis.md` for evidence, comparison and follow-up boundaries.
+
+User clarification: the 02:26 SEND/RECEIVE actions followed the original disconnection very shortly. Investigate the minutes immediately preceding those recovery actions; service restarts caused by the actions are not evidence of the original failure.
+
+Local test.17 static review (2026-10-04) recommends retaining the branch, but not releasing it as-is: playback rebuild failures are ignored, the 500 ms recovery resets can mask the new 5 s stall escalation, existing users are implicitly switched to adaptive mode, adaptive decay does not measure a clean interval, multicast has no adaptive driver, and concurrent playback state needs coherent ownership. Notification consolidation can be an independent change on this branch. Current compile/test rerun was blocked before execution by a Gradle loopback-connection error. Details: `docs/handoffs/2026-10-04-test17-code-review.md`.
+
 ## Repository
 
 - Repository: `mu23XR/AudioBridge`

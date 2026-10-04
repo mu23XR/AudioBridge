@@ -10,6 +10,8 @@ Every pull request that changes relevant files should run:
 
 ## Android manual regression checklist
 
+For parallel testing, keep the existing test.16/stable installation. Local debug uses `io.github.mu23xr.audiobridge.debug`; signed CI preview uses `io.github.mu23xr.audiobridge.test`; both are labeled AudioBridge Test. Permissions, settings and Shizuku access must be granted separately. Stop the existing app's active transmission before starting a test sender; do not run two captures on the same device. Confirm the permanent package/version remains installed before and after testing. Verify adaptive/manual choice, exact numeric entry, reconnect-to-apply behavior, and one mode-control/streaming notification during WFAS operation; tap the runtime notification to adjust volume.
+
 For changes touching runtime/services/audio:
 
 1. Start SEND using Shizuku.
