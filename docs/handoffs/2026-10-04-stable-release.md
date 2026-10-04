@@ -6,4 +6,4 @@
 
 工具 create_worktree 因当前任务 cwd 在仓库外返回 Not a git repository，因此用 git worktree add 在用户工作区内建立 stable-source；未改变原工作区分支或已有修改。test.13 GitHub tag Release 返回 404，完整 Release 列表无 test.13，本地旧 APK 按用户条件保留。
 
-本地签名已通过前轮核验，私钥不进入此分支。正式发布仍由 GitHub release.yml 执行，不上传本地手签产物。CI/实际发布结果待记录。
+本地签名已通过前轮核验，私钥不进入此分支。正式发布由 GitHub release.yml 执行，不上传本地手签产物。run37181009171 的 Android、Windows、governance 和 publish 四项均成功，v1.3.1 已发布为非 prerelease： https://github.com/mu23XR/AudioBridge/releases/tag/v1.3.1 。APK digest 2a824c18fd8effe3619aba785c8abc70afddf61b39fe25f357a20153f1ef0c98。正式 tag 保持 18ea088，不为了写后续交接而重打标签。
