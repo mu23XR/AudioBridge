@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
+import org.json.JSONArray
 
 object UpdateChecker {
 
@@ -19,8 +20,6 @@ object UpdateChecker {
         data class Ahead(val current: String, val latest: String) : Result()
     }
 
-    private val TAG_RX = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"")
-
     fun currentVersion(context: Context): String =
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
@@ -28,7 +27,8 @@ object UpdateChecker {
 
     suspend fun check(context: Context, timeoutMs: Int = 5000): Result = withContext(Dispatchers.IO) {
         try {
-            val conn = (URL("https://api.github.com/repos/$REPO/releases/latest")
+            val preview = context.packageName.endsWith(".test") || context.packageName.endsWith(".debug")
+            val conn = (URL("https://api.github.com/repos/$REPO/releases?per_page=100")
                 .openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = timeoutMs
@@ -37,20 +37,30 @@ object UpdateChecker {
                 setRequestProperty("Accept", "application/vnd.github+json")
                 setRequestProperty("User-Agent", "WFAS-UpdateChecker")
             }
-            val code = conn.responseCode
-            if (code != 200) {
+            val body = try {
+                val code = conn.responseCode
+                if (code != 200) {
+                    return@withContext Result.Failed("HTTP $code")
+                }
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } finally {
                 conn.disconnect()
-                return@withContext Result.Failed("HTTP $code")
             }
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
-            val tag = TAG_RX.find(body)?.groupValues?.get(1)
-                ?: return@withContext Result.Failed("no release tag found")
-            val latest = normalize(tag)
-            val current = normalize(currentVersion(context))
+            val entries = JSONArray(body)
+            val releases = (0 until entries.length()).map { index ->
+                val entry = entries.getJSONObject(index)
+                val assets = entry.getJSONArray("assets")
+                ReleaseChannel.Published(entry.getString("tag_name"), entry.getString("html_url"),
+                    entry.getBoolean("prerelease"), entry.getBoolean("draft"),
+                    (0 until assets.length()).map { assets.getJSONObject(it).getString("name") })
+            }
+            val release = ReleaseChannel.select(releases, preview)
+                ?: return@withContext Result.Failed("No published release for this channel")
+            val latest = normalize(release.tag)
+            val current = normalize(currentVersion(context)).removeSuffix("-localdebug")
             val cmp = compareVersions(latest, current)
             when {
-                cmp > 0  -> Result.Available(current, latest, RELEASES_URL)
+                cmp > 0  -> Result.Available(current, latest, release.url)
                 cmp < 0  -> Result.Ahead(current, latest)
                 else     -> Result.UpToDate(current)
             }
@@ -63,14 +73,6 @@ object UpdateChecker {
         tag.trim().removePrefix("v").removePrefix("V").trim()
 
     fun compareVersions(a: String, b: String): Int {
-        val pa = a.split('.', '-', '+').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
-        val pb = b.split('.', '-', '+').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
-        val n = maxOf(pa.size, pb.size)
-        for (i in 0 until n) {
-            val x = pa.getOrElse(i) { 0 }
-            val y = pb.getOrElse(i) { 0 }
-            if (x != y) return x - y
-        }
-        return 0
+        return ReleaseChannel.compare(a, b)
     }
 }

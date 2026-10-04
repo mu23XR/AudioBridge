@@ -692,7 +692,7 @@ object ShizukuAudioBridgeManager {
         )
             .daemon(true)
             .processNameSuffix("audio_bridge")
-            .tag("wfas-audio-bridge")
+            .tag("${context.packageName}.audio_bridge")
             .debuggable(true)
             .version(USER_SERVICE_VERSION)
 

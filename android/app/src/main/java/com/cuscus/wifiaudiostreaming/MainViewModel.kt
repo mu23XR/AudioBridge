@@ -735,7 +735,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // A manual connect expresses a persistent user intent. The process-wide
     // controller owns reconnects; recreating this ViewModel must not cancel them.
-    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startClient(serverInfo: ServerInfo, presharedKey: String? = null) {
         RoleSelectionGate.selectReceiver()
         ClientSessionController.connect(

@@ -115,6 +115,9 @@ object ShellAudioBridgeMain {
         }
     }
 
+    // This entry point runs as shell uid 2000, outside the app permission context.
+    // AudioRecord creation below reports and propagates a system rejection.
+    @android.annotation.SuppressLint("MissingPermission")
     private fun runSession(
         socket: DatagramSocket,
         initialClient: InetSocketAddress,

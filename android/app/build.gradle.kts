@@ -51,6 +51,7 @@ android {
             // never requires uninstalling the permanent-signed app.
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-localdebug"
+            resValue("string", "app_name", "AudioBridge Test")
         }
         release {
             signingConfig = signingConfigs.getByName("audiobridgeRelease")
@@ -59,6 +60,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        create("preview") {
+            initWith(getByName("release"))
+            // Published tests use the permanent signer but an independent
+            // identity, so installing them never replaces the stable app.
+            applicationIdSuffix = ".test"
+            matchingFallbacks += listOf("release")
+            resValue("string", "app_name", "AudioBridge Test")
         }
     }
     compileOptions {
