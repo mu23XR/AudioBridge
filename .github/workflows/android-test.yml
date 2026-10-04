@@ -184,7 +184,7 @@ jobs:
         with:
           name: ${{ inputs.artifact_name || 'AudioBridge-Android-Preview' }}-${{ env.TEST_VERSION_NAME }}
           path: release-assets/*
-          retention-days: 3
+          retention-days: 1
           if-no-files-found: error
 
   publish:
