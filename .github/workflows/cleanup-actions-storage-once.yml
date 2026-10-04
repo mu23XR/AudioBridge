@@ -25,14 +25,8 @@ jobs:
           if printf '%s' "$BODY" | grep -Fq '独立历史签名'; then
             echo "Stable 153 signing note already present."
           else
-            {
-              printf '%s\n\n' "$BODY"
-              cat <<'EOF'
-## 签名说明
-
-此 Stable #153 使用**独立历史签名**，仅用于保留和识别该历史版本。后续 AudioBridge 的测试版与正式版**不再沿用此签名**，也不以它作为未来升级/发布的签名基线；Stable #153 的签名链单独保留。
-EOF
-            } > /tmp/stable-153-notes.md
+            printf '%s\n\n%s\n' "$BODY" '## 签名说明' > /tmp/stable-153-notes.md
+            printf '%s\n' '此 Stable #153 使用**独立历史签名**，仅用于保留和识别该历史版本。后续 AudioBridge 的测试版与正式版**不再沿用此签名**，也不以它作为未来升级/发布的签名基线；Stable #153 的签名链单独保留。' >> /tmp/stable-153-notes.md
             gh release edit "$LEGACY_TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/stable-153-notes.md
           fi
 
@@ -50,7 +44,7 @@ EOF
             echo "Deleting artifact $ID ($NAME, $SIZE bytes)"
             gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$ID"
           done < <(
-            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100"               --jq '.artifacts[] | [.id, .size_in_bytes, .name] | @tsv'
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq '.artifacts[] | [.id, .size_in_bytes, .name] | @tsv'
           )
           echo "Deleted artifacts: $COUNT"
           echo "Freed bytes: $TOTAL"
