@@ -49,3 +49,9 @@ Debug/preview/正式包的权限、配置与 Shizuku 授权独立。安装独立
 Windows 本机 JDK 21 的 Unix-domain 临时管道 connect 失败，最初 Gradle 无法建立回环。构建命令仅通过进程级 JAVA_TOOL_OPTIONS 设置不存在的 jdk.net.unixdomain.tmpdir（令监听器回退 TCP）和现有项目 out/java-tmp；没有更改系统/全局 Java 配置。Gradle home 使用已有 D:/apps/Dev/gradle-home，SDK 使用 D:/apps/Dev/android-sdk。新增依赖已按正常 Gradle 构建下载，未引入产品依赖。
 
 本轮还保留并更新设备诊断与评审文件，不将原始设备日志/APK提交到 Git。第一次双端关闭原因未确定，03:41 手机 AutoPowerKill 未解决；不能因新包编译通过关闭这些问题或直接把 test.16 推为 Stable。
+
+## 当前验收检查点（14:18 CST）
+
+签名 preview CI run37181977448 的 Android 构建/单测/lint/签名验证与上传、Windows、governance 全部 success，publish 按 publish=false 跳过。两设备测试前台服务已启动；用户已切换成手机 SEND、平板 RECEIVE。原正式包无运行服务，test.16 安装仍保留。手机通知101一条；平板通知201以及 OEM 自动生成的 silent-section 汇总一条，未见模式701，不能把系统汇总当成应用自行发布的第二条模式通知。
+
+先前手机 RECEIVE 短会话持续收到 PCM（AudioTrack 累计5598324帧），自适应从较低值上调到70ms；14:17:30用户停止该会话，随后交换角色。记录的是短会话有效 PCM 与模式切换证据，长时间无声恢复、锁屏/OEM退出、VPN和主观音质尚未验收。已询问用户当前平板是否有声，等待答复；未擅自变更播放内容/音量/角色。项目当前状态和签名文件清除已过期的“lint失败/等待登录/未产出签名预览”描述。未公开密钥或凭证，也未关闭运行问题。
