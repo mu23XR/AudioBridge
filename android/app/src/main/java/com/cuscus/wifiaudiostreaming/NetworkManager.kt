@@ -2544,23 +2544,38 @@ object NetworkManager {
                         // The receive loop owns the track and performs rebuilds;
                         // the watchdog coroutine below only requests them and
                         // escalates when the loop cannot even consume a request.
-                        var rebuildRequested = false
-                        var rebuildRequestedAt = 0L
+                        val rebuildRequestedAt = java.util.concurrent.atomic.AtomicLong(0L)
+                        val playbackHealth = PlaybackHealth(adaptiveLatency)
+                        val targetAdjustment = java.util.concurrent.atomic.AtomicInteger(0)
+                        data class PlaybackSnapshot(val sampledAt: Long, val underruns: Int,
+                            val stalledMs: Long, val failedRecoveries: Int)
+                        val playbackSnapshot = java.util.concurrent.atomic.AtomicReference(
+                            PlaybackSnapshot(android.os.SystemClock.elapsedRealtime(), 0, 0, 0)
+                        )
+                        fun publishPlaybackHealth() {
+                            val track = audioTrack ?: return
+                            playbackSnapshot.set(PlaybackSnapshot(android.os.SystemClock.elapsedRealtime(),
+                                track.underrunCount, playout.stalledForMs(), playout.recoveryFailures()))
+                        }
 
                         fun rebuildPlaybackTrack(reason: String): Boolean {
+                            var candidate: AudioTrack? = null
                             return try {
+                                val restoredTargetMs = playout.targetMs()
                                 Log.w(TAG, "[PLAYOUT][WATCHDOG] rebuilding playback track: $reason")
                                 unregisterClientPlaybackTrack(audioTrack)
                                 runCatching { audioTrack?.pause() }
                                 runCatching { audioTrack?.flush() }
                                 runCatching { audioTrack?.stop() }
                                 runCatching { audioTrack?.release() }
+                                audioTrack = null
                                 val newTrack = trackBuilder.build()
+                                candidate = newTrack
                                 registerClientPlaybackTrack(newTrack)
                                 val newGovernor = PlayoutGovernor(
-                                    newTrack, sampleRate, frameSize, effectiveLatencyMs, TAG, adaptiveLatency
+                                    newTrack, sampleRate, frameSize, restoredTargetMs, TAG, adaptiveLatency
                                 )
-                                val rebornPrerollMs = effectiveLatencyMs / 2
+                                val rebornPrerollMs = restoredTargetMs / 2
                                 val rebornPrerollLen = (sampleRate * frameSize * rebornPrerollMs / 1000)
                                     .coerceIn(0, playbackBufferSize - frameSize)
                                     .let { it - (it % frameSize) }
@@ -2570,18 +2585,18 @@ object NetworkManager {
                                 newTrack.play()
                                 audioTrack = newTrack
                                 playout = newGovernor
+                                publishPlaybackHealth()
                                 Log.i(TAG, "[PLAYOUT][WATCHDOG] playback track rebuilt")
                                 true
                             } catch (t: Throwable) {
+                                unregisterClientPlaybackTrack(candidate)
+                                runCatching { candidate?.release() }
                                 Log.e(TAG, "[PLAYOUT][WATCHDOG] track rebuild failed", t)
                                 false
                             }
                         }
 
                         val watchdogJob = launch {
-                            var lastUnderruns = 0
-                            var underrunStormStreak = 0
-                            var lastTargetChangeAt = 0L
                             while (isActive) {
                                 delay(1000)
                                 val now = System.currentTimeMillis()
@@ -2591,57 +2606,21 @@ object NetworkManager {
                                     transportJob.cancel()
                                     break
                                 }
-                                // Playback health, observed independently of the
-                                // receive loop: the loop itself may be wedged on
-                                // a dead track while packets keep piling up.
                                 if (!connectedSuccessfully) continue
-                                val track = audioTrack ?: continue
-                                val underrunCount = track.underrunCount
-                                val underrunDelta = underrunCount - lastUnderruns
-                                lastUnderruns = underrunCount
-                                val audioFlowing = now - lastAudioAt.get() < 3000
-                                val stalledMs = playout.stalledForMs()
-
-                                if (adaptiveLatency) {
-                                    // Buffer too small surfaces as underruns while
-                                    // PCM flows: lift the playout target; a clean
-                                    // stretch lets it decay back toward the floor.
-                                    // A stalled head with queued PCM is a wedged
-                                    // track, not a small buffer, so it still
-                                    // triggers a rebuild below.
-                                    underrunStormStreak = if (audioFlowing && underrunDelta > 100) underrunStormStreak + 1 else 0
-                                    if (underrunStormStreak >= 2) {
-                                        underrunStormStreak = 0
-                                        if (playout.retargetMs(10)) {
-                                            lastTargetChangeAt = now
-                                            Log.w(TAG, "[PLAYOUT][ADAPTIVE] underrun delta=$underrunDelta; target -> ${playout.targetMs()} ms")
-                                        }
-                                    } else if (lastTargetChangeAt > 0 && now - lastTargetChangeAt >= 30_000L && playout.retargetMs(-5)) {
-                                        lastTargetChangeAt = now
-                                        Log.i(TAG, "[PLAYOUT][ADAPTIVE] clean stretch; target -> ${playout.targetMs()} ms")
-                                    }
-                                    if (stalledMs >= 5000 && !rebuildRequested) {
-                                        Log.w(TAG, "[PLAYOUT][WATCHDOG] requesting track rebuild (stalledMs=$stalledMs)")
-                                        rebuildRequested = true
-                                        rebuildRequestedAt = now
-                                    }
-                                } else {
-                                    underrunStormStreak = if (audioFlowing && underrunDelta > 200) underrunStormStreak + 1 else 0
-                                    if ((underrunStormStreak >= 3 || stalledMs >= 5000) && !rebuildRequested) {
-                                        Log.w(
-                                            TAG,
-                                            "[PLAYOUT][WATCHDOG] requesting track rebuild " +
-                                                "(underrunDelta=$underrunDelta streak=$underrunStormStreak stalledMs=$stalledMs)"
-                                        )
-                                        rebuildRequested = true
-                                        rebuildRequestedAt = now
-                                    }
+                                val monotonicNow = android.os.SystemClock.elapsedRealtime()
+                                // The watchdog never touches AudioTrack or mutable governor
+                                // state: a stuck vendor write must not block this observer.
+                                val snapshot = playbackSnapshot.get()
+                                val decision = playbackHealth.sample(monotonicNow, snapshot.underruns,
+                                    now - lastAudioAt.get() < 3000,
+                                    snapshot.stalledMs, snapshot.failedRecoveries)
+                                if (decision.targetDeltaMs != 0) targetAdjustment.set(decision.targetDeltaMs)
+                                val loopStalled = monotonicNow - snapshot.sampledAt > 5000
+                                if ((decision.rebuild || loopStalled) && rebuildRequestedAt.compareAndSet(0L, monotonicNow)) {
+                                    Log.w(TAG, "[PLAYOUT][WATCHDOG] requesting track rebuild")
                                 }
-                                if (rebuildRequested && now - rebuildRequestedAt > 5000) {
-                                    // Not consumed by the receive loop within 5 s:
-                                    // the loop is wedged; only a full session
-                                    // rebuild (through the normal disconnect path)
-                                    // can recover it.
+                                val requestedAt = rebuildRequestedAt.get()
+                                if (requestedAt != 0L && monotonicNow - requestedAt > 5000) {
                                     markDisconnect("PLAYBACK_WATCHDOG_UNACKNOWLEDGED")
                                     transportJob.cancel()
                                     break
@@ -2829,10 +2808,18 @@ object NetworkManager {
 
                         try {
                             while (isActive) {
-                                if (rebuildRequested) {
-                                    rebuildRequested = false
-                                    rebuildPlaybackTrack("watchdog request")
+                                if (rebuildRequestedAt.get() != 0L) {
+                                    if (!rebuildPlaybackTrack("watchdog request")) {
+                                        markDisconnect("PLAYBACK_REBUILD_FAILED")
+                                        throw java.io.IOException("Playback track rebuild failed")
+                                    }
+                                    rebuildRequestedAt.set(0L)
                                 }
+                                val adjustment = targetAdjustment.getAndSet(0)
+                                if (adjustment != 0 && playout.retargetMs(adjustment)) {
+                                    Log.i(TAG, "[PLAYOUT][ADAPTIVE] target -> ${playout.targetMs()} ms")
+                                }
+                                publishPlaybackHealth()
                                 val audio = ArrayList<ByteArray>()
                                 var byeReceived = false
                                 var dg: Datagram? = socket.receive()
@@ -2969,6 +2956,8 @@ object NetworkManager {
                         val mcPlayout = PlayoutGovernor(
                             audioTrack, sampleRate, frameSize, mcLatencyMs, TAG, mcAdaptive
                         )
+                        val mcHealth = PlaybackHealth(mcAdaptive)
+                        var mcHealthSampleAt = android.os.SystemClock.elapsedRealtime()
                         // Same preroll policy as the unicast path: half of the
                         // playout target, so higher buffers start protected.
                         val mcPrerollLen = (sampleRate * frameSize * (mcLatencyMs / 2) / 1000)
@@ -3258,6 +3247,19 @@ object NetworkManager {
                                 playMc(a)
                             }
                             mcPlayout.retune()
+                            val healthNow = android.os.SystemClock.elapsedRealtime()
+                            if (healthNow - mcHealthSampleAt >= 1000) {
+                                mcHealthSampleAt = healthNow
+                                val decision = mcHealth.sample(healthNow, audioTrack.underrunCount,
+                                    true, mcPlayout.stalledForMs(), mcPlayout.recoveryFailures())
+                                if (decision.targetDeltaMs != 0 && mcPlayout.retargetMs(decision.targetDeltaMs)) {
+                                    Log.i(TAG, "[PLAYOUT][ADAPTIVE][MC] target -> ${mcPlayout.targetMs()} ms")
+                                }
+                                if (decision.rebuild) {
+                                    markDisconnect("MULTICAST_PLAYBACK_UNHEALTHY")
+                                    throw java.io.IOException("Multicast playback recovery failed; reconnecting")
+                                }
+                            }
                             if (mcAbort) break
                         }
                     } finally {

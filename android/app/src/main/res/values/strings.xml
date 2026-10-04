@@ -53,8 +53,9 @@
     <string name="settings_item_buffer_size_desc">A smaller buffer reduces latency but may cause dropouts</string>
     <string name="settings_item_latency_title">Playback buffer (receiver)</string>
     <string name="settings_item_latency_desc">Receiver-side playout buffer. Applies only when this device receives; never synced to the sender. Higher = steadier, more delay.</string>
-    <string name="settings_latency_preset_title">Latency preset</string>
-    <string name="settings_latency_preset_desc">Adaptive grows the buffer on demand (20–80 ms); fixed presets 20/40/60; the slider accepts any 20–400 ms value.</string>
+    <string name="settings_latency_preset_title">Receiver latency mode</string>
+    <string name="settings_latency_preset_desc">Choose adaptive (20–80 ms) or a manual value. Changes apply on the next connection.</string>
+    <string name="settings_latency_manual">Manual</string>
     <string name="settings_latency_preset_adaptive">Adaptive (20–80 ms)</string>
     <string name="settings_latency_preset_fast">Low latency (20 ms)</string>
     <string name="settings_latency_preset_balanced">Balanced (40 ms)</string>

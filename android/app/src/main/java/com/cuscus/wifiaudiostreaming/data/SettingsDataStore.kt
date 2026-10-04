@@ -405,7 +405,8 @@ class SettingsDataStore(context: Context) {
             lastSeenChangelogVersion = preferences[PreferencesKeys.LAST_SEEN_CHANGELOG_VERSION] ?: "",
             autoUpdateCheckEnabled = preferences[PreferencesKeys.AUTO_UPDATE_CHECK_ENABLED] ?: true,
             latencyMs = preferences[PreferencesKeys.LATENCY_MS] ?: 40,
-            adaptiveLatency = preferences[PreferencesKeys.ADAPTIVE_LATENCY] ?: true,
+            adaptiveLatency = resolveAdaptiveLatency(preferences[PreferencesKeys.ADAPTIVE_LATENCY],
+                preferences.contains(PreferencesKeys.LATENCY_MS)),
             maxPayloadBytes = preferences[PreferencesKeys.MAX_PAYLOAD] ?: 1390,
             securityMode = preferences[PreferencesKeys.SECURITY_MODE] ?: "OFF",
             authKey = authKeys.authKey,
@@ -768,3 +769,7 @@ class SettingsDataStore(context: Context) {
     }
 
 }
+
+// Missing new preference must not reinterpret an existing manual setting.
+internal fun resolveAdaptiveLatency(saved: Boolean?, hasManualValue: Boolean): Boolean =
+    saved ?: !hasManualValue

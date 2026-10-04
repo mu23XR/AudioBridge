@@ -52,8 +52,9 @@
     <string name="settings_item_buffer_size_desc">缓冲越小延迟越低，但更容易出现断音</string>
     <string name="settings_item_latency_title">播放缓冲（接收端）</string>
     <string name="settings_item_latency_desc">接收端播放缓冲目标。仅在本机作为接收端时生效，不会同步到发送端。越高越稳定，延迟也越大。</string>
-    <string name="settings_latency_preset_title">延迟预设</string>
-    <string name="settings_latency_preset_desc">自适应按丢包情况自动抬升缓冲（20–80 ms）；固定挡位 20/40/60；滑块可设 20–400 ms 任意值。</string>
+    <string name="settings_latency_preset_title">接收端延迟模式</string>
+    <string name="settings_latency_preset_desc">可选自适应（20–80 ms）或手动设置任意数值；重新连接后生效。</string>
+    <string name="settings_latency_manual">手动</string>
     <string name="settings_latency_preset_adaptive">自适应（20–80 ms）</string>
     <string name="settings_latency_preset_fast">极速（20 ms）</string>
     <string name="settings_latency_preset_balanced">均衡（40 ms）</string>

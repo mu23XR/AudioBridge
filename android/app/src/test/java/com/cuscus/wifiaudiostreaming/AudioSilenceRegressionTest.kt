@@ -63,4 +63,22 @@ class AudioSilenceRegressionTest {
         PlayoutGovernor(track, 48000, 4, 20, "test", { 0L }, {})
             .writePcm(ByteArray(4), 0, 4)
     }
+
+    @Test fun repeatedFailedFlushesRemainVisibleUntilPlaybackAdvances() {
+        var now = 0L
+        val track = FakeTrack().apply { accepted = 100 }
+        val governor = PlayoutGovernor(track, 48000, 4, 20, "test", { now }, {})
+        governor.writePcm(ByteArray(100), 0, 100)
+        for (i in 1..3) {
+            now += 500
+            governor.writePcm(ByteArray(100), 0, 100)
+            // Establish the post-flush head without falsely treating a reset
+            // to zero as proof the hardware actually played anything.
+            governor.writePcm(ByteArray(100), 0, 100)
+        }
+        assertEquals(3, governor.recoveryFailures())
+        track.playbackHeadPosition = 1
+        governor.writePcm(ByteArray(100), 0, 100)
+        assertEquals(0, governor.recoveryFailures())
+    }
 }

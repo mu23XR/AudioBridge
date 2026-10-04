@@ -880,106 +880,91 @@ fun SettingsScreenContent(
                     // peer. The preset/label wording must keep saying that.
                     // The adaptive preset hands a 20-80 ms target band to the
                     // receiver watchdog; any manual value turns adaptive off.
-                    val latencyPresetLabel = when {
-                        appSettings.adaptiveLatency -> stringResource(R.string.settings_latency_preset_adaptive)
-                        appSettings.latencyMs == 20 -> stringResource(R.string.settings_latency_preset_fast)
-                        appSettings.latencyMs == 40 -> stringResource(R.string.settings_latency_preset_balanced)
-                        appSettings.latencyMs == 60 -> stringResource(R.string.settings_latency_preset_steady)
-                        else -> stringResource(R.string.settings_latency_preset_custom_fmt, appSettings.latencyMs)
-                    }
+                    val latencyPresetLabel = stringResource(
+                        if (appSettings.adaptiveLatency) R.string.settings_latency_preset_adaptive
+                        else R.string.settings_latency_manual
+                    )
                     SettingsSelectionItem(
                         title = stringResource(R.string.settings_latency_preset_title),
                         description = stringResource(R.string.settings_latency_preset_desc),
                         icon = Icons.Outlined.Speed,
                         currentValue = latencyPresetLabel,
                         options = linkedMapOf(
-                            stringResource(R.string.settings_latency_preset_adaptive) to -1,
-                            stringResource(R.string.settings_latency_preset_fast) to 20,
-                            stringResource(R.string.settings_latency_preset_balanced) to 40,
-                            stringResource(R.string.settings_latency_preset_steady) to 60
+                            stringResource(R.string.settings_latency_preset_adaptive) to true,
+                            stringResource(R.string.settings_latency_manual) to false
                         ),
                         onOptionSelected = { picked ->
-                            if (picked < 0) {
-                                onAdaptiveLatencyChange(true)
-                            } else {
-                                onAdaptiveLatencyChange(false)
-                                onAdvancedAudioChange(picked, appSettings.maxPayloadBytes)
-                            }
+                            onAdaptiveLatencyChange(picked)
                         }
                     )
-                    var showLatencyEditor by remember { mutableStateOf(false) }
-                    SettingsSliderItem(
-                        title = stringResource(R.string.settings_item_latency_title),
-                        description = stringResource(R.string.settings_item_latency_desc) +
-                            if (appSettings.adaptiveLatency) {
-                                " " + stringResource(R.string.settings_latency_adaptive_hint)
-                            } else {
-                                ""
+                    if (!appSettings.adaptiveLatency) {
+                        var showLatencyEditor by remember { mutableStateOf(false) }
+                        SettingsSliderItem(
+                            title = stringResource(R.string.settings_item_latency_title),
+                            description = stringResource(R.string.settings_item_latency_desc),
+                            icon = Icons.Outlined.Timer,
+                            value = appSettings.latencyMs.toFloat(),
+                            range = 20f..400f,
+                            // Continuous drag: the old step grid was computed for a
+                            // 40 ms floor while the range started at 20, which
+                            // produced the infamous 21 ms notches.
+                            steps = 0,
+                            valueSuffix = "ms",
+                            onValueChange = {
+                                onAdvancedAudioChange(it.toInt(), appSettings.maxPayloadBytes)
                             },
-                        icon = Icons.Outlined.Timer,
-                        value = appSettings.latencyMs.toFloat(),
-                        range = 20f..400f,
-                        // Continuous drag: the old step grid was computed for a
-                        // 40 ms floor while the range started at 20, which
-                        // produced the infamous 21 ms notches.
-                        steps = 0,
-                        valueSuffix = "ms",
-                        onValueChange = {
-                            onAdaptiveLatencyChange(false)
-                            onAdvancedAudioChange(it.toInt(), appSettings.maxPayloadBytes)
-                        },
-                        onValueClick = { showLatencyEditor = true }
-                    )
-                    if (showLatencyEditor) {
-                        var editedValue by remember(showLatencyEditor) {
-                            mutableStateOf(appSettings.latencyMs.toString())
-                        }
-                        var invalidInput by remember(showLatencyEditor) { mutableStateOf(false) }
-                        AlertDialog(
-                            onDismissRequest = { showLatencyEditor = false },
-                            title = { Text(stringResource(R.string.settings_item_latency_title)) },
-                            text = {
-                                Column {
-                                    OutlinedTextField(
-                                        value = editedValue,
-                                        onValueChange = { input ->
-                                            editedValue = input.filter { it.isDigit() }.take(3)
-                                            invalidInput = false
-                                        },
-                                        label = { Text(stringResource(R.string.settings_latency_edit_hint)) },
-                                        isError = invalidInput,
-                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                        singleLine = true
-                                    )
-                                    if (invalidInput) {
-                                        Text(
-                                            text = stringResource(R.string.settings_latency_edit_invalid),
-                                            color = MaterialTheme.colorScheme.error,
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-                                }
-                            },
-                            confirmButton = {
-                                TextButton(onClick = {
-                                    val parsed = editedValue.toIntOrNull()
-                                    if (parsed == null || parsed !in 20..400) {
-                                        invalidInput = true
-                                    } else {
-                                        onAdaptiveLatencyChange(false)
-                                        onAdvancedAudioChange(parsed, appSettings.maxPayloadBytes)
-                                        showLatencyEditor = false
-                                    }
-                                }) {
-                                    Text(stringResource(R.string.ok))
-                                }
-                            },
-                            dismissButton = {
-                                TextButton(onClick = { showLatencyEditor = false }) {
-                                    Text(stringResource(R.string.cancel))
-                                }
-                            }
+                            onValueClick = { showLatencyEditor = true }
                         )
+                        if (showLatencyEditor) {
+                            var editedValue by remember(showLatencyEditor) {
+                                mutableStateOf(appSettings.latencyMs.toString())
+                            }
+                            var invalidInput by remember(showLatencyEditor) { mutableStateOf(false) }
+                            AlertDialog(
+                                onDismissRequest = { showLatencyEditor = false },
+                                title = { Text(stringResource(R.string.settings_item_latency_title)) },
+                                text = {
+                                    Column {
+                                        OutlinedTextField(
+                                            value = editedValue,
+                                            onValueChange = { input ->
+                                                editedValue = input.filter { it.isDigit() }.take(3)
+                                                invalidInput = false
+                                            },
+                                            label = { Text(stringResource(R.string.settings_latency_edit_hint)) },
+                                            isError = invalidInput,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            singleLine = true
+                                        )
+                                        if (invalidInput) {
+                                            Text(
+                                                text = stringResource(R.string.settings_latency_edit_invalid),
+                                                color = MaterialTheme.colorScheme.error,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        val parsed = editedValue.toIntOrNull()
+                                        if (parsed == null || parsed !in 20..400) {
+                                            invalidInput = true
+                                        } else {
+                                            onAdvancedAudioChange(parsed, appSettings.maxPayloadBytes)
+                                            showLatencyEditor = false
+                                        }
+                                    }) {
+                                        Text(stringResource(R.string.ok))
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showLatencyEditor = false }) {
+                                        Text(stringResource(R.string.cancel))
+                                    }
+                                }
+                            )
+                        }
                     }
                     SettingsSliderItem(
                         title = stringResource(R.string.settings_item_packet_size_title),

@@ -54,19 +54,19 @@ class PlayoutGovernor internal constructor(
     // watchdog drives from underrun telemetry; fixed mode pins one target.
     private val targetFloorMs: Int = if (adaptive) 20 else maxOf(15, targetLatencyMs)
     private val targetCeilingMs: Int = if (adaptive) 80 else maxOf(15, targetLatencyMs)
-    private var currentTargetMs: Int = targetFloorMs
+    private var currentTargetMs: Int = targetLatencyMs.coerceIn(targetFloorMs, targetCeilingMs)
     private var targetFrames: Long = (currentTargetMs * framesPerMs).toLong()
     private var highFrames: Long = targetFrames + (targetFrames / 2).coerceAtLeast((30 * framesPerMs).toLong())
     private var panicFrames: Long = targetFrames + (180 * framesPerMs).toLong()
 
-    fun targetMs(): Int = currentTargetMs
+    @Synchronized fun targetMs(): Int = currentTargetMs
 
     /**
      * Shift the playout target by [deltaMs] inside the allowed band. Returns
      * true when the target actually moved (the caller logs and timestamps
      * it). Fixed-mode governors have floor == ceiling and never move.
      */
-    fun retargetMs(deltaMs: Int): Boolean {
+    @Synchronized fun retargetMs(deltaMs: Int): Boolean {
         val next = (currentTargetMs + deltaMs).coerceIn(targetFloorMs, targetCeilingMs)
         if (next == currentTargetMs) return false
         currentTargetMs = next
@@ -92,11 +92,18 @@ class PlayoutGovernor internal constructor(
     private var lastLogAt = 0L
     private var lastProgressHead = -1L
     private var lastProgressAt = nowMs()
+    private var lastWriteAt = nowMs()
+    private var failedLocalRecoveries = 0
+
+    @Synchronized fun recoveryFailures(): Int = failedLocalRecoveries
 
     /** Never let a paused/full AudioTrack block the UDP receive and PONG loop. */
-    fun writePcm(pcm: ByteArray, offset: Int, length: Int): Int {
+    @Synchronized fun writePcm(pcm: ByteArray, offset: Int, length: Int): Int {
         val head = playedFrames()
         val now = nowMs()
+        if (now - lastWriteAt > 3000) failedLocalRecoveries = 0
+        lastWriteAt = now
+        if (lastProgressHead >= 0 && head > lastProgressHead) failedLocalRecoveries = 0
         if (head != lastProgressHead || bufferedFrames() == 0L) {
             lastProgressHead = head
             lastProgressAt = now
@@ -106,6 +113,7 @@ class PlayoutGovernor internal constructor(
             track.pause()
             track.flush()
             noteReset()
+            failedLocalRecoveries++
             track.play()
             lastProgressAt = now
             warn("[PLAYOUT] stalled track recovered; stale PCM flushed")
@@ -131,9 +139,9 @@ class PlayoutGovernor internal constructor(
         return abs - baseHead
     }
 
-    fun bufferedFrames(): Long = (framesWritten - playedFrames()).coerceAtLeast(0L)
+    @Synchronized fun bufferedFrames(): Long = (framesWritten - playedFrames()).coerceAtLeast(0L)
 
-    fun bufferedMs(): Int = (bufferedFrames() / framesPerMs).toInt()
+    @Synchronized fun bufferedMs(): Int = (bufferedFrames() / framesPerMs).toInt()
 
     /**
      * Milliseconds since the playback head last advanced while PCM is still
@@ -141,14 +149,21 @@ class PlayoutGovernor internal constructor(
      * the buffer is healthy, not stalled), so only a wedged OEM track that
      * refuses to consume queued PCM keeps this growing.
      */
-    fun stalledForMs(): Long =
-        if (bufferedFrames() > 0) nowMs() - lastProgressAt else 0L
+    @Synchronized fun stalledForMs(): Long {
+        val head = playedFrames()
+        if (lastProgressHead >= 0 && head > lastProgressHead) {
+            failedLocalRecoveries = 0
+            lastProgressHead = head
+            lastProgressAt = nowMs()
+        }
+        return if (bufferedFrames() > 0) nowMs() - lastProgressAt else 0L
+    }
 
-    fun noteWritten(bytes: Int) {
+    @Synchronized fun noteWritten(bytes: Int) {
         if (bytes > 0 && frameSize > 0) framesWritten += bytes / frameSize
     }
 
-    fun noteReset() {
+    @Synchronized fun noteReset() {
         // flush() resets the playback head; establish a fresh accounting origin.
         lastHeadRaw = 0
         headWraps = 0L
@@ -159,7 +174,7 @@ class PlayoutGovernor internal constructor(
         avgBufferedFrames = targetFrames.toDouble()
     }
 
-    fun shouldDrop(incomingBytes: Int): Boolean {
+    @Synchronized fun shouldDrop(incomingBytes: Int): Boolean {
         if (frameSize <= 0 || incomingBytes <= 0) return false
         val incoming = incomingBytes / frameSize
         if (avgBufferedFrames + incoming <= highFrames) return false
@@ -173,7 +188,7 @@ class PlayoutGovernor internal constructor(
         return true
     }
 
-    fun hardResyncIfNeeded(): Boolean {
+    @Synchronized fun hardResyncIfNeeded(): Boolean {
         val buffered = bufferedFrames()
         if (buffered <= panicFrames || avgBufferedFrames <= panicFrames) return false
         val now = System.currentTimeMillis()
@@ -187,7 +202,7 @@ class PlayoutGovernor internal constructor(
         return true
     }
 
-    fun retune() {
+    @Synchronized fun retune() {
         val buffered = bufferedFrames().toDouble()
         avgBufferedFrames = avgBufferedFrames * 0.9 + buffered * 0.1
         val errFrames = avgBufferedFrames - targetFrames
