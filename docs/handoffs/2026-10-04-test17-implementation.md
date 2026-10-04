@@ -2,6 +2,10 @@
 
 ## 恢复实施（#17，2026-10-04）
 
+安装/归档阶段：signed preview 实际 APK包名 `.test`、版本 1.3.1-test.17/code610040557、永久 4DDF 证书均核验；本机 APK SHA-256 E10986B3B942243C0B14EA8EAE2FF27096B8779CD82778FB61046F0B5CF77ECA。平板安装成功；手机两次 streamed install 被 OEM 立即拒绝，经用户要求重发改 --no-streaming 安装成功，两个旧 test.16 均保留。PR #18 已附加本任务；提交460d7fa仅更新 CI 请求（publish=false,channel=preview），run37181977448运行中。等待用户停旧会话、授权新的Shizuku应用并启动两端，然后查运行数据和通知。
+
+历史 archive-test.13 Release 已发布并截图存 out/historical-archive/published-test13.jpg；远程 APK 重新下载校验成功才删除 phone-installed.apk/tablet-installed.apk及临时副本，test.16不动。第一次检查只有 Release列表，用户提醒后补查 Actions：test.13 有18个运行，最新36725036328/artifact11102329804，到2026-10-07过期。归档APK源自旧设备备份，精确源码仍不独立保证；标签71765f9仅指历史构建配置。公开证书指纹不属于秘密，未公开私钥/Base64/密码。
+
 阶段更新：b3d64d0 保存播放/延迟/通知修复，df460af 保存独立签名预览通道/更新选择/lint 处理。正式 release.yml run37181009171 的 Android、Windows、governance 和发布任务均成功，v1.3.1 正式版已发布。历史 test.13 两份 APK SHA-256 同为 F98457EE6D27D58652A7C8C3D9AD90DD3F1F57ED828CCFB026239B2F1F3DA18C；用户授权归档并校验后删除，仍待浏览器登录才能上传。不在 Git 中存历史 APK。Signed preview assemblePreview/lintVitalPreview 与 39 单元测试通过，APK/真机验证继续。
 
 用户已认可同 test.16 永久签名 + 不同包名的双通道并授权实施。保留两设备原 test.16；手机无线端口刷新到 41947，已连接。GitHub 没有 test.13 Release，用户另授权补发历史归档、重新下载核验后删除两份旧 APK；上传目前等待用户在内置浏览器登录，不删除本地副本。
