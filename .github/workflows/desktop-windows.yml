@@ -69,7 +69,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AudioBridge-Desktop-Windows
-          path: |
-            desktop/build/packages/*.zip
-            desktop/build/compose/binaries/main-release/app/**
+          path: desktop/build/packages/*.zip
+          retention-days: 3
           if-no-files-found: error
