@@ -341,6 +341,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setAdaptiveLatency(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsDataStore.saveAdaptiveLatency(enabled)
+        }
+    }
+
     fun setSecurity(uiMode: String, key: String) {
         viewModelScope.launch {
             val settings = settingsDataStore.settingsFlow.first()
@@ -729,7 +735,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // A manual connect expresses a persistent user intent. The process-wide
     // controller owns reconnects; recreating this ViewModel must not cancel them.
-    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startClient(serverInfo: ServerInfo, presharedKey: String? = null) {
         RoleSelectionGate.selectReceiver()
         ClientSessionController.connect(

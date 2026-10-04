@@ -2215,6 +2215,10 @@ object NetworkManager {
         networkInterfaceName: String = "Auto",
         connectionSoundEnabled: Boolean = true,
         disconnectionSoundEnabled: Boolean = true,
+        adaptiveLatency: Boolean = false,
+        // Reconnects of an already-announced logical session must not replay
+        // the full chime: rapid drop-reconnect cycles used to ring twice.
+        announceConnectSound: Boolean = true,
         onServerDisconnected: (() -> Unit)? = null
     ) {
         // ── Formato di riproduzione ───────────────────────────────────────────
@@ -2312,12 +2316,18 @@ object NetworkManager {
                             withContext(Dispatchers.Main) { onServerDisconnected?.invoke() }
                             return@launch
                         }
-                        val effectiveLatencyMs = UsbLink.effectiveLatencyMs(advSettings.latencyMs)
+                        // Adaptive mode starts at the 20 ms floor and lets the
+                        // watchdog lift the target on underrun evidence; fixed
+                        // mode plays the configured target as-is.
+                        val effectiveLatencyMs = if (adaptiveLatency) 20 else UsbLink.effectiveLatencyMs(advSettings.latencyMs)
                         val targetLatencyFrames = effectiveLatencyMs * sampleRate / 1000
                         // Headroom: la coda di AudioTrack deve poter assorbire un burst senza
                         // bloccare la write, altrimenti l'arretrato migra nel socket dove non e'
                         // misurabile. Il livello reale lo tiene PlayoutGovernor scartando pacchetti.
-                        val headroomFrames = sampleRate * 80 / 1000
+                        // In adaptive mode the governor may lift the target up to 80 ms,
+                        // so the track buffer is planned for that ceiling.
+                        val headroomMs = if (adaptiveLatency) 140 else 80
+                        val headroomFrames = sampleRate * headroomMs / 1000
                         var playbackBufferSize = minBuffer.coerceAtLeast((targetLatencyFrames + headroomFrames) * frameSize)
                         if (playbackBufferSize % frameSize != 0) {
                             playbackBufferSize += frameSize - (playbackBufferSize % frameSize)
@@ -2344,11 +2354,18 @@ object NetworkManager {
                         }
                         audioTrack = trackBuilder.build()
                         registerClientPlaybackTrack(audioTrack!!)
-                        val playout = PlayoutGovernor(
-                            audioTrack!!, sampleRate, frameSize, effectiveLatencyMs, TAG
+                        // Mutable so the playback watchdog can rebuild the track
+                        // in place without tearing down the whole session.
+                        var playout = PlayoutGovernor(
+                            audioTrack!!, sampleRate, frameSize, effectiveLatencyMs, TAG, adaptiveLatency
                         )
 
-                        val prerollLen = (sampleRate * frameSize * 10 / 1000)
+                        // Startup preroll: half of the playout target. 20 ms
+                        // keeps the historical 10 ms; higher targets get
+                        // proportionally more protection so the first seconds
+                        // do not burn underruns while the buffer fills.
+                        val prerollMs = effectiveLatencyMs / 2
+                        val prerollLen = (sampleRate * frameSize * prerollMs / 1000)
                             .coerceIn(0, playbackBufferSize - frameSize)
                             .let { it - (it % frameSize) }
                         if (prerollLen > 0) {
@@ -2500,7 +2517,7 @@ object NetworkManager {
                         var serverEncrypts = sessionEncrypted
 
                         connectionStatus.value = context.getString(R.string.status_streaming)
-                        if (connectionSoundEnabled) playConnectionSound(context)
+                        if (connectionSoundEnabled && announceConnectSound) playConnectionSound(context)
                         connectedSuccessfully = true
 
                         val connectedAt = System.currentTimeMillis()
@@ -2523,6 +2540,62 @@ object NetworkManager {
                         var inSilenceRun = false
                         var versionChecked = false
 
+                        // ── Playback watchdog state ───────────────────────
+                        // The receive loop owns the track and performs rebuilds;
+                        // the watchdog coroutine below only requests them and
+                        // escalates when the loop cannot even consume a request.
+                        val rebuildRequestedAt = java.util.concurrent.atomic.AtomicLong(0L)
+                        val playbackHealth = PlaybackHealth(adaptiveLatency)
+                        val targetAdjustment = java.util.concurrent.atomic.AtomicInteger(0)
+                        data class PlaybackSnapshot(val sampledAt: Long, val underruns: Int,
+                            val stalledMs: Long, val failedRecoveries: Int)
+                        val playbackSnapshot = java.util.concurrent.atomic.AtomicReference(
+                            PlaybackSnapshot(android.os.SystemClock.elapsedRealtime(), 0, 0, 0)
+                        )
+                        fun publishPlaybackHealth() {
+                            val track = audioTrack ?: return
+                            playbackSnapshot.set(PlaybackSnapshot(android.os.SystemClock.elapsedRealtime(),
+                                track.underrunCount, playout.stalledForMs(), playout.recoveryFailures()))
+                        }
+
+                        fun rebuildPlaybackTrack(reason: String): Boolean {
+                            var candidate: AudioTrack? = null
+                            return try {
+                                val restoredTargetMs = playout.targetMs()
+                                Log.w(TAG, "[PLAYOUT][WATCHDOG] rebuilding playback track: $reason")
+                                unregisterClientPlaybackTrack(audioTrack)
+                                runCatching { audioTrack?.pause() }
+                                runCatching { audioTrack?.flush() }
+                                runCatching { audioTrack?.stop() }
+                                runCatching { audioTrack?.release() }
+                                audioTrack = null
+                                val newTrack = trackBuilder.build()
+                                candidate = newTrack
+                                registerClientPlaybackTrack(newTrack)
+                                val newGovernor = PlayoutGovernor(
+                                    newTrack, sampleRate, frameSize, restoredTargetMs, TAG, adaptiveLatency
+                                )
+                                val rebornPrerollMs = restoredTargetMs / 2
+                                val rebornPrerollLen = (sampleRate * frameSize * rebornPrerollMs / 1000)
+                                    .coerceIn(0, playbackBufferSize - frameSize)
+                                    .let { it - (it % frameSize) }
+                                if (rebornPrerollLen > 0) {
+                                    newGovernor.writePcm(ByteArray(rebornPrerollLen), 0, rebornPrerollLen)
+                                }
+                                newTrack.play()
+                                audioTrack = newTrack
+                                playout = newGovernor
+                                publishPlaybackHealth()
+                                Log.i(TAG, "[PLAYOUT][WATCHDOG] playback track rebuilt")
+                                true
+                            } catch (t: Throwable) {
+                                unregisterClientPlaybackTrack(candidate)
+                                runCatching { candidate?.release() }
+                                Log.e(TAG, "[PLAYOUT][WATCHDOG] track rebuild failed", t)
+                                false
+                            }
+                        }
+
                         val watchdogJob = launch {
                             while (isActive) {
                                 delay(1000)
@@ -2530,6 +2603,25 @@ object NetworkManager {
                                 if (now - lastServerActivityAt.get() > serverActivityTimeoutMs) {
                                     markDisconnect("SERVER_ACTIVITY_TIMEOUT")
                                     if (disconnectionSoundEnabled && !ClientSessionController.wantsConnection()) { playDisconnectionSound(context); disconnectionSoundPlayed = true }
+                                    transportJob.cancel()
+                                    break
+                                }
+                                if (!connectedSuccessfully) continue
+                                val monotonicNow = android.os.SystemClock.elapsedRealtime()
+                                // The watchdog never touches AudioTrack or mutable governor
+                                // state: a stuck vendor write must not block this observer.
+                                val snapshot = playbackSnapshot.get()
+                                val decision = playbackHealth.sample(monotonicNow, snapshot.underruns,
+                                    now - lastAudioAt.get() < 3000,
+                                    snapshot.stalledMs, snapshot.failedRecoveries)
+                                if (decision.targetDeltaMs != 0) targetAdjustment.set(decision.targetDeltaMs)
+                                val loopStalled = monotonicNow - snapshot.sampledAt > 5000
+                                if ((decision.rebuild || loopStalled) && rebuildRequestedAt.compareAndSet(0L, monotonicNow)) {
+                                    Log.w(TAG, "[PLAYOUT][WATCHDOG] requesting track rebuild")
+                                }
+                                val requestedAt = rebuildRequestedAt.get()
+                                if (requestedAt != 0L && monotonicNow - requestedAt > 5000) {
+                                    markDisconnect("PLAYBACK_WATCHDOG_UNACKNOWLEDGED")
                                     transportJob.cancel()
                                     break
                                 }
@@ -2716,6 +2808,18 @@ object NetworkManager {
 
                         try {
                             while (isActive) {
+                                if (rebuildRequestedAt.get() != 0L) {
+                                    if (!rebuildPlaybackTrack("watchdog request")) {
+                                        markDisconnect("PLAYBACK_REBUILD_FAILED")
+                                        throw java.io.IOException("Playback track rebuild failed")
+                                    }
+                                    rebuildRequestedAt.set(0L)
+                                }
+                                val adjustment = targetAdjustment.getAndSet(0)
+                                if (adjustment != 0 && playout.retargetMs(adjustment)) {
+                                    Log.i(TAG, "[PLAYOUT][ADAPTIVE] target -> ${playout.targetMs()} ms")
+                                }
+                                publishPlaybackHealth()
                                 val audio = ArrayList<ByteArray>()
                                 var byeReceived = false
                                 var dg: Datagram? = socket.receive()
@@ -2817,12 +2921,13 @@ object NetworkManager {
                             withContext(Dispatchers.Main) { onServerDisconnected?.invoke() }
                             return@launch
                         }
-                        val mcLatencyMs = UsbLink.effectiveLatencyMs(
-                            SettingsDataStore(context).settingsFlow.first().latencyMs
-                        )
+                        val mcSettings = SettingsDataStore(context).settingsFlow.first()
+                        val mcAdaptive = mcSettings.adaptiveLatency
+                        val mcLatencyMs = if (mcAdaptive) 20 else UsbLink.effectiveLatencyMs(mcSettings.latencyMs)
                         val frameSize = if (channelConfig == "STEREO") 4 else 2
+                        val mcHeadroomMs = if (mcAdaptive) 140 else 80
                         var playbackBufferSize = minBuffer.coerceAtLeast(
-                            (mcLatencyMs + 80) * sampleRate / 1000 * frameSize
+                            (mcLatencyMs + mcHeadroomMs) * sampleRate / 1000 * frameSize
                         )
 
                         if (playbackBufferSize % frameSize != 0) {
@@ -2849,12 +2954,22 @@ object NetworkManager {
                         registerClientPlaybackTrack(audioTrack!!)
 
                         val mcPlayout = PlayoutGovernor(
-                            audioTrack, sampleRate, frameSize, mcLatencyMs, TAG
+                            audioTrack, sampleRate, frameSize, mcLatencyMs, TAG, mcAdaptive
                         )
+                        val mcHealth = PlaybackHealth(mcAdaptive)
+                        var mcHealthSampleAt = android.os.SystemClock.elapsedRealtime()
+                        // Same preroll policy as the unicast path: half of the
+                        // playout target, so higher buffers start protected.
+                        val mcPrerollLen = (sampleRate * frameSize * (mcLatencyMs / 2) / 1000)
+                            .coerceIn(0, playbackBufferSize - frameSize)
+                            .let { it - (it % frameSize) }
+                        if (mcPrerollLen > 0) {
+                            mcPlayout.writePcm(ByteArray(mcPrerollLen), 0, mcPrerollLen)
+                        }
                         audioTrack.play()
                         LinkMetrics.start(if (sessionUsesUsb()) "USB" else "WIFI", sampleRate)
                         connectionStatus.value = context.getString(R.string.status_streaming)
-                        if (connectionSoundEnabled) playConnectionSound(context)
+                        if (connectionSoundEnabled && announceConnectSound) playConnectionSound(context)
                         connectedSuccessfully = true
 
                         multicastSocket.soTimeout = 2000
@@ -3132,6 +3247,19 @@ object NetworkManager {
                                 playMc(a)
                             }
                             mcPlayout.retune()
+                            val healthNow = android.os.SystemClock.elapsedRealtime()
+                            if (healthNow - mcHealthSampleAt >= 1000) {
+                                mcHealthSampleAt = healthNow
+                                val decision = mcHealth.sample(healthNow, audioTrack.underrunCount,
+                                    true, mcPlayout.stalledForMs(), mcPlayout.recoveryFailures())
+                                if (decision.targetDeltaMs != 0 && mcPlayout.retargetMs(decision.targetDeltaMs)) {
+                                    Log.i(TAG, "[PLAYOUT][ADAPTIVE][MC] target -> ${mcPlayout.targetMs()} ms")
+                                }
+                                if (decision.rebuild) {
+                                    markDisconnect("MULTICAST_PLAYBACK_UNHEALTHY")
+                                    throw java.io.IOException("Multicast playback recovery failed; reconnecting")
+                                }
+                            }
                             if (mcAbort) break
                         }
                     } finally {

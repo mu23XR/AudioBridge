@@ -2,6 +2,28 @@
 
 Last governance refresh: 2026-09-29
 
+## Active implementation (2026-10-04)
+
+`fix/test17-adaptive-notifications` retains the local test.17 work and implements Issues #14/#15/#16: playback health/recovery corrections, selectable adaptive versus continuous manual latency, consolidated runtime/mode controls, and independent test identities. Debug is `.debug`; signed preview is `.test` with the existing permanent signer; stable release keeps the permanent package. Both devices retain test.16 alongside signed test.17. 39 unit tests and lintDebug pass (0 errors); signed preview CI run37181977448 passed Android build/tests/lint/signing, Windows and governance. Full real-device longevity and notification acceptance remain pending. See `docs/handoffs/2026-10-04-test17-implementation.md`.
+
+After plan review the user authorized implementation. Playback/latency/notification corrections are committed as b3d64d0; isolated same-signer preview/channel selection and lint corrections as df460af. 39 unit tests and lintDebug pass (0 errors, 230 warnings, 20 hints); assemblePreview and lintVitalPreview also passed. APK verification and real-device acceptance continue. The earlier local debug attempt was canceled, and neither installed test.16 has been replaced.
+
+Issue #17 tracks test.16 stable promotion and the independent same-signer preview channel. `release/test16-stable` is isolated at test.16 source @60137ef with release-flow-only commit 18ea088; v1.3.1 was published by release.yml run37181009171 after Android/Windows/governance/publish jobs all succeeded. The baseline retains reported long-run/OEM/VPN limitations; open runtime Issues remain open. Historical test.13 is now archived in Releases after user authorization and verified download; exact old local duplicates were deleted. Independent preview update selection excludes older permanent-package test assets and stable releases; private-key backup in the workspace root is verified, never tracked.
+
+Later execution: PR #18 is open as a Draft against fix/android-test15-stability; HEAD 460d7fa explicitly requests signed preview CI run37181977448. Both devices installed permanent-signed independent test.17 (`.test`, versionCode610040557); phone streamed installs were rejected by MIUI, but the requested non-streaming resend succeeded. Both original test.16 packages remain at 609301952. User is asked to stop old sessions and grant/test the new package separately; playback/notification/overnight acceptance remains pending. Historical test.13 is published at archive-test.13 as prerelease, re-downloaded SHA-256 matches F98457EE6D27D58652A7C8C3D9AD90DD3F1F57ED828CCFB026239B2F1F3DA18C, and the two original old APKs plus temporary upload/download copies were deleted. Actions also has 18 test.13 runs; latest run36725036328 artifact11102329804 is unexpired until October7. That temporary artifact was not inspected before the original Release-only lookup; the archive preserves the exact old device binary, not a claim that all 18 builds are identical.
+
+At 14:18 CST both independent preview foreground services are running: phone SEND, tablet RECEIVE (user switched from the original tablet-to-phone direction). Phone has runtime notification101; tablet runtime201 plus an OEM-generated silent-section summary, with no app mode701 or auto-connect foreground service. Original stable-package services are absent. Earlier phone RECEIVE logged valid PCM and adaptive target increases through 70 ms, then user stopped that session at 14:17:30 to switch roles. This is short-session implementation evidence, not long-run or subjective playback acceptance.
+
+## Earlier test.16 device diagnosis (2026-10-04, before preview install)
+
+Both real devices still run test.16 (609301952). The receiver phone was force-stopped by HyperOS/MIUI `AutoPowerKill` at 03:41:03 CST; system logs and ApplicationExitInfo agree, and its process/service are absent with the package stopped. The sender tablet remains alive after its 02:26 SEND restart. Its separate low-importance mode-control notification being folded into more notifications does not mean its foreground capture service stopped. The user places the earlier both-roles-OFF event between 01:00 and 02:30, followed by manual SEND/RECEIVE recovery; its cause remains unconfirmed because relevant app logs have rotated. It must be distinguished from the later 03:41 receiver force-stop.
+
+Local `feat/test17-latency-stability` @ 46490fd is seven commits ahead of fetched `origin/fix/android-test15-stability` @ 54a416f, remains unpublished, and is not installed on these devices. Its playback watchdog/adaptive buffer changes do not address an OEM force-stop. See `docs/handoffs/2026-10-04-runtime-exit-diagnosis.md` for evidence, comparison and follow-up boundaries.
+
+User clarification: the 02:26 SEND/RECEIVE actions followed the original disconnection very shortly. Investigate the minutes immediately preceding those recovery actions; service restarts caused by the actions are not evidence of the original failure.
+
+Local test.17 static review (2026-10-04) recommends retaining the branch, but not releasing it as-is: playback rebuild failures are ignored, the 500 ms recovery resets can mask the new 5 s stall escalation, existing users are implicitly switched to adaptive mode, adaptive decay does not measure a clean interval, multicast has no adaptive driver, and concurrent playback state needs coherent ownership. Notification consolidation can be an independent change on this branch. Current compile/test rerun was blocked before execution by a Gradle loopback-connection error. Details: `docs/handoffs/2026-10-04-test17-code-review.md`.
+
 ## Repository
 
 - Repository: `mu23XR/AudioBridge`
@@ -98,8 +120,18 @@ AudioPolicy and exit.
 - Shizuku silence is not a disconnect condition.
 - During capture silence, the sender emits a header-only liveness packet once per second.
 - Receiver liveness is independent of PCM availability.
-- New Android installs default to 20 ms WFAS target latency.
-- Receiver startup preroll is 10 ms; excessive AudioTrack backlog is corrected aggressively.
+- New Android installs default to adaptive latency: the playout target starts at 20 ms and rises on underrun evidence inside a 20–80 ms band, decaying after continuous healthy audio. Current test.17 offers adaptive/manual modes; manual is a continuous 20–400 ms slider with numeric entry. The previous fixed 20/40/60 ms presets have been removed on the implementation branch.
+- Receiver startup preroll is half of the playout target; excessive AudioTrack backlog is corrected aggressively.
+- UI languages are Chinese and English only; the legacy Italian locale from the upstream project was removed (2026-10-02).
+
+## test.17 latency/stability changes (2026-10-02, branch feat/test17-latency-stability)
+
+Implemented on-device fixes for the double connect chime and the underrun-driven playback death; all pending real-device acceptance:
+
+- Latency setting relabeled as the receiver-side playout buffer (WFAS `latencyMs` is per-device, never synced to the peer; the tablet→phone path uses the phone's value). Slider is now continuous (the previous fixed grid mixed a 40 ms floor with a 20 ms range and produced 21.1 ms notches), and the value text opens a numeric entry dialog clamped to 20–400 ms. Presets: adaptive (new-install default) plus fixed 20/40/60 ms; a new `adaptiveLatency` preference drives an underrun-fed target band, and in adaptive mode the track buffer is planned for the 80 ms ceiling.
+- Startup preroll is now half of the playout target (20 ms keeps the historical 10 ms) on both unicast and multicast receivers, so higher buffers start protected instead of burning underruns at 10 ms.
+- Receiver playback watchdog (unicast): every second it samples `AudioTrack.underrunCount` and `PlayoutGovernor.stalledForMs()`. An underrun storm (>200/s for 3 s while audio flows) or a 5 s playback-head stall with queued PCM requests an in-place track rebuild (release + rebuild `AudioTrack` and a fresh governor, re-prerolled); if the receive loop cannot consume the request within 5 s, the session is torn down through the normal disconnect path so reconnect logic takes over.
+- Reconnects of an already-announced logical session no longer replay the full connection chime (`announceConnectSound=false` for `reconnectAttempt > 0`); rapid drop-reconnect cycles therefore cannot ring twice. The disconnect chime gating is unchanged.
 
 ## Next validation build: test.15
 

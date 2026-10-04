@@ -2,7 +2,6 @@ name: Build Android Test APK
 
 on:
   pull_request:
-    branches: ["main"]
     paths:
       - "docs/releases/build-request.json"
   push:
@@ -22,7 +21,7 @@ on:
       artifact_name:
         description: "Artifact base name"
         required: false
-        default: "AudioBridge-Android-Test"
+        default: "AudioBridge-Android-Preview"
         type: string
 
 permissions:
@@ -150,21 +149,20 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:testDebugUnitTest --stacktrace
 
-      - name: Run Android lint (report existing debt)
-        continue-on-error: true
+      - name: Run Android lint
         working-directory: android
         run: ./gradlew :app:lintDebug --stacktrace
 
-      - name: Build signed release APK
+      - name: Build signed standalone test APK
         working-directory: android
-        run: ./gradlew :app:assembleRelease --stacktrace
+        run: ./gradlew :app:assemblePreview --stacktrace
 
       - name: Verify APK signer and collect asset
         env:
-          ARTIFACT_NAME: ${{ inputs.artifact_name || 'AudioBridge-Android-Test' }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name || 'AudioBridge-Android-Preview' }}
         run: |
           set -euo pipefail
-          SRC="android/app/build/outputs/apk/release/app-release.apk"
+          SRC="android/app/build/outputs/apk/preview/app-preview.apk"
           test -f "$SRC"
 
           EXPECTED="4DDF267D25A73F0A28446C9E77293204E32F6777C63417FEB7BD925040FEFB63"
@@ -184,9 +182,9 @@ jobs:
       - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.artifact_name || 'AudioBridge-Android-Test' }}-${{ env.TEST_VERSION_NAME }}
+          name: ${{ inputs.artifact_name || 'AudioBridge-Android-Preview' }}-${{ env.TEST_VERSION_NAME }}
           path: release-assets/*
-          retention-days: 14
+          retention-days: 1
           if-no-files-found: error
 
   publish:

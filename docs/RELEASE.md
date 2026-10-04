@@ -36,6 +36,8 @@ Do not reuse historical Stable #153/test.11 package/signing assumptions for the 
 
 ## Test builds
 
+New signed test artifacts use the `preview` build type (`assemblePreview`) and applicationId `io.github.mu23xr.audiobridge.test`, alongside the stable package. Local `debug` builds use `.debug`. Both are clearly named AudioBridge Test. test.16 and earlier permanent-package tests retain their historical identity; do not uninstall them to test the new independent app. Stable `release` builds and the permanent signing certificate remain unchanged. A test branch does not by itself change application identity; the build variant does.
+
 Test builds are prerelease/development artifacts and must be clearly labeled. They must never silently become the latest stable release.
 
 Where a signed test APK is intended to upgrade into a future stable build, it must use the permanent signing identity.

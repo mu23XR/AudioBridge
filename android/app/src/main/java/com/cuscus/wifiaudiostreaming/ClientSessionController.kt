@@ -236,6 +236,11 @@ object ClientSessionController {
     private fun startAttempt(context: Context, serverInfo: ServerInfo, token: Long) {
         if (!desiredConnected || token != generation || attemptInFlight) return
 
+        // A retry of an already-announced logical session stays silent on
+        // connect: replaying the chime made rapid drop-reconnect cycles sound
+        // like a double ring. Only the first establishment of a logical
+        // session announces itself.
+        val announceConnectSound = reconnectAttempt == 0
         attemptInFlight = true
         scope.launch {
             val currentSettings = SettingsDataStore(context).settingsFlow.first()
@@ -270,6 +275,8 @@ object ClientSessionController {
                 networkInterfaceName = currentSettings.networkInterface,
                 connectionSoundEnabled = currentSettings.connectionSoundEnabled,
                 disconnectionSoundEnabled = currentSettings.disconnectionSoundEnabled,
+                adaptiveLatency = currentSettings.adaptiveLatency,
+                announceConnectSound = announceConnectSound,
                 onServerDisconnected = disconnected@{
                     attemptInFlight = false
 

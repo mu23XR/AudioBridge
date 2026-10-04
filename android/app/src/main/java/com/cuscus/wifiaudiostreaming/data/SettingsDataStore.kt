@@ -169,7 +169,12 @@ data class AppSettings(
     val disconnectionSoundEnabled: Boolean = true,
     val lastSeenChangelogVersion: String = "",
     val autoUpdateCheckEnabled: Boolean = true,
-    val latencyMs: Int = 20,
+    // Balanced 40 ms default: 20 ms burned its whole margin against measured
+    // Wi-Fi jitter (9-10 ms average, 29 ms peaks) and underrun-stormed.
+    // adaptiveLatency=true starts at the 20 ms floor and lets the receiver
+    // watchdog lift the buffer on underrun evidence (20-80 ms band).
+    val adaptiveLatency: Boolean = true,
+    val latencyMs: Int = 40,
     val maxPayloadBytes: Int = 1390,
     val securityMode: String = "OFF",
     val authKey: String = "",
@@ -237,6 +242,7 @@ class SettingsDataStore(context: Context) {
         val RTP_SOURCES = stringPreferencesKey("rtp_sources")
         val CLIENT_TILE_IP = stringPreferencesKey("client_tile_ip")
         val AUTO_CONNECT_ENABLED = booleanPreferencesKey("auto_connect_enabled")
+        val ADAPTIVE_LATENCY = booleanPreferencesKey("adaptive_latency")
         val AUTO_CONNECT_LIST = stringPreferencesKey("auto_connect_list")
         val CLIENT_PERSISTENT_CONNECTION = booleanPreferencesKey("client_persistent_connection")
         val CONNECTION_SOUND_ENABLED = booleanPreferencesKey("connection_sound_enabled")
@@ -398,7 +404,9 @@ class SettingsDataStore(context: Context) {
             noiseReductionStrength = preferences[PreferencesKeys.NOISE_REDUCTION_STRENGTH] ?: 50,
             lastSeenChangelogVersion = preferences[PreferencesKeys.LAST_SEEN_CHANGELOG_VERSION] ?: "",
             autoUpdateCheckEnabled = preferences[PreferencesKeys.AUTO_UPDATE_CHECK_ENABLED] ?: true,
-            latencyMs = preferences[PreferencesKeys.LATENCY_MS] ?: 20,
+            latencyMs = preferences[PreferencesKeys.LATENCY_MS] ?: 40,
+            adaptiveLatency = resolveAdaptiveLatency(preferences[PreferencesKeys.ADAPTIVE_LATENCY],
+                preferences.contains(PreferencesKeys.LATENCY_MS)),
             maxPayloadBytes = preferences[PreferencesKeys.MAX_PAYLOAD] ?: 1390,
             securityMode = preferences[PreferencesKeys.SECURITY_MODE] ?: "OFF",
             authKey = authKeys.authKey,
@@ -524,9 +532,17 @@ class SettingsDataStore(context: Context) {
         }
     }
 
+    suspend fun saveAdaptiveLatency(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.ADAPTIVE_LATENCY] = enabled
+        }
+    }
+
     suspend fun saveAdvancedAudio(latencyMs: Int, maxPayloadBytes: Int) {
         dataStore.edit { preferences ->
-            preferences[PreferencesKeys.LATENCY_MS] = latencyMs
+            // 20..400 matches the settings slider/input; PlayoutGovernor still
+            // enforces its own 15 ms floor downstream.
+            preferences[PreferencesKeys.LATENCY_MS] = latencyMs.coerceIn(20, 400)
             preferences[PreferencesKeys.MAX_PAYLOAD] = maxPayloadBytes
         }
     }
@@ -753,3 +769,7 @@ class SettingsDataStore(context: Context) {
     }
 
 }
+
+// Missing new preference must not reinterpret an existing manual setting.
+internal fun resolveAdaptiveLatency(saved: Boolean?, hasManualValue: Boolean): Boolean =
+    saved ?: !hasManualValue

@@ -134,7 +134,12 @@ object NotificationCenter {
 
     fun post(context: Context, id: Int, notification: Notification) {
         if (!canPost(context)) return
-        NotificationManagerCompat.from(context).notify(id, notification)
+        try {
+            NotificationManagerCompat.from(context).notify(id, notification)
+        } catch (denied: SecurityException) {
+            // Notification permission can be revoked after the initial check.
+            android.util.Log.w("NotificationCenter", "Notification $id rejected by system", denied)
+        }
     }
 
     fun cancel(context: Context, id: Int) {
@@ -178,9 +183,7 @@ object NotificationCenter {
             .setShortCriticalText(
                 if (muted) context.getString(R.string.notif_chip_muted) else "$percent%"
             )
-            .addAction(serverVolumeDownAction(context))
-            .addAction(serverVolumeUpAction(context))
-            .addAction(stopAction(context))
+            .withModeActions(context)
             .build()
     }
 
@@ -206,9 +209,7 @@ object NotificationCenter {
             .setShortCriticalText(
                 if (muted) context.getString(R.string.notif_chip_muted) else "$percent%"
             )
-            .addAction(clientVolumeDownAction(context))
-            .addAction(clientVolumeUpAction(context))
-            .addAction(stopAction(context))
+            .withModeActions(context)
             .build()
     }
 
@@ -239,9 +240,7 @@ object NotificationCenter {
             .setShortCriticalText(
                 if (muted) context.getString(R.string.notif_chip_muted) else "$percent%"
             )
-            .addAction(serverVolumeDownAction(context))
-            .addAction(serverVolumeUpAction(context))
-            .addAction(stopAction(context))
+            .withModeActions(context)
             .build()
     }
 
@@ -257,6 +256,7 @@ object NotificationCenter {
             .setContentTitle(context.getString(R.string.notif_snapcast_title))
             .setContentText(status)
             .setShortCriticalText(context.getString(R.string.notif_chip_live))
+            .withModeActions(context)
             .build()
 
     /** Come quella Snapcast, e per lo stesso motivo: sono ascolti diversi. */
@@ -265,6 +265,7 @@ object NotificationCenter {
             .setContentTitle(context.getString(R.string.notif_rtp_title))
             .setContentText(status)
             .setShortCriticalText(context.getString(R.string.notif_chip_live))
+            .withModeActions(context)
             .build()
 
     fun autoConnectNotification(
@@ -281,14 +282,20 @@ object NotificationCenter {
                 )
             )
 
-        if (streaming) builder.addAction(stopAction(context))
-
-        return builder.build()
+        return builder.withModeActions(context).build()
     }
 
     fun postModeControl(context: Context) {
         if (!canPost(context)) return
         ensureChannels(context)
+        val manager = context.getSystemService(android.app.NotificationManager::class.java)
+        val hasRuntimeNotification = manager.activeNotifications.any {
+            it.id in setOf(ID_SERVER, ID_CLIENT, ID_AUTO_CONNECT, ID_SNAPCAST, ID_RTP)
+        }
+        if (hasRuntimeNotification) {
+            cancel(context, ID_CONTROL)
+            return
+        }
         post(context, ID_CONTROL, modeControlNotification(context))
     }
 
@@ -314,11 +321,16 @@ object NotificationCenter {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentTitle(context.getString(R.string.notif_mode_control_title))
             .setContentText(text)
-            .setOngoing(true)
+            .setOngoing(false)
             .setOnlyAlertOnce(true)
             .setLocalOnly(true)
             .setShowWhen(false)
-            .addAction(
+            .withModeActions(context)
+            .build()
+    }
+
+    private fun NotificationCompat.Builder.withModeActions(context: Context): NotificationCompat.Builder =
+        this.addAction(
                 NotificationCompat.Action.Builder(
                     IconCompat.createWithResource(context, R.drawable.ic_notif_stream),
                     context.getString(R.string.send_title),
@@ -339,8 +351,6 @@ object NotificationCenter {
                     broadcast(context, REQ_MODE_OFF, StreamingActionReceiver.ACTION_MODE_OFF)
                 ).build()
             )
-            .build()
-    }
 
     // Un comando esterno rifiutato non deve sparire in silenzio: l'utente che ha
     // appena aggiornato deve capire che serve il token, non pensare a un bug.
@@ -374,8 +384,9 @@ object NotificationCenter {
         context: Context,
         channelId: String,
         smallIcon: Int
-    ): NotificationCompat.Builder =
-        NotificationCompat.Builder(context, channelId)
+    ): NotificationCompat.Builder {
+        cancel(context, ID_CONTROL)
+        return NotificationCompat.Builder(context, channelId)
             .setSmallIcon(smallIcon)
             .setColor(ContextCompat.getColor(context, R.color.notif_accent))
             .setContentIntent(openApp(context))
@@ -387,6 +398,7 @@ object NotificationCenter {
             .setLocalOnly(true)
             .setShowWhen(false)
             .setRequestPromotedOngoing(true)
+    }
 
     private fun volumeStyle(
         context: Context,
