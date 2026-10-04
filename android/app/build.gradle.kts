@@ -1,5 +1,9 @@
 val ciVersionCode = System.getenv("WFAS_VERSION_CODE")?.toIntOrNull()
 val ciVersionName = System.getenv("WFAS_VERSION_NAME")?.takeIf { it.isNotBlank() }
+val releaseKeystore = System.getenv("AUDIOBRIDGE_SIGNING_KEYSTORE")?.takeIf { it.isNotBlank() }
+val releaseStorePassword = System.getenv("AUDIOBRIDGE_SIGNING_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
+val releaseKeyAlias = System.getenv("AUDIOBRIDGE_SIGNING_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+val releaseKeyPassword = System.getenv("AUDIOBRIDGE_SIGNING_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
 
 plugins {
     alias(libs.plugins.android.application)
@@ -17,20 +21,18 @@ android {
     }
 
     signingConfigs {
-        getByName("debug") {
-            System.getenv("WFAS_LAB_KEYSTORE")
-                ?.takeIf { it.isNotBlank() }
-                ?.let { path ->
-                    storeFile = file(path)
-                    storePassword = "android"
-                    keyAlias = "androiddebugkey"
-                    keyPassword = "android"
-                }
+        create("audiobridgeRelease") {
+            if (releaseKeystore != null) {
+                storeFile = file(releaseKeystore)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
         }
     }
 
     defaultConfig {
-        applicationId = "com.cuscus.wifiaudiostreaming.lab"
+        applicationId = "io.github.mu23xr.audiobridge"
         minSdk = 24
         targetSdk = 36
         // CI builds use a monotonically increasing versionCode so each signed
@@ -44,6 +46,7 @@ android {
 
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("audiobridgeRelease")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
