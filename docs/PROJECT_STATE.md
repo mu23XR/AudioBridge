@@ -2,6 +2,10 @@
 
 Last governance refresh: 2026-09-29
 
+## test.17 Windows package (2026-10-11)
+
+The user prioritizes a usable Windows desktop build from test.17; independent rewriting is deferred. Issue #20 tracks `build/test17-desktop`. A test.16 → test.17 diff confirms the original application changes were Android-only. Windows now implements Chinese/language choice (#24), adaptive/manual playback and bounded recovery (#25), unified tray actions (#26), and preview configuration/update isolation (#27). The self-contained local candidate is in `desktop-test17/AudioBridge-Test`; full Desktop checks/package and real local WFAS send/receive/capture passed. Build/startup fixes #21/#22/#23 are committed as 982c146. Chinese appearance #30 passed user full-window acceptance after equal-size actual-control comparison selected DengXian and the final bundle loaded its regular/bold faces. Earlier YaHei/renderer attempts failed and are not shipped. Role cleanup/receiver volume corrections #28/#29 still await full manual acceptance. Android interoperability, multicast, hardware fault and longevity checks remain open. No stable publication or Android installation occurred. See `docs/work-items/test17-desktop-parity.md` and `docs/handoffs/2026-10-11-test17-desktop.md` (updated 2026-10-12).
+
 ## Active implementation (2026-10-04)
 
 `fix/test17-adaptive-notifications` retains the local test.17 work and implements Issues #14/#15/#16: playback health/recovery corrections, selectable adaptive versus continuous manual latency, consolidated runtime/mode controls, and independent test identities. Debug is `.debug`; signed preview is `.test` with the existing permanent signer; stable release keeps the permanent package. Both devices retain test.16 alongside signed test.17. 39 unit tests and lintDebug pass (0 errors); signed preview CI run37181977448 passed Android build/tests/lint/signing, Windows and governance. Full real-device longevity and notification acceptance remain pending. See `docs/handoffs/2026-10-04-test17-implementation.md`.

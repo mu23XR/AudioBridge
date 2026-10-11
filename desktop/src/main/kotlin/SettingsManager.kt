@@ -27,6 +27,7 @@ data class AllSettings(
 
 data class AppSettings(
     val theme: Theme = Theme.System,
+    val language: String = "system",
     val hideWindowsPrivacyBanner: Boolean = false,
     val hideWindowsRoutingBanner: Boolean = false,
     val customThemeColor: Long? = null,
@@ -187,7 +188,7 @@ fun AppSettings.toDlnaConfig(): DlnaServerConfig = DlnaServerConfig(
 )
 
 object SettingsRepository {
-    private val prefs = Preferences.userRoot().node("com/mavco/wifiaudiostreamer")
+    private val prefs = Preferences.userRoot().node(BuildIdentity.preferencesNode)
 
     private const val THEME_KEY = "app_theme"
     private const val HIDE_PRIVACY_KEY = "hide_windows_privacy"
@@ -260,17 +261,17 @@ object SettingsRepository {
         // Prima la custodia, poi il file: ConfigManager.save non scrive piu' i
         // segreti, quindi se il vault fallisce non restano comunque in chiaro.
         persistSecrets(settings)
-        runCatching { ConfigManager.save(settings) }
+        ConfigManager.save(settings)
         UsbLink.configure(settings.app.usbModeEnabled, settings.app.usbLatencyMs, settings.app.usbInterface)
         WfasPolicy.configure(settings.app.wfasMode)
     }
 
     fun loadSettings(): AllSettings {
         val stored = if (ConfigManager.exists()) {
-            runCatching { ConfigManager.load() }.getOrDefault(ConfigManager.DEFAULTS)
+            ConfigManager.load()
         } else {
             val migrated = if (hasLegacyPreferences()) loadFromPreferencesLegacy() else ConfigManager.DEFAULTS
-            runCatching { ConfigManager.save(migrated) }
+            ConfigManager.save(migrated)
             migrated
         }
         val settings = hydrateSecrets(stored)
@@ -406,7 +407,7 @@ object SettingsRepository {
         val bufferSize = prefs.getInt(BUFFER_SIZE_KEY, 512)
         val latencyMs = prefs.getInt(LATENCY_MS_KEY, 120)
         val maxPayloadBytes = prefs.getInt(MAX_PAYLOAD_KEY, 1390)
-        val audioSettings = AudioSettings_V1(sampleRate, bitDepth, channels, bufferSize, latencyMs, maxPayloadBytes)
+        val audioSettings = AudioSettings_V1(sampleRate, bitDepth, channels, bufferSize, latencyMs.coerceIn(20, 400), maxPayloadBytes, adaptiveLatency = false)
         val streamingPort = prefs.get(STREAMING_PORT_KEY, "9090")
         val micPort = prefs.get(MIC_PORT_KEY, "9092")
         val netInterface = prefs.get(NETWORK_INTERFACE_KEY, "Auto")

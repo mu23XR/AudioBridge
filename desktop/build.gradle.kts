@@ -35,10 +35,12 @@ tasks.register("generateDisplayVersionFile") {
 tasks.register("generateVersionProperties") {
     val outFile = layout.projectDirectory.file("src/main/resources/version.properties").asFile
     outputs.file(outFile)
+    inputs.property("displayVersion", displayVersion)
     doLast {
         outFile.writeText(
             "app.version=$appVersion\n" +
-                "app.display.version=$displayVersion\n"
+                "app.display.version=$displayVersion\n" +
+                "app.channel=${if (displayVersion.contains("-test.", ignoreCase = true)) "preview" else "stable"}\n"
         )
     }
 }
@@ -284,7 +286,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Rpm)
 
-            packageName = "AudioBridge"
+            packageName = if (displayVersion.contains("-test.", ignoreCase = true)) "AudioBridge-Test" else "AudioBridge"
             packageVersion = appVersion
 
             modules(

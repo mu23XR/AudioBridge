@@ -54,7 +54,7 @@ object IpcAuth {
     private const val PROOF_CONTEXT = "WFAS-IPC-v1"
 
     private const val SESSION_SUFFIX = ".port"
-    private const val SESSION_PREFIX = "wfas-"
+    private val SESSION_PREFIX: String get() = "${BuildIdentity.ipcPrefix}-"
 
     private val rng = SecureRandom()
 
@@ -94,10 +94,10 @@ object IpcAuth {
     fun runtimeDir(): File {
         val xdg = System.getenv("XDG_RUNTIME_DIR")?.trim().orEmpty()
         val base = if (xdg.isNotEmpty() && File(xdg).isDirectory) {
-            File(xdg, "wfas")
+            File(xdg, BuildIdentity.configName)
         } else {
             val user = System.getProperty("user.name")?.replace(Regex("[^A-Za-z0-9_.-]"), "_") ?: "user"
-            File(System.getProperty("java.io.tmpdir"), "wfas-$user")
+            File(System.getProperty("java.io.tmpdir"), "${BuildIdentity.ipcPrefix}-$user")
         }
         if (!base.isDirectory) {
             runCatching { base.mkdirs() }

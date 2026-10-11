@@ -178,6 +178,8 @@ static void mic_mix_into(int16_t *out, int num_shorts) {
 #include <mmreg.h>
 #include <ksmedia.h>
 #include <propidl.h>
+/* Older MinGW import libraries do not define these device property keys. */
+#include <initguid.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <stdarg.h>
 

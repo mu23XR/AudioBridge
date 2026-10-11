@@ -77,12 +77,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import java.util.Locale
-
-private fun isItalian(): Boolean = Locale.getDefault().language == "it"
-
-data class Bilingual(val en: String, val it: String) {
-    fun get(): String = if (isItalian()) it else en
+data class Bilingual(val en: String, val it: String, val zh: String? = null) {
+    fun get(): String = if (Strings.language == "zh") zh ?: en else en
 }
 
 enum class ChangelogAccent { PRIMARY, SECONDARY, TERTIARY }
@@ -107,6 +103,34 @@ data class ChangelogEntry(
 object Changelog {
 
     val entries: List<ChangelogEntry> = listOf(
+        ChangelogEntry(
+            version = Strings.appVersion,
+            date = Bilingual("October 2026", "", "2026 年 10 月"),
+            headline = Bilingual("The Windows edition now includes the test.17 receive controls and Chinese UI.", "",
+                "Windows 版同步 test.17 接收控制，并加入中文界面。"),
+            items = listOf(
+                ChangelogItem(Icons.Outlined.GraphicEq,
+                    Bilingual("Adaptive or manual latency", "", "自适应或手动延迟"),
+                    Bilingual("Choose an adaptive 20–80 ms receive target or any manual integer from 20 to 400 ms. The target belongs to the receiving device.", "",
+                        "可选择 20–80 ms 自适应目标，或手动设置 20–400 ms 的任意整数。数值属于接收设备，不代表端到端延迟。")),
+                ChangelogItem(Icons.Outlined.Sync,
+                    Bilingual("Playback recovery", "", "播放恢复"),
+                    Bilingual("Output stalls and errors trigger bounded recovery. Persistent failures reconnect with the same target and without another connection beep.", "",
+                        "输出停滞或失败会触发受控恢复。持续失败后保留目标重连，避免重复连接提示音。")),
+                ChangelogItem(Icons.Outlined.Computer,
+                    Bilingual("One tray menu", "", "统一托盘菜单"),
+                    Bilingual("Send, receive, stop and volume controls share one tray icon. Repeating a command restarts that role.", "",
+                        "发送、接收、停止和音量集中在一个托盘图标中。重复命令会重新开始对应模式。")),
+                ChangelogItem(Icons.Outlined.Palette,
+                    Bilingual("Chinese and English", "", "中文与英文"),
+                    Bilingual("Choose the interface language in Appearance; the choice is saved for the next launch.", "",
+                        "在外观设置中选择界面语言，重启后保留选择。")),
+                ChangelogItem(Icons.Outlined.VpnKey,
+                    Bilingual("Independent test channel", "", "独立测试通道"),
+                    Bilingual("Test settings, credentials, IPC and updates are isolated. The bundle includes its own Java runtime.", "",
+                        "测试版独立保存设置、凭据和更新通道，便携包自带 Java 运行时，可与正式版并存。"))
+            )
+        ),
         ChangelogEntry(
             version = "1.2",
             date = Bilingual("August 2026", "Agosto 2026"),
@@ -264,10 +288,10 @@ object Changelog {
     val latest: ChangelogEntry get() = entries.first()
 }
 
-private val whatsNewTitle = Bilingual("What's new", "Novità")
-private val versionHistoryTitle = Bilingual("Version history", "Cronologia versioni")
-private val continueLabel = Bilingual("Continue", "Continua")
-private val closeLabel = Bilingual("Close", "Chiudi")
+private val whatsNewTitle = Bilingual("What's new", "Novità", "更新内容")
+private val versionHistoryTitle = Bilingual("Version history", "Cronologia versioni", "历史版本")
+private val continueLabel = Bilingual("Continue", "Continua", "继续")
+private val closeLabel = Bilingual("Close", "Chiudi", "关闭")
 
 @Composable
 fun ChangelogScreen(

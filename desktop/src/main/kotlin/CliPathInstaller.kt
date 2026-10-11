@@ -191,6 +191,7 @@ object CliPathInstaller {
     // ── Public API ────────────────────────────────────────────────────────────
 
     fun isInstalled(): Boolean = when {
+        BuildIdentity.preview -> false
         isWindows -> {
             val bat = File(wfasBatDir(), "wfas.bat")
             bat.exists() && isInWindowsUserPath(wfasBatDir().absolutePath)
@@ -211,6 +212,7 @@ object CliPathInstaller {
      * installazione non deve rifare il setup a mano.
      */
     fun refreshIfOutdated() {
+        if (BuildIdentity.preview) return
         runCatching {
             val shim = when {
                 isWindows -> File(wfasBatDir(), "wfas.bat")
@@ -227,6 +229,7 @@ object CliPathInstaller {
     }
 
     fun install(): InstallResult = when {
+        BuildIdentity.preview -> InstallResult.Failure(Strings.get("preview_cli_hint"))
         isWindows -> installWindows()
         isMac     -> installMac()
         isLinux   -> installLinux()

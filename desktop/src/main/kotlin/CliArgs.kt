@@ -190,17 +190,7 @@ data class CliArgs(
 
     companion object {
 
-        private val VERSION: String by lazy {
-            val raw = runCatching {
-                CliArgs::class.java.getResourceAsStream("/version.properties")
-                    ?.bufferedReader()
-                    ?.lineSequence()
-                    ?.firstOrNull { it.startsWith("app.version=") }
-                    ?.removePrefix("app.version=")
-                    ?.trim()
-            }.getOrNull() ?: "unknown"
-            displayVersion(raw)
-        }
+        private val VERSION: String by lazy { Strings.appVersion }
 
         val OFFLINE_PAIR_VERBS = setOf("inspect", "check", "parse", "encode", "render")
 
@@ -790,8 +780,8 @@ data class CliArgs(
                         i++
                         val ms = raw.toIntOrNull()
                             ?: parseError("--latency must be numeric, got '$raw'")
-                        if (ms < 0 || ms > 5000)
-                            parseError("--latency must be between 0 and 5000, got $ms")
+                        if (ms < 20 || ms > 400)
+                            parseError("--latency must be between 20 and 400, got $ms")
                         latency = ms
                     }
                     "--no-tray" -> noTray = true
