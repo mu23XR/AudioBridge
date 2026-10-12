@@ -21,7 +21,7 @@ enum class HostOs { WINDOWS, MACOS, LINUX, OTHER }
 
 object ConfigPaths {
 
-    const val APP_DIR_NAME = "wfas"
+    val APP_DIR_NAME: String get() = BuildIdentity.configName
     const val CONFIG_FILE_NAME = "config.json"
 
     val os: HostOs by lazy {
@@ -62,9 +62,9 @@ object ConfigPaths {
 
     fun tmpDir(): File = File(System.getProperty("java.io.tmpdir", "."))
 
-    fun portFile(pid: Long): File = File(tmpDir(), "wfas-$pid.port")
+    fun portFile(pid: Long): File = File(tmpDir(), "${BuildIdentity.ipcPrefix}-$pid.port")
 
-    fun portFileGlob(): String = File(tmpDir(), "wfas-<pid>.port").path
+    fun portFileGlob(): String = File(tmpDir(), "${BuildIdentity.ipcPrefix}-<pid>.port").path
 
     fun sdpFile(): File = File(tmpDir(), "stream.sdp")
 

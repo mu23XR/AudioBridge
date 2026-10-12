@@ -411,7 +411,7 @@ fun runCli(rawArgs: CliArgs) {
     val stored = SettingsRepository.loadSettings()
     val args = resolveAuthKey(rawArgs, stored)
     val settings = args.latency
-        ?.let { stored.copy(audio = stored.audio.copy(latencyMs = it)) }
+        ?.let { stored.copy(audio = stored.audio.copy(latencyMs = it, adaptiveLatency = false)) }
         ?: stored
     PairCli.applyInviteToNetwork(args)
 
@@ -1203,7 +1203,7 @@ private suspend fun runCliRtp(args: CliArgs, settings: AllSettings) {
         kotlin.system.exitProcess(ExitCode.RESOURCE_ERROR)
     }
 
-    val latencyMs = args.latency ?: settings.audio.latencyMs
+    val latencyMs = args.latency ?: if (settings.audio.adaptiveLatency) 120 else settings.audio.latencyMs
     if (args.volume != null) NetworkHandler_v1.setClientVolume(args.volume)
     var muted = args.mute
     if (muted) NetworkHandler_v1.setClientVolume(0f)

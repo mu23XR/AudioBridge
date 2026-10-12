@@ -245,7 +245,7 @@ fun AppContent(
                             modifier = Modifier.size(36.dp)
                         )
                         Spacer(Modifier.width(12.dp))
-                        Text("AudioBridge", fontWeight = FontWeight.SemiBold)
+                        Text(BuildIdentity.title, fontWeight = FontWeight.SemiBold)
                     }
                 },
                 actions = {
@@ -263,7 +263,7 @@ fun AppContent(
             if (showLinuxDialog) {
                 AlertDialog(
                     onDismissRequest = { showLinuxDialog = false },
-                    title = { Text("Missing Audio Dependencies") },
+                    title = { Text(stringResource("linux_missing_deps_title")) },
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(virtualDriverStatus.message)
@@ -280,11 +280,11 @@ fun AppContent(
                             clipboardManager.setText(AnnotatedString(virtualDriverStatus.commands))
                             showLinuxDialog = false
                         }) {
-                            Text("Copy & Close")
+                            Text(stringResource("copy_and_close"))
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { showLinuxDialog = false }) { Text("Ignore") }
+                        TextButton(onClick = { showLinuxDialog = false }) { Text(stringResource("ignore")) }
                     }
                 )
             }
@@ -617,7 +617,7 @@ fun AppContent(
                                     OutlinedTextField(
                                         value = manualIp,
                                         onValueChange = { manualIp = it },
-                                        label = { Text("Manual Server IP") },
+                                        label = { Text(stringResource("manual_server_ip")) },
                                         modifier = Modifier.weight(1f),
                                         singleLine = true
                                     )
@@ -625,7 +625,7 @@ fun AppContent(
                                         onClick = { onConnectManual(manualIp) },
                                         enabled = manualIp.isNotBlank() && selectedOutputDevice != null
                                     ) {
-                                        Text("Connect")
+                                        Text(stringResource("connect"))
                                     }
                                     QrScanButton()
                                 }
@@ -758,7 +758,7 @@ fun VirtualDriverBanner(status: VirtualDriverStatus.Missing) {
                     contentColor = MaterialTheme.colorScheme.onError
                 )
             ) {
-                Text("Download")
+                Text(stringResource("download"))
             }
         }
     }
@@ -1313,6 +1313,17 @@ fun SettingsScreen(
                             ) {
                                 when (selectedSettingsTab) {
                                     0 -> {
+                                        ExposedDropdown(
+                                            stringResource("language"),
+                                            when (appSettings.language) {
+                                                "zh" -> "简体中文"
+                                                "en" -> "English"
+                                                else -> stringResource("language_system")
+                                            },
+                                            listOf(stringResource("language_system") to "system", "简体中文" to "zh", "English" to "en"),
+                                            { onAppSettingsChange(appSettings.copy(language = it)) },
+                                            Modifier.fillMaxWidth()
+                                        )
                                         ThemeSelector(
                                             currentTheme = appSettings.theme,
                                             onThemeChange = { onAppSettingsChange(appSettings.copy(theme = it)) }
@@ -1345,7 +1356,7 @@ fun SettingsScreen(
                                                 ) {
                                                     Icon(Icons.Outlined.Image, contentDescription = null)
                                                     Spacer(Modifier.width(8.dp))
-                                                    Text("Extract from Image")
+                                                    Text(stringResource("extract_from_image"))
                                                 }
 
                                                 OutlinedButton(
@@ -1354,12 +1365,12 @@ fun SettingsScreen(
                                                 ) {
                                                     Icon(Icons.Outlined.Restore, contentDescription = null)
                                                     Spacer(Modifier.width(8.dp))
-                                                    Text("Reset to Default")
+                                                    Text(stringResource("reset_to_default"))
                                                 }
 
                                                 if (appSettings.customThemeColor != null) {
                                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                                        Text("Current Seed: ", style = MaterialTheme.typography.bodyMedium)
+                                                        Text(stringResource("current_seed"), style = MaterialTheme.typography.bodyMedium)
                                                         Box(
                                                             modifier = Modifier
                                                                 .size(32.dp)
@@ -4157,18 +4168,43 @@ fun AudioSettingsContent(settings: AudioSettings_V1, onSettingsChange: (AudioSet
             shape = RoundedCornerShape(topEndPercent = 50, bottomEndPercent = 50)
         ) { Text(stringResource("stereo")) }
     }
-    val latencyWord = when {
-        settings.latencyMs < 80   -> stringResource("latency_responsive")
-        settings.latencyMs <= 180 -> stringResource("latency_balanced")
-        else                      -> stringResource("latency_stable")
+    Text(stringResource("latency_mode"), style = MaterialTheme.typography.labelLarge)
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        SegmentedButton(
+            selected = settings.adaptiveLatency,
+            onClick = { onSettingsChange(settings.copy(adaptiveLatency = true)) },
+            shape = SegmentedButtonDefaults.itemShape(0, 2)
+        ) { Text(stringResource("latency_adaptive")) }
+        SegmentedButton(
+            selected = !settings.adaptiveLatency,
+            onClick = { onSettingsChange(settings.copy(adaptiveLatency = false)) },
+            shape = SegmentedButtonDefaults.itemShape(1, 2)
+        ) { Text(stringResource("latency_manual")) }
     }
-    Text(stringResource("latency_label", settings.latencyMs, latencyWord), style = MaterialTheme.typography.labelLarge)
-    Slider(
-        settings.latencyMs.toFloat(),
-        { onSettingsChange(settings.copy(latencyMs = it.roundToInt())) },
-        valueRange = 40f..400f,
-        steps = ((400f - 40f) / 20f).toInt() - 1
-    )
+    Text(stringResource(if (settings.adaptiveLatency) "latency_adaptive_hint" else "latency_manual_hint"),
+        style = MaterialTheme.typography.bodySmall)
+    val liveTarget by NetworkHandler_v1.playbackTargetMs.collectAsState()
+    liveTarget?.let { Text(stringResource("playback_target", it), style = MaterialTheme.typography.bodySmall) }
+    if (!settings.adaptiveLatency) {
+        var input by remember(settings.latencyMs) { mutableStateOf(settings.latencyMs.toString()) }
+        val value = input.toIntOrNull()?.takeIf { it in 20..400 }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = input, onValueChange = { input = it }, singleLine = true,
+                label = { Text(stringResource("latency_value")) }, isError = value == null,
+                supportingText = { if (value == null) Text(stringResource("latency_invalid")) },
+                modifier = Modifier.weight(1f)
+            )
+            Button(onClick = { value?.let { onSettingsChange(settings.copy(latencyMs = it)) } }, enabled = value != null) {
+                Text(stringResource("ok"))
+            }
+        }
+        Slider(
+            value = settings.latencyMs.toFloat().coerceIn(20f, 400f),
+            onValueChange = { onSettingsChange(settings.copy(latencyMs = it.roundToInt())) },
+            valueRange = 20f..400f, steps = 0
+        )
+    }
 
     var showAdvancedAudio by remember { mutableStateOf(false) }
     TextButton(onClick = { showAdvancedAudio = !showAdvancedAudio }) {
@@ -4489,7 +4525,7 @@ fun NetworkSettingsContent(
                 .size(iconLayoutSize)
         )
         Column(Modifier.weight(1f)) {
-            Text("WFAS (custom)", style = MaterialTheme.typography.bodyLarge)
+            Text("WFAS", style = MaterialTheme.typography.bodyLarge)
             Text(
                 stringResource("protocol_wfas_desc"),
                 style = MaterialTheme.typography.bodySmall,
@@ -4562,7 +4598,7 @@ fun NetworkSettingsContent(
         OutlinedTextField(
             appSettings.rtpPort,
             { if (it.all(Char::isDigit) && it.length <= 5) onAppSettingsChange(appSettings.copy(rtpPort = it)) },
-            label = { Text("Porta RTP") },
+            label = { Text(stringResource("rtp_rx_port")) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
         )
@@ -4769,7 +4805,7 @@ fun WindowsPrivacyBanner(onDismiss: (Boolean) -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.MicOff, contentDescription = "Privacy", tint = onContainerColor, modifier = Modifier.size(32.dp))
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Windows Mic Privacy", fontWeight = FontWeight.Bold, color = onContainerColor)
+                    Text(stringResource("windows_mic_privacy"), fontWeight = FontWeight.Bold, color = onContainerColor)
                     Text(
                         "If the client hears total silence, Windows is blocking the virtual cable. You MUST allow desktop apps to access the microphone in Windows Settings.",
                         style = MaterialTheme.typography.bodySmall, color = onContainerColor
@@ -4784,7 +4820,7 @@ fun WindowsPrivacyBanner(onDismiss: (Boolean) -> Unit) {
                         onCheckedChange = { dontShowAgain = it },
                         colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.tertiary)
                     )
-                    Text("Do not show again", style = MaterialTheme.typography.bodySmall, color = onContainerColor)
+                    Text(stringResource("do_not_show_again"), style = MaterialTheme.typography.bodySmall, color = onContainerColor)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
@@ -4792,7 +4828,7 @@ fun WindowsPrivacyBanner(onDismiss: (Boolean) -> Unit) {
                             try { Runtime.getRuntime().exec("cmd /c start ms-settings:privacy-microphone") } catch (e: Exception) {}
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary, contentColor = MaterialTheme.colorScheme.onTertiary)
-                    ) { Text("Fix") }
+                    ) { Text(stringResource("fix")) }
 
                     Button(
                         onClick = {
@@ -4800,7 +4836,7 @@ fun WindowsPrivacyBanner(onDismiss: (Boolean) -> Unit) {
                             onDismiss(dontShowAgain) // Comunica a Main.kt se deve salvarlo per sempre
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary, contentColor = MaterialTheme.colorScheme.onTertiary)
-                    ) { Text("OK") }
+                    ) { Text(stringResource("ok")) }
                 }
             }
         }
@@ -4827,7 +4863,7 @@ fun WindowsRoutingBanner(onDismiss: (Boolean) -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.VolumeUp, contentDescription = "Routing", tint = onContainerColor, modifier = Modifier.size(32.dp))
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Action Required: Set Audio Output", fontWeight = FontWeight.Bold, color = onContainerColor)
+                    Text(stringResource("windows_routing_title"), fontWeight = FontWeight.Bold, color = onContainerColor)
                     Text(
                         "To stream system audio, you must click the speaker icon in your Windows taskbar and set 'CABLE Input' as your default playback device before starting.",
                         style = MaterialTheme.typography.bodySmall, color = onContainerColor
@@ -4842,7 +4878,7 @@ fun WindowsRoutingBanner(onDismiss: (Boolean) -> Unit) {
                         onCheckedChange = { dontShowAgain = it },
                         colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.secondary)
                     )
-                    Text("Do not show again", style = MaterialTheme.typography.bodySmall, color = onContainerColor)
+                    Text(stringResource("do_not_show_again"), style = MaterialTheme.typography.bodySmall, color = onContainerColor)
                 }
                 Button(
                     onClick = {
@@ -4850,7 +4886,7 @@ fun WindowsRoutingBanner(onDismiss: (Boolean) -> Unit) {
                         onDismiss(dontShowAgain)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary, contentColor = MaterialTheme.colorScheme.onSecondary)
-                ) { Text("OK") }
+                ) { Text(stringResource("ok")) }
             }
         }
     }
@@ -4976,7 +5012,7 @@ fun AdvancedColorPicker(
 
         Column {
             Text(
-                "Lightness: ${(lightness * 100).toInt()}%",
+                stringResource("color_lightness", (lightness * 100).toInt()),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -5014,7 +5050,7 @@ fun AdvancedColorPicker(
                     }
                 }
             },
-            label = { Text("HEX Color") },
+            label = { Text(stringResource("hex_color")) },
             prefix = { Text("#") },
             singleLine = true,
             modifier = Modifier.width(180.dp),

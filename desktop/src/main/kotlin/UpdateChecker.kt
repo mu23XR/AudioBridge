@@ -27,7 +27,7 @@ object DownloadLinks {
 object UpdateChecker {
 
     private const val REPO = "mu23XR/AudioBridge"
-    const val RELEASES_URL = "https://github.com/mu23XR/AudioBridge/releases/latest"
+    val RELEASES_URL: String get() = if (BuildIdentity.preview) DownloadLinks.GITHUB_RELEASES else "${DownloadLinks.GITHUB_RELEASES}/latest"
 
     val currentVersion: String get() = Strings.appVersion
 
@@ -39,11 +39,35 @@ object UpdateChecker {
         data class Ahead(val current: String, val latest: String) : Result()
     }
 
-    private val TAG_RX = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"")
+    private val VERSION_RX = Regex("^(\\d+)\\.(\\d+)\\.(\\d+)(?:-([0-9A-Za-z.-]+))?(?:\\+[0-9A-Za-z.-]+)?$")
+
+    data class Release(val version: String, val url: String)
+
+    /** Ignore Android archives and releases belonging to the other channel. */
+    fun selectRelease(json: String, preview: Boolean, platform: String): Release? {
+        val list = ConfigManager.parseJson(json) as? List<*> ?: throw IllegalArgumentException("Expected a GitHub release list")
+        return list.mapNotNull { entry ->
+            val item = entry as? Map<*, *> ?: return@mapNotNull null
+            if (item["draft"] == true) return@mapNotNull null
+            val tag = item["tag_name"] as? String ?: return@mapNotNull null
+            val version = normalize(tag)
+            if (!VERSION_RX.matches(version)) return@mapNotNull null
+            val test = version.contains("-test.")
+            if (preview != test || (preview && item["prerelease"] != true) || (!preview && (item["prerelease"] == true || '-' in version))) return@mapNotNull null
+            val assets = item["assets"] as? List<*> ?: return@mapNotNull null
+            val compatible = assets.any { asset ->
+                val name = (asset as? Map<*, *>)?.get("name") as? String ?: return@any false
+                name.startsWith("AudioBridge-") && name.contains("-$version-$platform.") &&
+                    (name.endsWith(".zip") || name.endsWith(".tar.gz"))
+            }
+            if (!compatible) return@mapNotNull null
+            Release(version, "${DownloadLinks.GITHUB_RELEASES}/tag/$tag")
+        }.maxWithOrNull { a, b -> compareVersions(a.version, b.version) }
+    }
 
     fun check(timeoutMs: Int = 5000): Result {
         return try {
-            val conn = (URL("https://api.github.com/repos/$REPO/releases/latest")
+            val conn = (URL("https://api.github.com/repos/$REPO/releases?per_page=100")
                 .openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = timeoutMs
@@ -52,20 +76,27 @@ object UpdateChecker {
                 setRequestProperty("Accept", "application/vnd.github+json")
                 setRequestProperty("User-Agent", "WFAS-UpdateChecker")
             }
-            val code = conn.responseCode
-            if (code != 200) {
-                conn.disconnect()
-                return Result.Failed("HTTP $code")
+            val body = try {
+                val code = conn.responseCode
+                if (code != 200) return Result.Failed("HTTP $code")
+                val bytes = conn.inputStream.use { it.readNBytes(8 * 1024 * 1024 + 1) }
+                require(bytes.size <= 8 * 1024 * 1024) { "Release response too large" }
+                bytes.toString(Charsets.UTF_8)
+            } finally { conn.disconnect() }
+            val os = when (ConfigPaths.os) {
+                HostOs.WINDOWS -> "windows"
+                HostOs.MACOS -> "macos"
+                HostOs.LINUX -> "linux"
+                else -> return Result.Failed("Unsupported platform")
             }
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
-            val tag = TAG_RX.find(body)?.groupValues?.get(1)
-                ?: return Result.Failed("no release tag found")
-            val latest = normalize(tag)
+            val arch = System.getProperty("os.arch").lowercase().let { if (it in listOf("aarch64", "arm64")) "arm64" else "x86_64" }
+            val release = selectRelease(body, BuildIdentity.preview, "$os-$arch")
+                ?: return Result.Failed(Strings.get("update_no_channel"))
+            val latest = release.version
             val current = normalize(currentVersion)
             val cmp = compareVersions(latest, current)
             when {
-                cmp > 0 -> Result.Available(current, latest, RELEASES_URL)
+                cmp > 0 -> Result.Available(current, latest, release.url)
                 cmp < 0 -> Result.Ahead(current, latest)
                 else    -> Result.UpToDate(current)
             }
@@ -78,14 +109,32 @@ object UpdateChecker {
         tag.trim().removePrefix("v").removePrefix("V").trim()
 
     fun compareVersions(a: String, b: String): Int {
-        val pa = a.split('.', '-', '+').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
-        val pb = b.split('.', '-', '+').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
-        val n = maxOf(pa.size, pb.size)
-        for (i in 0 until n) {
-            val x = pa.getOrElse(i) { 0 }
-            val y = pb.getOrElse(i) { 0 }
-            if (x != y) return x - y
+        val pa = VERSION_RX.matchEntire(normalize(a)) ?: error("Invalid version: $a")
+        val pb = VERSION_RX.matchEntire(normalize(b)) ?: error("Invalid version: $b")
+        for (i in 1..3) {
+            val cmp = pa.groupValues[i].toBigInteger().compareTo(pb.groupValues[i].toBigInteger())
+            if (cmp != 0) return cmp
         }
-        return 0
+        val preA = pa.groupValues[4]
+        val preB = pb.groupValues[4]
+        if (preA.isEmpty() || preB.isEmpty()) return when {
+            preA == preB -> 0
+            preA.isEmpty() -> 1
+            else -> -1
+        }
+        val partsA = preA.split('.')
+        val partsB = preB.split('.')
+        for (i in 0 until minOf(partsA.size, partsB.size)) {
+            val x = partsA[i]; val y = partsB[i]
+            val nx = x.toBigIntegerOrNull(); val ny = y.toBigIntegerOrNull()
+            val cmp = when {
+                nx != null && ny != null -> nx.compareTo(ny)
+                nx != null -> -1
+                ny != null -> 1
+                else -> x.compareTo(y)
+            }
+            if (cmp != 0) return cmp
+        }
+        return partsA.size.compareTo(partsB.size)
     }
 }

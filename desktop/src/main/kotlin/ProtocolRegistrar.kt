@@ -82,6 +82,7 @@ object ProtocolRegistrar {
      * dell'utente accorgersene.
      */
     fun ensureRegistered(): Boolean {
+        if (BuildIdentity.preview) return false
         if (isMac) return true
         val exe = launcherPath() ?: return false
         val current = registeredCommand()
@@ -93,6 +94,7 @@ object ProtocolRegistrar {
     }
 
     fun register(): Result<Unit> = runCatching {
+        check(!BuildIdentity.preview) { "Preview builds do not replace the Stable URL handler" }
         val exe = launcherPath()
             ?: error("cannot locate the AudioBridge executable")
         when {

@@ -40,10 +40,11 @@ class CfgField(
 )
 
 object ConfigManager {
+    internal fun parseJson(text: String): Any? = Json.parse(text)
 
     val DEFAULTS: AllSettings = AllSettings(
         app = AppSettings(),
-        audio = AudioSettings_V1(48000f, 16, 2, 512, 120, 1390),
+        audio = AudioSettings_V1(48000f, 16, 2, 512),
         streamingPort = "9090",
         micPort = "9092",
         micRoutingMode = "OFF"
@@ -65,7 +66,9 @@ object ConfigManager {
         CfgField("audio.bufferSize", CfgKind.INT, emptyList(), "Capture buffer size in bytes",
             { it.audio.bufferSize }, { s, v -> audioCopy(s) { copy(bufferSize = coerceInt("audio.bufferSize", v, min = 1)) } }),
         CfgField("audio.latencyMs", CfgKind.INT, emptyList(), "Target playout latency in milliseconds",
-            { it.audio.latencyMs }, { s, v -> audioCopy(s) { copy(latencyMs = coerceInt("audio.latencyMs", v, min = 0, max = 5000)) } }),
+            { it.audio.latencyMs }, { s, v -> audioCopy(s) { copy(latencyMs = coerceInt("audio.latencyMs", v, min = 20, max = 400)) } }),
+        CfgField("audio.adaptiveLatency", CfgKind.BOOL, emptyList(), "WFAS receiver adjusts its local target between 20 and 80 ms",
+            { it.audio.adaptiveLatency }, { s, v -> audioCopy(s) { copy(adaptiveLatency = coerceBool("audio.adaptiveLatency", v)) } }),
         CfgField("audio.maxPayloadBytes", CfgKind.INT, emptyList(), "Max PCM bytes per packet (MTU bound)",
             { it.audio.maxPayloadBytes }, { s, v -> audioCopy(s) { copy(maxPayloadBytes = coerceInt("audio.maxPayloadBytes", v, min = 64, max = 65000)) } }),
 
@@ -172,6 +175,8 @@ object ConfigManager {
 
         CfgField("app.theme", CfgKind.ENUM, listOf("Light", "Dark", "System"), "UI theme",
             { it.app.theme.name }, { s, v -> appCopy(s) { copy(theme = Theme.valueOf(coerceEnum("app.theme", v, listOf("Light", "Dark", "System")))) } }),
+        CfgField("app.language", CfgKind.ENUM, listOf("system", "zh", "en"), "UI language",
+            { it.app.language }, { s, v -> appCopy(s) { copy(language = coerceEnum("app.language", v, listOf("system", "zh", "en"))) } }),
         CfgField("app.customThemeColor", CfgKind.COLOR, emptyList(), "Seed color as #RRGGBB or #AARRGGBB, or null",
             { it.app.customThemeColor?.let { c -> colorLongToString(c) } }, { s, v -> appCopy(s) { copy(customThemeColor = parseColor("app.customThemeColor", v)) } }),
         CfgField("app.launchAtStartup", CfgKind.BOOL, emptyList(), "Launch app at OS login",
@@ -247,6 +252,12 @@ object ConfigManager {
             }
         }
         var result = DEFAULTS
+        // Old files described only a manual target. Do not switch existing users to adaptive.
+        if ("audio.latencyms" in flat && "audio.adaptivelatency" !in flat) {
+            val old = coerceInt("audio.latencyMs", flat["audio.latencyms"], min = 0, max = 5000)
+            flat["audio.latencyms"] = old.coerceIn(20, 400)
+            result = result.copy(audio = result.audio.copy(adaptiveLatency = false))
+        }
         for (field in fields) {
             val raw = flat[field.key.lowercase()] ?: continue
             result = try { field.setter(result, raw) } catch (e: ConfigException) { throw e } catch (e: Exception) {
