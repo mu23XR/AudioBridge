@@ -12,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import com.cuscus.wifiaudiostreaming.data.SettingsDataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -206,6 +207,7 @@ object ClientSessionController {
      * connection intent; transport timeouts do not call this.
      */
     fun pauseKeepTarget(context: Context? = null) {
+        RuntimeDiagnostics.event("RECEIVER_USER_PAUSE", "generation=$generation", true)
         context?.applicationContext?.let { appContext = it }
         desiredConnected = false
         generation += 1
@@ -235,6 +237,7 @@ object ClientSessionController {
     @SuppressLint("MissingPermission")
     private fun startAttempt(context: Context, serverInfo: ServerInfo, token: Long) {
         if (!desiredConnected || token != generation || attemptInFlight) return
+        RuntimeDiagnostics.event("RECEIVER_CONNECT_ATTEMPT", "attempt=$reconnectAttempt generation=$token peer=${serverInfo.ip}:${serverInfo.port}", true)
 
         // A retry of an already-announced logical session stays silent on
         // connect: replaying the chime made rapid drop-reconnect cycles sound

@@ -79,6 +79,34 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
     private boolean originalMediaMuted;
     private int originalMediaVolume;
     private boolean captureMuteChanged;
+    private final java.util.ArrayDeque<String> diagnosticEvents = new java.util.ArrayDeque<>();
+    private long droppedDiagnosticEvents;
+
+    private void trace(String event, String detail) {
+        synchronized (diagnosticEvents) {
+            if (diagnosticEvents.size() >= 64) {
+                diagnosticEvents.removeFirst();
+                droppedDiagnosticEvents++;
+            }
+            String safeDetail = detail == null ? "" : detail.replace('\n', ' ').replace('\r', ' ');
+            if (safeDetail.length() > 1500) safeDetail = safeDetail.substring(0, 1500);
+            diagnosticEvents.addLast("wall=" + System.currentTimeMillis() + " elapsed=" +
+                    SystemClock.elapsedRealtime() + " pid=" + Process.myPid() +
+                    " event=" + event + " " + safeDetail);
+        }
+    }
+
+    @Override public String drainDiagnostics() {
+        synchronized (diagnosticEvents) {
+            StringBuilder result = new StringBuilder();
+            if (droppedDiagnosticEvents > 0) {
+                result.append("REMOTE_DIAGNOSTIC_DROP count=").append(droppedDiagnosticEvents).append('\n');
+                droppedDiagnosticEvents = 0;
+            }
+            while (!diagnosticEvents.isEmpty()) result.append(diagnosticEvents.removeFirst()).append('\n');
+            return result.toString();
+        }
+    }
 
     public ShizukuAudioBridgeService() {
         this.context = null;
@@ -102,6 +130,9 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
             IBinder ownerToken
     ) {
         stopBridgeInternal();
+
+        trace("CAPTURE_START", "port=" + port + " rate=" + sampleRate + " channels=" + channels +
+                "payload=" + packetBytes + " local=" + keepPlayingOnDevice + " persist=" + persistAfterClient);
 
         int uid = Process.myUid();
         if (uid != SHELL_UID && uid != 0) {
@@ -194,6 +225,7 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
             detachOwner();
             status = "error: build=" + BuildConfig.VERSION_CODE + " " + t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage());
             Log.e(TAG, "capture start failed", t);
+            trace("CAPTURE_START_FAILED", t.getClass().getSimpleName() + ": " + t.getMessage());
             return status;
         }
 
@@ -218,6 +250,7 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
     @Override
     public synchronized void stopBridge() {
+        trace("CAPTURE_STOP_REQUEST", status);
         stopBridgeInternal();
     }
 
@@ -332,11 +365,13 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                 InetSocketAddress client = waitForClient(localSocket);
                 if (client == null || !running.get()) break;
                 Log.i(TAG, "client connected " + client);
+                trace("SENDER_CLIENT_CONNECTED", client.toString());
                 boolean cleanClientBye =
                         runSession(localSocket, client, sampleRate, channels, packetBytes);
                 if (running.get() && cleanClientBye && !persistAfterClient) {
                     Log.i(TAG, "client disconnected cleanly; persistence disabled, stopping bridge");
                     status = "idle";
+                    trace("SENDER_STOP", "reason=CLIENT_BYE_PERSIST_DISABLED");
                     running.set(false);
                     break;
                 }
@@ -349,11 +384,13 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         } catch (SocketException e) {
             if (running.get()) {
                 status = "error: UDP " + e.getMessage();
+                trace("SENDER_FAILED", "reason=UDP " + e.getMessage());
                 Log.e(TAG, "UDP bridge failed", e);
             }
         } catch (Throwable t) {
             if (running.get()) {
                 status = "error: " + t.getClass().getSimpleName() + ": " + t.getMessage();
+                trace("SENDER_FAILED", t.getClass().getSimpleName() + ": " + t.getMessage());
                 Log.e(TAG, "bridge failed", t);
             }
         } finally {
@@ -450,6 +487,7 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                         pongCapable.set(true);
                         lastClientActivityAt.set(System.currentTimeMillis());
                     } else if ("CLIENT_BYE".equals(text) && remote.getAddress().equals(clientIp)) {
+                        trace("SENDER_CLIENT_BYE", remote.toString());
                         lastClientActivityAt.set(System.currentTimeMillis());
                         explicitClientBye.set(true);
                         sessionAlive.set(false);
@@ -470,6 +508,7 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                     if (pongCapable.get() &&
                             System.currentTimeMillis() - lastClientActivityAt.get() > 30_000L) {
                         Log.w(TAG, "client heartbeat timed out; releasing session");
+                        trace("SENDER_CLIENT_TIMEOUT", "lastPongAgeMs=" + (System.currentTimeMillis() - lastClientActivityAt.get()));
                         sessionAlive.set(false);
                         break;
                     }
@@ -489,6 +528,12 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         long samplePosition = 0;
         long packets = 0;
         long lastSilenceKeepaliveAt = 0L;
+        long lastDiagnosticAt = SystemClock.elapsedRealtime();
+        long lastReadAt = lastDiagnosticAt;
+        long maxReadGap = 0;
+        long capturedFrames = 0;
+        long zeroReads = 0;
+        long clippedSamples = 0;
 
         try {
             while (running.get() && sessionAlive.get()) {
@@ -502,11 +547,25 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                         AudioRecord.READ_NON_BLOCKING
                 );
                 if (read < 0) {
+                    trace("CAPTURE_READ_ERROR", "code=" + read + " mode=" + activeCaptureMode);
                     throw new IllegalStateException("AudioRecord.read failed: " + read);
                 }
                 int alignedRead = read - (read % frameSize);
-                applyPcmGainInPlace(readBuffer, alignedRead, streamVolume);
+                long readAt = SystemClock.elapsedRealtime();
+                maxReadGap = Math.max(maxReadGap, readAt - lastReadAt);
+                lastReadAt = readAt;
+                capturedFrames += alignedRead / frameSize;
+                clippedSamples += applyPcmGainInPlace(readBuffer, alignedRead, streamVolume);
+                if (readAt - lastDiagnosticAt >= 10000) {
+                    trace("CAPTURE_STATS", "frames=" + capturedFrames + " packets=" + packets +
+                            "zeroReads=" + zeroReads + " maxReadGapMs=" + maxReadGap +
+                            "clippedSamples=" + clippedSamples + " gain=" + streamVolume +
+                            "mode=" + activeCaptureMode);
+                    maxReadGap = 0;
+                    lastDiagnosticAt = readAt;
+                }
                 if (alignedRead == 0 || PcmSilence.isZero(readBuffer, 0, alignedRead)) {
+                    zeroReads++;
                     // AudioRecord may return full buffers of zero PCM indefinitely.
                     // Sending those to a media AudioTrack triggers OEM zero-audio
                     // suspension. Keep the session alive without playing fake PCM.
@@ -670,7 +729,8 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         );
     }
 
-    private static void appendFailure(StringBuilder out, String stage, Throwable t) {
+    private void appendFailure(StringBuilder out, String stage, Throwable t) {
+        trace("CAPTURE_STRATEGY_FAILED", stage + "=" + t.getClass().getSimpleName() + ":" + t.getMessage());
         if (out.length() > 0) out.append(" | ");
         out.append(stage)
                 .append("=")
@@ -969,19 +1029,22 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         }
     }
 
-    private static void applyPcmGainInPlace(byte[] pcm, int bytes, float gain) {
+    private static long applyPcmGainInPlace(byte[] pcm, int bytes, float gain) {
         if (pcm == null || bytes < 2 || Math.abs(gain - 1.0f) < 0.0001f) {
-            return;
+            return 0;
         }
         int limit = bytes - (bytes % 2);
+        long clipped = 0;
         for (int i = 0; i < limit; i += 2) {
             int sample = (short) ((pcm[i] & 0xFF) | (pcm[i + 1] << 8));
             int scaled = Math.round(sample * gain);
+            if (scaled > Short.MAX_VALUE || scaled < Short.MIN_VALUE) clipped++;
             if (scaled > Short.MAX_VALUE) scaled = Short.MAX_VALUE;
             if (scaled < Short.MIN_VALUE) scaled = Short.MIN_VALUE;
             pcm[i] = (byte) (scaled & 0xFF);
             pcm[i + 1] = (byte) ((scaled >>> 8) & 0xFF);
         }
+        return clipped;
     }
 
     private static int mediaOutputDevices() throws Exception {
@@ -994,9 +1057,11 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         AudioManager manager = captureVolumeManager;
         if (manager == null) return; // LOOP_BACK_RENDER retains the local route.
         long deadline = SystemClock.elapsedRealtime() + 1000L;
-        while (mediaOutputDevices() != 0x8000) {
+        int devices;
+        while ((devices = mediaOutputDevices()) != 0x8000) {
             if (SystemClock.elapsedRealtime() >= deadline) {
-                throw new IllegalStateException("REMOTE_SUBMIX media route did not become active");
+                throw new IllegalStateException("REMOTE_SUBMIX media route did not become active; devices=0x" +
+                        Integer.toHexString(devices));
             }
             Thread.sleep(20L);
         }

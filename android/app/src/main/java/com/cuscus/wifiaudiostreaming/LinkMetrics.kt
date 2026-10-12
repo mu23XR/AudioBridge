@@ -1,6 +1,7 @@
 package com.cuscus.wifiaudiostreaming
 
 import android.util.Log
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
@@ -72,6 +73,7 @@ object LinkMetrics {
         enabled = false
         publish()
         Log.i(TAG, "final ${_snapshot.value.format()}")
+        RuntimeDiagnostics.event("NETWORK_FINAL", _snapshot.value.format(), true)
     }
 
     @Synchronized
@@ -125,6 +127,7 @@ object LinkMetrics {
             lastReportMs = nowMs
             publish()
             Log.i(TAG, _snapshot.value.format())
+            RuntimeDiagnostics.event("NETWORK_STATS", _snapshot.value.format())
         }
     }
 

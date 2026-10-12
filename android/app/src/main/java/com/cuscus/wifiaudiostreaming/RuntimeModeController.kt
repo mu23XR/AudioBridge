@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import androidx.core.content.ContextCompat
 import com.cuscus.wifiaudiostreaming.data.SettingsDataStore
 import com.cuscus.wifiaudiostreaming.shizuku.ShizukuAudioBridgeManager
@@ -41,6 +42,7 @@ object RuntimeModeController {
     fun isSwitchingOff(): Boolean = switchingOff.get()
 
     fun selectOff(context: Context, keepControlNotification: Boolean = true) {
+        RuntimeDiagnostics.event("MODE_OFF", "keepControl=$keepControlNotification", true)
         val app = context.applicationContext
         beginModeCommand()
         if (!switchingOff.compareAndSet(false, true)) return
@@ -76,6 +78,7 @@ object RuntimeModeController {
     }
 
     fun selectReceiver(context: Context) {
+        RuntimeDiagnostics.event("MODE_RECEIVE", critical = true)
         val app = context.applicationContext
         val generation = beginModeCommand()
         RoleSelectionGate.initialize(app)
@@ -98,12 +101,7 @@ object RuntimeModeController {
             val settings = SettingsDataStore(app).settingsFlow.first()
             if (generation != modeGeneration || !RoleSelectionGate.isReceiverSelected()) return@launch
             if (settings.autoConnectEnabled) {
-                val intent = Intent(app, AutoConnectService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    app.startForegroundService(intent)
-                } else {
-                    app.startService(intent)
-                }
+                AutoConnectService.startSafely(app)
             }
         }
     }
@@ -114,6 +112,7 @@ object RuntimeModeController {
      * treating the button as a passive state selector.
      */
     fun restartReceiver(context: Context) {
+        RuntimeDiagnostics.event("MODE_RECEIVE_RESTART", critical = true)
         val app = context.applicationContext
         val generation = beginModeCommand()
         RoleSelectionGate.initialize(app)
@@ -134,12 +133,7 @@ object RuntimeModeController {
             val settings = SettingsDataStore(app).settingsFlow.first()
             if (generation != modeGeneration || !RoleSelectionGate.isReceiverSelected()) return@launch
             if (settings.autoConnectEnabled) {
-                val intent = Intent(app, AutoConnectService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    app.startForegroundService(intent)
-                } else {
-                    app.startService(intent)
-                }
+                AutoConnectService.startSafely(app)
             }
         }
     }
@@ -149,6 +143,7 @@ object RuntimeModeController {
      * The normal app Start button still controls capture.
      */
     fun selectSenderIdle(context: Context) {
+        RuntimeDiagnostics.event("MODE_SEND_IDLE", critical = true)
         val app = context.applicationContext
         beginModeCommand()
         RoleSelectionGate.initialize(app)
@@ -177,6 +172,7 @@ object RuntimeModeController {
      * Android's permission UI and therefore cannot be started invisibly.
      */
     fun startSender(context: Context) {
+        RuntimeDiagnostics.event("MODE_SEND_START", critical = true)
         val app = context.applicationContext
         selectSenderIdle(app)
 

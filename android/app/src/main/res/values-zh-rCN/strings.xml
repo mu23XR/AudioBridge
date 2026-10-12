@@ -798,4 +798,10 @@
 
     <string name="playback_volume_hint">调节这台设备实际播放出来的音量，不影响发送端。</string>
     <string name="volume_overlay_permission_needed">请允许一次“显示在其他应用上层”，之后音量滑块弹出时不会暂停当前视频。</string>
+    <string name="diagnostics_export_title">导出诊断日志</string>
+    <string name="diagnostics_export_desc">保存近期连接和音频状态记录，不包含音频录音或认证密钥。</string>
+    <string name="diagnostics_export_working">正在保存诊断日志…</string>
+    <string name="diagnostics_export_success">诊断日志已保存</string>
+    <string name="diagnostics_export_failed">无法保存诊断日志，请检查保存位置后重试。</string>
+    <string name="auto_connect_unavailable">系统暂停了自动发现，请打开应用后再试。</string>
 </resources>

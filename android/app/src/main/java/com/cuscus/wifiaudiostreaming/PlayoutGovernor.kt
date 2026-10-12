@@ -14,6 +14,7 @@ package com.cuscus.wifiaudiostreaming
 import android.media.AudioTrack
 import android.os.SystemClock
 import android.util.Log
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 
 class PlayoutGovernor internal constructor(
     private val track: Output,
@@ -27,6 +28,7 @@ class PlayoutGovernor internal constructor(
 ) {
     internal interface Output {
         val playbackHeadPosition: Int
+        val underruns: Int get() = 0
         fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int): Int
         fun pause()
         fun flush()
@@ -39,6 +41,7 @@ class PlayoutGovernor internal constructor(
                 adaptive: Boolean = false) : this(
         object : Output {
             override val playbackHeadPosition get() = track.playbackHeadPosition
+            override val underruns get() = track.underrunCount
             override fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int) =
                 track.write(pcm, offset, length, mode)
             override fun pause() = track.pause()
@@ -70,6 +73,7 @@ class PlayoutGovernor internal constructor(
         val next = (currentTargetMs + deltaMs).coerceIn(targetFloorMs, targetCeilingMs)
         if (next == currentTargetMs) return false
         currentTargetMs = next
+        RuntimeDiagnostics.event("PLAYOUT_TARGET", "targetMs=$next adaptive=$adaptive")
         targetFrames = (currentTargetMs * framesPerMs).toLong()
         highFrames = targetFrames + (targetFrames / 2).coerceAtLeast((30 * framesPerMs).toLong())
         panicFrames = targetFrames + (180 * framesPerMs).toLong()
@@ -94,6 +98,10 @@ class PlayoutGovernor internal constructor(
     private var lastProgressAt = nowMs()
     private var lastWriteAt = nowMs()
     private var failedLocalRecoveries = 0
+    private var droppedBytes = 0L
+    private var droppedPackets = 0L
+    private var resyncs = 0L
+    private var lastDiagnosticAt = nowMs()
 
     @Synchronized fun recoveryFailures(): Int = failedLocalRecoveries
 
@@ -117,10 +125,12 @@ class PlayoutGovernor internal constructor(
             track.play()
             lastProgressAt = now
             warn("[PLAYOUT] stalled track recovered; stale PCM flushed")
+            RuntimeDiagnostics.event("PLAYOUT_LOCAL_RECOVERY", "failures=$failedLocalRecoveries")
         }
         val written = track.write(pcm, offset, length, AudioTrack.WRITE_NON_BLOCKING)
         check(written >= 0) { "AudioTrack.write failed: $written" }
         noteWritten(written)
+        if (written < length) droppedBytes += length - written
         // A short write drops the unaccepted tail instead of moving stale audio
         // into an unbounded queue. Only accepted frames enter latency accounting.
         if (written < length && now - lastLogAt > 1000L) {
@@ -182,6 +192,7 @@ class PlayoutGovernor internal constructor(
         val now = System.currentTimeMillis()
         if (now - lastDropAt < minDropIntervalMs) return false
         lastDropAt = now
+        droppedPackets++
         // L'arretrato scartato va tolto subito dalla media, altrimenti la media
         // resta alta e comanda altri scarti che non servono piu'.
         avgBufferedFrames = (avgBufferedFrames - incoming).coerceAtLeast(0.0)
@@ -198,6 +209,8 @@ class PlayoutGovernor internal constructor(
         track.flush()
         noteReset()
         track.play()
+        resyncs++
+        RuntimeDiagnostics.event("PLAYOUT_RESYNC", "bufferedMs=${(buffered / framesPerMs).toInt()} count=$resyncs")
         Log.w(tag, "[PLAYOUT] resync: buffered ${(buffered / framesPerMs).toInt()}ms over budget, buffer flushed")
         return true
     }
@@ -214,6 +227,11 @@ class PlayoutGovernor internal constructor(
             currentRate = newRate
         }
         val now = System.currentTimeMillis()
+        val monotonicNow = nowMs()
+        if (monotonicNow - lastDiagnosticAt >= 10_000L) {
+            lastDiagnosticAt = monotonicNow
+            RuntimeDiagnostics.event("PLAYOUT_STATS", "bufferedMs=${(buffered / framesPerMs).toInt()} targetMs=$currentTargetMs rate=$currentRate underruns=${track.underruns} writtenFrames=$framesWritten head=${playedFrames()} shortWriteBytes=$droppedBytes droppedPackets=$droppedPackets resyncs=$resyncs recoveryFailures=$failedLocalRecoveries")
+        }
         if (now - lastLogAt > 10_000L) {
             lastLogAt = now
             Log.d(tag, "[PLAYOUT] buffered=${(buffered / framesPerMs).toInt()}ms target=${(targetFrames / framesPerMs).toInt()}ms rate=$newRate")

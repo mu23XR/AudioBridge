@@ -8,6 +8,7 @@
 package com.cuscus.wifiaudiostreaming.shizuku
 
 import com.cuscus.wifiaudiostreaming.StreamingActionReceiver
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 
 import android.app.Service
 import android.content.Context
@@ -43,6 +44,7 @@ class ShizukuBridgeHostService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        RuntimeDiagnostics.event("SENDER_HOST_START", "startId=$startId redelivered=${intent == null}", true)
         RoleSelectionGate.initialize(applicationContext)
         if (
             StreamingActionReceiver.wasRecentlyTaskRemoved(this) ||
@@ -145,12 +147,14 @@ class ShizukuBridgeHostService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        RuntimeDiagnostics.event("SENDER_HOST_TASK_REMOVED", critical = true)
         StreamingActionReceiver.handleTaskRemoved(this)
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        RuntimeDiagnostics.event("SENDER_HOST_DESTROY", "status=${NetworkManager.connectionStatus.value}", true)
         StreamingActionReceiver.handleStoppedWithTask(this)
         runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
         runCatching { wifiLock?.takeIf { it.isHeld }?.release() }
