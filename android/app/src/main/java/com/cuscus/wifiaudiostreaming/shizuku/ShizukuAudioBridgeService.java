@@ -729,7 +729,8 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         );
     }
 
-    private static void appendFailure(StringBuilder out, String stage, Throwable t) {
+    private void appendFailure(StringBuilder out, String stage, Throwable t) {
+        trace("CAPTURE_STRATEGY_FAILED", stage + "=" + t.getClass().getSimpleName() + ":" + t.getMessage());
         if (out.length() > 0) out.append(" | ");
         out.append(stage)
                 .append("=")
@@ -1056,9 +1057,11 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         AudioManager manager = captureVolumeManager;
         if (manager == null) return; // LOOP_BACK_RENDER retains the local route.
         long deadline = SystemClock.elapsedRealtime() + 1000L;
-        while (mediaOutputDevices() != 0x8000) {
+        int devices;
+        while ((devices = mediaOutputDevices()) != 0x8000) {
             if (SystemClock.elapsedRealtime() >= deadline) {
-                throw new IllegalStateException("REMOTE_SUBMIX media route did not become active");
+                throw new IllegalStateException("REMOTE_SUBMIX media route did not become active; devices=0x" +
+                        Integer.toHexString(devices));
             }
             Thread.sleep(20L);
         }

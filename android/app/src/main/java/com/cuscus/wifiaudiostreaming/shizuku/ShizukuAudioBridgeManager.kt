@@ -358,11 +358,7 @@ object ShizukuAudioBridgeManager {
 
     fun refreshRemoteState(context: Context): Boolean {
         val remote = service ?: return isActive()
-        runCatching { remote.drainDiagnostics() }
-            .onSuccess { batch -> batch.lineSequence().filter { it.isNotBlank() }.forEach {
-                RuntimeDiagnostics.event("REMOTE_CAPTURE", it)
-            } }
-            .onFailure { RuntimeDiagnostics.event("CAPTURE_DIAGNOSTIC_IPC_FAILED", it.javaClass.simpleName) }
+        captureRemoteDiagnostics(remote)
         val detail = runCatching { remote.getStatus() }.getOrNull() ?: return isActive()
 
         if (detail == "idle" && _state.value is State.Running) {
@@ -401,6 +397,16 @@ object ShizukuAudioBridgeManager {
         }
 
         return isActive()
+    }
+
+    private fun captureRemoteDiagnostics(remote: IShizukuAudioBridge, critical: Boolean = false) {
+        runCatching { remote.drainDiagnostics() }
+            .onSuccess { batch -> batch.lineSequence().filter { it.isNotBlank() }.forEach {
+                RuntimeDiagnostics.event("REMOTE_CAPTURE", it, critical)
+            } }
+            .onFailure {
+                RuntimeDiagnostics.event("CAPTURE_DIAGNOSTIC_IPC_FAILED", it.javaClass.simpleName, critical)
+            }
     }
 
     private fun begin(context: Context, config: Config) {
@@ -544,6 +550,9 @@ object ShizukuAudioBridgeManager {
             return
         }
 
+        // Failed startup is followed by UserService destruction, so drain its
+        // evidence before releasing the binder instead of waiting for a host poll.
+        captureRemoteDiagnostics(remote, critical = true)
         if (detail.startsWith("error:", ignoreCase = true)) {
             fail(context, detail)
             return
