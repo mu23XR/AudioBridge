@@ -17,6 +17,8 @@
 
 package com.cuscus.wifiaudiostreaming
 
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
+
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
@@ -2272,8 +2274,11 @@ object NetworkManager {
             val lastPingAt = java.util.concurrent.atomic.AtomicLong(0L)
             val lastAudioAt = java.util.concurrent.atomic.AtomicLong(0L)
             val lastServerActivityAt = java.util.concurrent.atomic.AtomicLong(0L)
+            val audioSupply = AudioSupplyWindow()
+            RuntimeDiagnostics.event("RECEIVER_SESSION_START", "peer=${serverInfo.ip}:${serverInfo.port} multicast=${serverInfo.isMulticast} generation=$generation", true)
 
             fun markDisconnect(reason: String, detail: String = "") {
+                RuntimeDiagnostics.event("RECEIVER_DISCONNECT", "reason=$reason detail=$detail peer=${serverInfo.ip}:${serverInfo.port} metrics=${LinkMetrics.snapshot.value.format()}", true)
                 disconnectReason.set(reason)
                 val now = System.currentTimeMillis()
                 val pingAt = lastPingAt.get()
@@ -2563,6 +2568,7 @@ object NetworkManager {
                             return try {
                                 val restoredTargetMs = playout.targetMs()
                                 Log.w(TAG, "[PLAYOUT][WATCHDOG] rebuilding playback track: $reason")
+                                RuntimeDiagnostics.event("PLAYBACK_REBUILD_START", reason, true)
                                 unregisterClientPlaybackTrack(audioTrack)
                                 runCatching { audioTrack?.pause() }
                                 runCatching { audioTrack?.flush() }
@@ -2587,11 +2593,13 @@ object NetworkManager {
                                 playout = newGovernor
                                 publishPlaybackHealth()
                                 Log.i(TAG, "[PLAYOUT][WATCHDOG] playback track rebuilt")
+                                RuntimeDiagnostics.event("PLAYBACK_REBUILT", "targetMs=$restoredTargetMs", true)
                                 true
                             } catch (t: Throwable) {
                                 unregisterClientPlaybackTrack(candidate)
                                 runCatching { candidate?.release() }
                                 Log.e(TAG, "[PLAYOUT][WATCHDOG] track rebuild failed", t)
+                                RuntimeDiagnostics.event("PLAYBACK_REBUILD_FAILED", "${t.javaClass.simpleName}: ${t.message}", true)
                                 false
                             }
                         }
@@ -2612,7 +2620,7 @@ object NetworkManager {
                                 // state: a stuck vendor write must not block this observer.
                                 val snapshot = playbackSnapshot.get()
                                 val decision = playbackHealth.sample(monotonicNow, snapshot.underruns,
-                                    now - lastAudioAt.get() < 3000,
+                                    audioSupply.flowing(monotonicNow),
                                     snapshot.stalledMs, snapshot.failedRecoveries)
                                 if (decision.targetDeltaMs != 0) targetAdjustment.set(decision.targetDeltaMs)
                                 val loopStalled = monotonicNow - snapshot.sampledAt > 5000
@@ -2673,6 +2681,8 @@ object NetworkManager {
                             val flags     = data[3].toInt() and 0xFF
                             val seq       = ((data[4].toInt() and 0xFF) shl 8) or (data[5].toInt() and 0xFF)
                             val isSilence = (flags and 0x01) != 0
+                            audioSupply.observe(android.os.SystemClock.elapsedRealtime(), data, HEADER_SIZE,
+                                data.size - HEADER_SIZE, isSilence)
 
                             // Header-only silence packets are sender keepalives.
                             // They prove liveness without manufacturing PCM or increasing
@@ -3201,6 +3211,7 @@ object NetworkManager {
                                         if (dir != null) {
                                             val r = WfasCrypto.decryptPacket(dir, mcWin, audio, len)
                                             if (r is WfasCrypto.Decrypted.Ok && r.pcm.isNotEmpty()) {
+                                                audioSupply.observe(android.os.SystemClock.elapsedRealtime(), r.pcm, 0, r.pcm.size)
                                                 if (mcPlayout.shouldDrop(r.pcm.size)) return
                                                 val t = mcConcealTail
                                                 mcConcealTail = null
@@ -3217,6 +3228,8 @@ object NetworkManager {
                                     } else if (!mcEncRequired) {
                                         val pcmLen = len - MC_HEADER_SIZE
                                         if (pcmLen > 0) {
+                                            audioSupply.observe(android.os.SystemClock.elapsedRealtime(), audio, MC_HEADER_SIZE, pcmLen,
+                                                (audio[3].toInt() and 0x01) != 0)
                                             if (mcPlayout.shouldDrop(pcmLen)) return
                                             mcRemember(audio, MC_HEADER_SIZE, pcmLen)
                                             val t = mcConcealTail
@@ -3251,7 +3264,7 @@ object NetworkManager {
                             if (healthNow - mcHealthSampleAt >= 1000) {
                                 mcHealthSampleAt = healthNow
                                 val decision = mcHealth.sample(healthNow, audioTrack.underrunCount,
-                                    true, mcPlayout.stalledForMs(), mcPlayout.recoveryFailures())
+                                    audioSupply.flowing(healthNow), mcPlayout.stalledForMs(), mcPlayout.recoveryFailures())
                                 if (decision.targetDeltaMs != 0 && mcPlayout.retargetMs(decision.targetDeltaMs)) {
                                     Log.i(TAG, "[PLAYOUT][ADAPTIVE][MC] target -> ${mcPlayout.targetMs()} ms")
                                 }
@@ -3294,6 +3307,7 @@ object NetworkManager {
                 }
             } finally {
                 val finalNow = System.currentTimeMillis()
+                RuntimeDiagnostics.event("RECEIVER_SESSION_END", "reason=${disconnectReason.get()} peer=${serverInfo.ip}:${serverInfo.port} connected=$connectedSuccessfully status=${connectionStatus.value} metrics=${LinkMetrics.snapshot.value.format()}", true)
                 val finalPingAt = lastPingAt.get()
                 val finalAudioAt = lastAudioAt.get()
                 val finalActivityAt = lastServerActivityAt.get()

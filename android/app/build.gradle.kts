@@ -14,6 +14,7 @@ plugins {
 android {
     namespace = "com.cuscus.wifiaudiostreaming"
     compileSdk = 36
+    testBuildType = System.getenv("AUDIOBRIDGE_ANDROID_TEST_VARIANT") ?: "debug"
 
     dependenciesInfo {
         includeInApk = false

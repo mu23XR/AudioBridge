@@ -712,11 +712,7 @@ class MainActivity : AppCompatActivity() {
                 currentSettings.autoConnectEnabled &&
                 selectedRole == RoleSelectionGate.Role.RECEIVER
             ) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(autoConnectIntent)
-                } else {
-                    context.startService(autoConnectIntent)
-                }
+                AutoConnectService.startSafely(context)
             } else {
                 context.stopService(autoConnectIntent)
             }

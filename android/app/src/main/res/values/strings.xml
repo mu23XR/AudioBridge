@@ -834,4 +834,10 @@
 
     <string name="playback_volume_hint">Controls playback volume on this device without changing the sender.</string>
     <string name="volume_overlay_permission_needed">Allow “Display over other apps” once; then the volume slider can open without pausing the current video.</string>
+    <string name="diagnostics_export_title">Export diagnostics</string>
+    <string name="diagnostics_export_desc">Save recent connection and audio health logs. No audio recordings or authentication keys are included.</string>
+    <string name="diagnostics_export_working">Saving diagnostics…</string>
+    <string name="diagnostics_export_success">Diagnostics saved</string>
+    <string name="diagnostics_export_failed">Could not save diagnostics. Check the destination and try again.</string>
+    <string name="auto_connect_unavailable">Automatic discovery paused by the system. Open the app to resume.</string>
 </resources>

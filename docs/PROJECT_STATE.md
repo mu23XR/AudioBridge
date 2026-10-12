@@ -2,6 +2,10 @@
 
 Last governance refresh: 2026-09-29
 
+## Android runtime diagnostics and recovery (2026-10-12)
+
+User authorized #32 persistent redacted diagnostics/export and #33 dataSync timeout/quota crash repair. Branch fix/android-runtime-diagnostics is isolated from Desktop changes and based on test17 @68779ab. App-private 8MiB journals, bounded async queues, Shizuku diagnostic IPC, exit history and periodic audio telemetry are implemented. Auto-connect timeout/rejected startup no longer intentionally restarts sticky; silence liveness is separated from real PCM in playback health. First 43 unit tests/lint/build passed; signed test18 preview and device-test APK built. Device/long-run acceptance is pending; no stable release or runtime issue closure. See docs/handoffs/2026-10-12-android-runtime-implementation.md and docs/ANDROID_DIAGNOSTICS.md.
+
 ## Active implementation (2026-10-04)
 
 `fix/test17-adaptive-notifications` retains the local test.17 work and implements Issues #14/#15/#16: playback health/recovery corrections, selectable adaptive versus continuous manual latency, consolidated runtime/mode controls, and independent test identities. Debug is `.debug`; signed preview is `.test` with the existing permanent signer; stable release keeps the permanent package. Both devices retain test.16 alongside signed test.17. 39 unit tests and lintDebug pass (0 errors); signed preview CI run37181977448 passed Android build/tests/lint/signing, Windows and governance. Full real-device longevity and notification acceptance remain pending. See `docs/handoffs/2026-10-04-test17-implementation.md`.

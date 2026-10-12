@@ -26,6 +26,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.widget.Toast
 import com.cuscus.wifiaudiostreaming.NetworkManager.updateWidgetState
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import com.cuscus.wifiaudiostreaming.data.SettingsDataStore
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.combine
@@ -45,6 +46,7 @@ class ClientService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        RuntimeDiagnostics.event("RECEIVER_HOST_START", "startId=$startId redelivered=${intent == null}", true)
         RoleSelectionGate.initialize(applicationContext)
         if (
             StreamingActionReceiver.wasRecentlyTaskRemoved(this) ||
@@ -175,6 +177,7 @@ class ClientService : Service() {
     }
 
     override fun onDestroy() {
+        RuntimeDiagnostics.event("RECEIVER_HOST_DESTROY", "status=${NetworkManager.connectionStatus.value}", true)
         StreamingActionReceiver.handleStoppedWithTask(this)
         CoroutineScope(Dispatchers.IO).launch {
             updateWidgetState(this@ClientService, false, false)

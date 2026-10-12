@@ -16,6 +16,7 @@ import android.os.Binder
 import android.os.IBinder
 import android.os.RemoteException
 import android.util.Log
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.cuscus.wifiaudiostreaming.BuildConfig
@@ -155,6 +156,7 @@ object ShizukuAudioBridgeManager {
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
+            RuntimeDiagnostics.event("CAPTURE_BINDER_DISCONNECTED", "desired=$desiredRunning", true)
             service = null
             bindingInProgress = false
             bound = false
@@ -356,9 +358,15 @@ object ShizukuAudioBridgeManager {
 
     fun refreshRemoteState(context: Context): Boolean {
         val remote = service ?: return isActive()
+        runCatching { remote.drainDiagnostics() }
+            .onSuccess { batch -> batch.lineSequence().filter { it.isNotBlank() }.forEach {
+                RuntimeDiagnostics.event("REMOTE_CAPTURE", it)
+            } }
+            .onFailure { RuntimeDiagnostics.event("CAPTURE_DIAGNOSTIC_IPC_FAILED", it.javaClass.simpleName) }
         val detail = runCatching { remote.getStatus() }.getOrNull() ?: return isActive()
 
         if (detail == "idle" && _state.value is State.Running) {
+            RuntimeDiagnostics.event("SENDER_REMOTE_IDLE", detail, true)
             val app = context.applicationContext
             val oldConfig = pendingConfig
             desiredRunning = false
@@ -656,6 +664,7 @@ object ShizukuAudioBridgeManager {
     }
 
     private fun fail(context: Context, detail: String) {
+        RuntimeDiagnostics.event("SENDER_FAILURE", detail, true)
         Log.e(TAG, detail)
         Toast.makeText(context, detail, Toast.LENGTH_LONG).show()
 

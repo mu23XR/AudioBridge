@@ -9,4 +9,5 @@ interface IShizukuAudioBridge {
     String getStatus() = 3;
     int getBuildVersion() = 4;
     void setVolume(float volume) = 5;
+    String drainDiagnostics() = 6;
 }

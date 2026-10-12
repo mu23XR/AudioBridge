@@ -17,6 +17,8 @@
 
 package com.cuscus.wifiaudiostreaming
 
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
+
 import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -85,6 +87,7 @@ class StreamingActionReceiver : BroadcastReceiver() {
         private var lastTaskRemovalStopElapsed = 0L
 
         fun handleTaskRemoved(context: Context) {
+            RuntimeDiagnostics.event("TASK_REMOVED", critical = true)
             val nowElapsed = SystemClock.elapsedRealtime()
             synchronized(this) {
                 if (nowElapsed - lastTaskRemovalStopElapsed < TASK_REMOVAL_DEBOUNCE_MS) {
@@ -122,6 +125,8 @@ class StreamingActionReceiver : BroadcastReceiver() {
             }.getOrDefault(false)
 
             if (!taskGone) return
+
+            RuntimeDiagnostics.event("OFF_INFERRED_FROM_EMPTY_TASKS", critical = true)
 
             markTaskRemoved(app)
             RoleSelectionGate.initialize(app)

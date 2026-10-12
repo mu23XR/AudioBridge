@@ -113,6 +113,9 @@ import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlin.random.Random
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -628,6 +631,22 @@ fun SettingsScreenContent(
 ) {
     val context = LocalContext.current
     val settingsHaptics = rememberAppHaptics()
+    val diagnosticScope = rememberCoroutineScope()
+    var exportingDiagnostics by remember { mutableStateOf(false) }
+    val diagnosticExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) diagnosticScope.launch {
+            exportingDiagnostics = true
+            try {
+                withContext(Dispatchers.IO) { RuntimeDiagnostics.export(context.applicationContext, uri) }
+                Toast.makeText(context, R.string.diagnostics_export_success, Toast.LENGTH_LONG).show()
+            } catch (error: Exception) {
+                RuntimeDiagnostics.event("EXPORT_FAILED", "${error.javaClass.simpleName}: ${error.message}", true)
+                Toast.makeText(context, R.string.diagnostics_export_failed, Toast.LENGTH_LONG).show()
+            } finally {
+                exportingDiagnostics = false
+            }
+        }
+    }
 
     var showLicensesDialog by remember { mutableStateOf(false) }
     val licensesText = remember {
@@ -1500,6 +1519,15 @@ fun SettingsScreenContent(
                     title = stringResource(R.string.settings_group_info),
                     icon = Icons.Outlined.Info
                 ) {
+                    SettingsClickableItem(
+                        title = stringResource(R.string.diagnostics_export_title),
+                        description = stringResource(if (exportingDiagnostics) R.string.diagnostics_export_working else R.string.diagnostics_export_desc),
+                        icon = Icons.Outlined.Description,
+                        onClick = {
+                            if (!exportingDiagnostics) diagnosticExport.launch("AudioBridge-diagnostics-${System.currentTimeMillis()}.zip")
+                        }
+                    )
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     SettingsInfoItem(
                         title = stringResource(R.string.license_info_title),
                         description = stringResource(R.string.license_info_desc),
