@@ -140,7 +140,14 @@ class AutoConnectService : Service() {
                     return@launch
                 }
 
-                if (NetworkManager.isStreamingCurrent.value || isConnecting) {
+                if (NetworkManager.isStreamingCurrent.value) {
+                    // A live media session already owns reconnect/discovery.
+                    // Keeping a second dataSync FGS idle consumes its six-hour budget.
+                    RuntimeDiagnostics.event("AUTO_CONNECT_HANDOFF_COMPLETE", critical = true)
+                    stopSelf()
+                    return@launch
+                }
+                if (isConnecting) {
                     delay(2000)
                     continue
                 }
