@@ -2,6 +2,12 @@
 
 Last governance refresh: 2026-09-29
 
+## Android multi-source receiver and runtime recovery
+
+Implementation authorized on `fix/android-multisource-recovery`, based on the published test18 diagnostics branch. Correct direction is multiple simultaneous senders into one Android receiver with mixed playback; the prior one-sender/multiple-receiver suggestion is withdrawn. Work covers independent receive sessions, bounded partial-write continuity, silence/health telemetry, capture Binder identity/route safety and destination-specific network/offline recovery. Issues #36/#37/#38/#39 and existing #5/#14/#4/#6 remain open. One foreground host, existing WFAS v2 framing, permanent-signed independent preview, original test16 and unrelated Desktop work are preserved. See docs/work-items/android-multisource-recovery.md. Private device evidence is not published.
+
+Independent signed test19 is installed on both devices. Final 58 unit tests and zero-error Android lint/build checks passed; muted multi-source native regression passed on emulator and physical receiver. Explicit recorder attribution corrected the capture startup failure, with both quiet physical capture/start-stop/volume restoration tests passing. Local Desktop checks remain incomplete (existing MinGW native link failure and Maven dependency/TLS limits); Windows CI and prolonged real-audio/OEM/VPN acceptance are required before merge/release. No stable publication or issue closure.
+
 ## Android runtime diagnostics and recovery (2026-10-12)
 
 User authorized #32 persistent redacted diagnostics/export and #33 dataSync timeout/quota crash repair. Branch fix/android-runtime-diagnostics / Draft PR #35 is isolated from Desktop changes and based on test17 @68779ab. App-private 8MiB journals, bounded queues, Shizuku diagnostic IPC, exit history and periodic audio telemetry are implemented, including capture-start failure evidence before binder release. Auto-connect timeout/rejected startup no longer intentionally restarts sticky; redundant discovery stops once media owns recovery, and silence liveness is separated from real PCM health. Final 43 unit tests, zero-error lint and signed builds passed. Test18/code610120941 is installed on both devices with permanent signer; original test16 remains. Initial four CI checks passed. Device export/long-run acceptance is pending on device unlock; no continuous audio monitoring, stable release or runtime issue closure. See docs/handoffs/2026-10-12-android-runtime-implementation.md and docs/ANDROID_DIAGNOSTICS.md.

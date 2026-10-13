@@ -98,12 +98,14 @@ class PlayoutGovernor internal constructor(
     private var lastProgressAt = nowMs()
     private var lastWriteAt = nowMs()
     private var failedLocalRecoveries = 0
-    private var droppedBytes = 0L
+    private var shortWrites = 0L
     private var droppedPackets = 0L
     private var resyncs = 0L
     private var lastDiagnosticAt = nowMs()
 
     @Synchronized fun recoveryFailures(): Int = failedLocalRecoveries
+
+    @Synchronized fun playbackRateHz(): Int = currentRate
 
     /** Never let a paused/full AudioTrack block the UDP receive and PONG loop. */
     @Synchronized fun writePcm(pcm: ByteArray, offset: Int, length: Int): Int {
@@ -129,22 +131,25 @@ class PlayoutGovernor internal constructor(
         }
         val written = track.write(pcm, offset, length, AudioTrack.WRITE_NON_BLOCKING)
         check(written >= 0) { "AudioTrack.write failed: $written" }
+        check(written <= length && written % frameSize == 0) { "AudioTrack.write returned an incomplete frame: $written" }
         noteWritten(written)
-        if (written < length) droppedBytes += length - written
-        // A short write drops the unaccepted tail instead of moving stale audio
-        // into an unbounded queue. Only accepted frames enter latency accounting.
+        // The bounded PCM FIFO retains a short-write tail. Only accepted frames
+        // enter device-buffer accounting; a short write is no longer audio loss.
+        if (written < length) shortWrites++
         if (written < length && now - lastLogAt > 1000L) {
             lastLogAt = now
-            warn("[PLAYOUT] buffer full: accepted=$written dropped=${length - written}")
+            warn("[PLAYOUT] buffer full: accepted=$written pending=${length - written}")
         }
         return written
     }
 
     private fun playedFrames(): Long {
         val raw = track.playbackHeadPosition
-        if (raw < lastHeadRaw && lastHeadRaw - raw > Int.MAX_VALUE / 2) headWraps++
+        val unsigned = raw.toLong() and 0xffffffffL
+        val previous = lastHeadRaw.toLong() and 0xffffffffL
+        if (unsigned < previous && previous - unsigned > 0x80000000L) headWraps++
         lastHeadRaw = raw
-        val abs = (raw.toLong() and 0xFFFFFFFFL) + (headWraps shl 32)
+        val abs = unsigned + (headWraps shl 32)
         if (baseHead < 0L) baseHead = abs
         return abs - baseHead
     }
@@ -187,9 +192,8 @@ class PlayoutGovernor internal constructor(
     @Synchronized fun shouldDrop(incomingBytes: Int): Boolean {
         if (frameSize <= 0 || incomingBytes <= 0) return false
         val incoming = incomingBytes / frameSize
-        if (avgBufferedFrames + incoming <= highFrames) return false
         if (bufferedFrames() + incoming <= highFrames) return false
-        val now = System.currentTimeMillis()
+        val now = nowMs()
         if (now - lastDropAt < minDropIntervalMs) return false
         lastDropAt = now
         droppedPackets++
@@ -202,7 +206,7 @@ class PlayoutGovernor internal constructor(
     @Synchronized fun hardResyncIfNeeded(): Boolean {
         val buffered = bufferedFrames()
         if (buffered <= panicFrames || avgBufferedFrames <= panicFrames) return false
-        val now = System.currentTimeMillis()
+        val now = nowMs()
         if (now - lastResyncAt < 5000L) return false
         lastResyncAt = now
         track.pause()
@@ -221,16 +225,21 @@ class PlayoutGovernor internal constructor(
         val errFrames = avgBufferedFrames - targetFrames
         val errRatio = errFrames / targetFrames.toDouble()
         val factor = (1.0 + errRatio * 0.08).coerceIn(0.992, 1.008)
-        val newRate = (sampleRate * factor).toInt().coerceAtLeast(1)
+        val desiredRate = (sampleRate * factor).toInt().coerceAtLeast(1)
+        val newRate = currentRate + (desiredRate - currentRate).coerceIn(-12, 12)
         if (kotlin.math.abs(newRate - currentRate) >= 4) {
-            runCatching { track.setPlaybackRate(newRate) }
-            currentRate = newRate
+            val result = track.setPlaybackRate(newRate)
+            if (result == AudioTrack.SUCCESS) currentRate = newRate
+            else if (nowMs() - lastLogAt > 1000L) {
+                lastLogAt = nowMs()
+                warn("[PLAYOUT] rate adjustment rejected: code=$result requested=$newRate actual=$currentRate")
+            }
         }
-        val now = System.currentTimeMillis()
+        val now = nowMs()
         val monotonicNow = nowMs()
         if (monotonicNow - lastDiagnosticAt >= 10_000L) {
             lastDiagnosticAt = monotonicNow
-            RuntimeDiagnostics.event("PLAYOUT_STATS", "bufferedMs=${(buffered / framesPerMs).toInt()} targetMs=$currentTargetMs rate=$currentRate underruns=${track.underruns} writtenFrames=$framesWritten head=${playedFrames()} shortWriteBytes=$droppedBytes droppedPackets=$droppedPackets resyncs=$resyncs recoveryFailures=$failedLocalRecoveries")
+            RuntimeDiagnostics.event("PLAYOUT_STATS", "bufferedMs=${(buffered / framesPerMs).toInt()} targetMs=$currentTargetMs rate=$currentRate underruns=${track.underruns} writtenFrames=$framesWritten head=${playedFrames()} shortWrites=$shortWrites droppedPackets=$droppedPackets resyncs=$resyncs recoveryFailures=$failedLocalRecoveries")
         }
         if (now - lastLogAt > 10_000L) {
             lastLogAt = now

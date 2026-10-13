@@ -42,6 +42,7 @@ class ClientService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var statusJob: Job? = null
     private var recoveryJob: Job? = null
+    private var mediaSession: ReceiverMediaSession? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -62,6 +63,7 @@ class ClientService : Service() {
         NetworkManager.startNetworkWatch(applicationContext)
 
         if (!NotificationCenter.canPost(this)) {
+            ClientSessionController.foregroundUnavailable(this, getString(R.string.source_notification_permission))
             Toast.makeText(this, "Notifications permission missing", Toast.LENGTH_SHORT).show()
             stopSelf()
             return START_NOT_STICKY
@@ -69,6 +71,7 @@ class ClientService : Service() {
         serviceScope.launch { updateWidgetState(this@ClientService, true, false) }
 
         NotificationCenter.ensureChannels(this)
+        try {
         startForeground(
             NotificationCenter.ID_CLIENT,
             NotificationCenter.clientNotification(
@@ -77,12 +80,21 @@ class ClientService : Service() {
                 NetworkManager.clientVolume.value
             )
         )
+        } catch (failure: RuntimeException) {
+            if (Build.VERSION.SDK_INT < 31 || failure !is android.app.ForegroundServiceStartNotAllowedException) throw failure
+            RuntimeDiagnostics.event("RECEIVER_FOREGROUND_REJECTED", failure.javaClass.simpleName, true)
+            ClientSessionController.foregroundUnavailable(this, getString(R.string.source_foreground_denied))
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         // Keep both CPU and Wi-Fi fully awake while WFAS is receiving. Several
         // Android devices aggressively power-save Wi-Fi after screen-off even
         // while a foreground media service is alive, which shows up as UDP loss
         // and random disconnects.
         acquireLocks()
+        if (mediaSession == null) mediaSession = ReceiverMediaSession(this)
+        if (ClientSessionController.sources.value.isNotEmpty()) mediaSession!!.requestFocus()
 
         // onStartCommand may be delivered more than once. Keep one notification
         // collector instead of leaking a new collector on every delivery.
@@ -120,7 +132,7 @@ class ClientService : Service() {
                     .distinctUntilChanged()
                     .collectLatest { (_, streaming) ->
                         if (!RoleSelectionGate.isReceiverSelected()) return@collectLatest
-                        if (!streaming) {
+                        if (!NetworkManager.isListeningActive()) {
                             if (!NetworkManager.autoConnectOwnsListening) {
                                 val settings = SettingsDataStore(applicationContext)
                                     .settingsFlow.first()
@@ -129,8 +141,9 @@ class ClientService : Service() {
                                     settings.networkInterface
                                 )
                             }
-                            ClientSessionController.resumeIfNeeded(this@ClientService)
                         }
+                        ClientSessionController.resumeIfNeeded(this@ClientService)
+                        mediaSession?.update(streaming)
                     }
             }
         }
@@ -179,6 +192,8 @@ class ClientService : Service() {
     override fun onDestroy() {
         RuntimeDiagnostics.event("RECEIVER_HOST_DESTROY", "status=${NetworkManager.connectionStatus.value}", true)
         StreamingActionReceiver.handleStoppedWithTask(this)
+        serviceScope.cancel()
+        ClientSessionController.stopTransports()
         CoroutineScope(Dispatchers.IO).launch {
             updateWidgetState(this@ClientService, false, false)
         }
@@ -188,6 +203,7 @@ class ClientService : Service() {
         wifiLock = null
         statusJob = null
         recoveryJob = null
+        mediaSession?.release(); mediaSession = null
         serviceScope.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
         NotificationCenter.cancel(this, NotificationCenter.ID_CLIENT)

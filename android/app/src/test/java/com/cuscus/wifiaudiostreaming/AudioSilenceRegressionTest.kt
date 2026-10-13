@@ -22,6 +22,7 @@ class AudioSilenceRegressionTest {
         var flushes = 0
         var plays = 0
         var writeMode = -1
+        var rateResult = 0
         override fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int): Int {
             writeMode = mode
             return accepted
@@ -29,7 +30,7 @@ class AudioSilenceRegressionTest {
         override fun pause() {}
         override fun flush() { flushes++; playbackHeadPosition = 0 }
         override fun play() { plays++ }
-        override fun setPlaybackRate(rate: Int) = 0
+        override fun setPlaybackRate(rate: Int) = rateResult
     }
 
     @Test fun partialWriteCountsOnlyAcceptedFramesAndDoesNotRetry() {
@@ -80,5 +81,23 @@ class AudioSilenceRegressionTest {
         track.playbackHeadPosition = 1
         governor.writePcm(ByteArray(100), 0, 100)
         assertEquals(0, governor.recoveryFailures())
+    }
+
+    @Test fun rejectedRateChangeDoesNotPretendToHaveChangedTheHardware() {
+        val track = FakeTrack().apply { rateResult = -3 }
+        val governor = PlayoutGovernor(track, 48000, 4, 20, "test", { 0L }, {})
+        governor.retune()
+        assertEquals(48000, governor.playbackRateHz())
+    }
+
+    @Test fun playbackHeadWrapAfterLongSessionsDoesNotInventGigabytesOfBacklog() {
+        val track = FakeTrack()
+        val governor = PlayoutGovernor(track, 48000, 4, 20, "test", { 0L }, {})
+        governor.bufferedFrames() // Establish origin.
+        repeat(9) { governor.noteWritten(Int.MAX_VALUE / 4 * 4) }
+        track.playbackHeadPosition = -1
+        val before = governor.bufferedFrames()
+        track.playbackHeadPosition = 0 // Unsigned 32-bit wrap, not a new track.
+        assertEquals(before - 1, governor.bufferedFrames())
     }
 }

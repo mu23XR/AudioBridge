@@ -880,9 +880,11 @@ class MainActivity : AppCompatActivity() {
             onDispose { NetworkManager.keyPromptEnabled = false }
         }
         val keyRequest by NetworkManager.pendingKeyRequest.collectAsStateWithLifecycle()
+        val keySource by NetworkManager.pendingKeySource.collectAsStateWithLifecycle()
         keyRequest?.let { wrong ->
             ExpressiveKeyRequestDialog(
                 wrong = wrong,
+                source = keySource,
                 onSubmit = { key -> NetworkManager.submitKey(key) },
                 onCancel = { NetworkManager.submitKey(null) }
             )

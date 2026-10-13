@@ -72,6 +72,8 @@ object ShizukuAudioBridgeManager {
 
     private var appContext: Context? = null
     private var listenersInstalled = false
+    private val startupBudget = com.cuscus.wifiaudiostreaming.RecoveryBudget()
+    private var commandGeneration = 0L
 
     private val serviceConnection: ServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -215,6 +217,8 @@ object ShizukuAudioBridgeManager {
     }
 
     fun start(context: Context, config: Config) {
+        commandGeneration++
+        startupBudget.reset()
         val app = context.applicationContext
         appContext = app
         StreamingActionReceiver.clearTaskRemovedStop(app)
@@ -226,6 +230,7 @@ object ShizukuAudioBridgeManager {
     }
 
     fun stop(context: Context, removeUserService: Boolean = true) {
+        commandGeneration++
         val app = context.applicationContext
         val oldConfig = pendingConfig
         desiredRunning = false
@@ -487,6 +492,11 @@ object ShizukuAudioBridgeManager {
 
     private fun recoverStaleBinding(context: Context, config: Config, detail: String) {
         if (!desiredRunning) return
+        if (!startupBudget.retryAllowed()) {
+            fail(context, detail)
+            return
+        }
+        val generation = commandGeneration
         Log.w(TAG, "recoverable UserService binding failure: $detail")
 
         val app = context.applicationContext
@@ -510,7 +520,7 @@ object ShizukuAudioBridgeManager {
         reconnectHandler.removeCallbacks(rebindRunnable)
         reconnectHandler.postDelayed(
             {
-                if (desiredRunning && pendingConfig != null) {
+                if (desiredRunning && pendingConfig != null && generation == commandGeneration) {
                     begin(app, pendingConfig ?: config)
                 }
             },
@@ -534,6 +544,10 @@ object ShizukuAudioBridgeManager {
             ).also {
                 remote.setVolume(NetworkManager.serverVolume.value.coerceIn(0f, 2f))
             }
+        } catch (e: SecurityException) {
+            captureRemoteDiagnostics(remote, critical = true)
+            fail(context, context.getString(R.string.shizuku_error_bridge_start, e.message ?: "permission"))
+            return
         } catch (e: RemoteException) {
             recoverStaleBinding(
                 context,
@@ -554,9 +568,11 @@ object ShizukuAudioBridgeManager {
         // evidence before releasing the binder instead of waiting for a host poll.
         captureRemoteDiagnostics(remote, critical = true)
         if (detail.startsWith("error:", ignoreCase = true)) {
-            fail(context, detail)
+            if (detail.contains("kind=ROUTE_NOT_READY")) recoverStaleBinding(context, config, detail)
+            else fail(context, detail)
             return
         }
+        startupBudget.reset()
 
         // The privileged process owns capture + UDP. Discovery stays in the
         // ordinary app process so receivers can find this sender automatically.
@@ -673,9 +689,10 @@ object ShizukuAudioBridgeManager {
     }
 
     private fun fail(context: Context, detail: String) {
+        commandGeneration++
         RuntimeDiagnostics.event("SENDER_FAILURE", detail, true)
         Log.e(TAG, detail)
-        Toast.makeText(context, detail, Toast.LENGTH_LONG).show()
+        Toast.makeText(context, R.string.shizuku_sender_failure_toast, Toast.LENGTH_LONG).show()
 
         desiredRunning = false
         pendingConfig = null

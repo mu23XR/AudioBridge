@@ -21,6 +21,7 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Build;
+import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.Process;
@@ -81,6 +82,9 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
     private boolean captureMuteChanged;
     private final java.util.ArrayDeque<String> diagnosticEvents = new java.util.ArrayDeque<>();
     private long droppedDiagnosticEvents;
+    private static final class CaptureRoutePendingException extends IllegalStateException {
+        CaptureRoutePendingException(String detail) { super(detail); }
+    }
 
     private void trace(String event, String detail) {
         synchronized (diagnosticEvents) {
@@ -129,6 +133,40 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
             boolean persistAfterClient,
             IBinder ownerToken
     ) {
+        enforceCaller();
+        if (ownerToken == null || !ownerToken.isBinderAlive()) {
+            return "error: owner process unavailable";
+        }
+        trace("CAPTURE_IDENTITY", "processUid=" + Process.myUid() + " callerUid=" + Binder.getCallingUid());
+        // AudioPolicy performs a local checkCallingOrSelfPermission. A shell
+        // process inside an app-originated Binder call otherwise checks the
+        // unprivileged caller, even with a shell-attributed Context.
+        long identity = Binder.clearCallingIdentity();
+        try {
+            return startBridgeOwned(port, sampleRate, channels, packetBytes,
+                    keepPlayingOnDevice, persistAfterClient, ownerToken);
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private void enforceCaller() {
+        int caller = Binder.getCallingUid();
+        if (caller == Process.myUid() || caller == 0) return;
+        if (context == null) throw new SecurityException("Shizuku application Context unavailable");
+        try {
+            String[] packages = context.getPackageManager().getPackagesForUid(caller);
+            if (packages != null) for (String name : packages) {
+                if (BuildConfig.APPLICATION_ID.equals(name)) return;
+            }
+            throw new SecurityException("Unauthorized bridge caller");
+        } catch (RuntimeException e) {
+            throw new SecurityException("Bridge owner package unavailable", e);
+        }
+    }
+
+    private String startBridgeOwned(int port, int sampleRate, int channels, int packetBytes,
+            boolean keepPlayingOnDevice, boolean persistAfterClient, IBinder ownerToken) {
         stopBridgeInternal();
 
         trace("CAPTURE_START", "port=" + port + " rate=" + sampleRate + " channels=" + channels +
@@ -223,7 +261,8 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         } catch (Throwable t) {
             releaseCapture();
             detachOwner();
-            status = "error: build=" + BuildConfig.VERSION_CODE + " " + t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage());
+            status = "error: " + (t instanceof CaptureRoutePendingException ? "kind=ROUTE_NOT_READY; " : "") +
+                    "build=" + BuildConfig.VERSION_CODE + " " + t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage());
             Log.e(TAG, "capture start failed", t);
             trace("CAPTURE_START_FAILED", t.getClass().getSimpleName() + ": " + t.getMessage());
             return status;
@@ -250,8 +289,12 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
     @Override
     public synchronized void stopBridge() {
-        trace("CAPTURE_STOP_REQUEST", status);
-        stopBridgeInternal();
+        enforceCaller();
+        long identity = Binder.clearCallingIdentity();
+        try {
+            trace("CAPTURE_STOP_REQUEST", status);
+            stopBridgeInternal();
+        } finally { Binder.restoreCallingIdentity(identity); }
     }
 
     @Override
@@ -266,6 +309,7 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
     @Override
     public void setVolume(float volume) {
+        enforceCaller();
         if (Float.isNaN(volume) || Float.isInfinite(volume)) {
             return;
         }
@@ -275,6 +319,8 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
     @Override
     public void destroy() {
+        enforceCaller();
+        Binder.clearCallingIdentity();
         stopBridgeInternal();
         Log.i(TAG, "destroy");
         System.exit(0);
@@ -804,8 +850,8 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                 .newInstance(mixingRule);
 
         int channelMask = channels == 2
-                ? AudioFormat.CHANNEL_IN_STEREO
-                : AudioFormat.CHANNEL_IN_MONO;
+                ? AudioFormat.CHANNEL_OUT_STEREO
+                : AudioFormat.CHANNEL_OUT_MONO;
         AudioFormat audioFormat = new AudioFormat.Builder()
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setSampleRate(sampleRate)
@@ -868,14 +914,11 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
         AudioRecord resultRecord = null;
         try {
-            Method createSink = audioPolicyClass.getMethod("createAudioRecordSink", audioMixClass);
-            resultRecord = (AudioRecord) createSink.invoke(audioPolicy, audioMix);
-            if (resultRecord == null) {
-                throw new IllegalStateException("createAudioRecordSink returned null");
-            }
+            resultRecord = createAttributedPolicySink(audioMix, audioMixClass,
+                    policyContext, sampleRate, channels);
             if (resultRecord.getState() != AudioRecord.STATE_INITIALIZED) {
                 throw new IllegalStateException(
-                        "createAudioRecordSink returned uninitialized AudioRecord state=" +
+                        "Attributed policy sink returned uninitialized AudioRecord state=" +
                                 resultRecord.getState()
                 );
             }
@@ -894,6 +937,39 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
             unregisterPolicy(policyAudioManager, audioPolicy, audioPolicyClass);
             throw t;
         }
+    }
+
+    @TargetApi(31)
+    @SuppressLint({"PrivateApi", "MissingPermission"})
+    private AudioRecord createAttributedPolicySink(Object mix, Class<?> mixClass,
+            Context policyContext, int sampleRate, int channels) throws Exception {
+        String registration = (String) mixClass.getMethod("getRegistration").invoke(mix);
+        if (registration == null || registration.isEmpty()) {
+            throw new IllegalStateException("AudioPolicy mix has no registered capture address");
+        }
+        // AOSP createAudioRecordSink constructs the record without its policy
+        // Context. In a Shizuku-loaded app this loses shell attribution even
+        // after clearing Binder identity. Pass it to the actual record builder.
+        AudioAttributes.Builder attributes = new AudioAttributes.Builder();
+        AudioAttributes.Builder.class.getMethod("setInternalCapturePreset", int.class)
+                .invoke(attributes, MediaRecorder.AudioSource.REMOTE_SUBMIX);
+        Method addTag = AudioAttributes.Builder.class.getMethod("addTag", String.class);
+        addTag.invoke(attributes, "addr=" + registration);
+        addTag.invoke(attributes, (String) AudioRecord.class.getField("SUBMIX_FIXED_VOLUME").get(null));
+        int inputMask = channels == 2 ? AudioFormat.CHANNEL_IN_STEREO : AudioFormat.CHANNEL_IN_MONO;
+        int minBuffer = AudioRecord.getMinBufferSize(sampleRate, inputMask, AudioFormat.ENCODING_PCM_16BIT);
+        if (minBuffer <= 0) throw new IllegalStateException("Unsupported policy capture format: " + minBuffer);
+        AudioRecord.Builder builder = new AudioRecord.Builder()
+                .setContext(policyContext)
+                .setAudioFormat(new AudioFormat.Builder().setSampleRate(sampleRate)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(inputMask).build())
+                .setBufferSizeInBytes(minBuffer);
+        AudioRecord.Builder.class.getMethod("setAudioAttributes", AudioAttributes.class)
+                .invoke(builder, attributes.build());
+        trace("CAPTURE_ATTRIBUTION", "processUid=" + Process.myUid() +
+                " recordUid=" + policyContext.getAttributionSource().getUid() +
+                " recordPackage=" + policyContext.getAttributionSource().getPackageName());
+        return builder.build();
     }
 
     @SuppressLint({"WrongConstant", "MissingPermission"})
@@ -1056,11 +1132,11 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
     private void synchronizeCaptureVolume() throws Exception {
         AudioManager manager = captureVolumeManager;
         if (manager == null) return; // LOOP_BACK_RENDER retains the local route.
-        long deadline = SystemClock.elapsedRealtime() + 1000L;
+        long deadline = SystemClock.elapsedRealtime() + 2500L;
         int devices;
         while ((devices = mediaOutputDevices()) != 0x8000) {
             if (SystemClock.elapsedRealtime() >= deadline) {
-                throw new IllegalStateException("REMOTE_SUBMIX media route did not become active; devices=0x" +
+                throw new CaptureRoutePendingException("REMOTE_SUBMIX media route did not become active; devices=0x" +
                         Integer.toHexString(devices));
             }
             Thread.sleep(20L);

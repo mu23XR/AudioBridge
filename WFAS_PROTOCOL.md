@@ -235,7 +235,21 @@ IP or from a stale list entry, which is exactly why `WFAS_BUSY` exists.
 Multicast has no session state and therefore no exclusivity: any number of
 receivers may join the group.
 
-### 5.7 Multicast teardown
+### 5.7 Receiver concurrency
+
+An Android receiver may connect to multiple independent senders at once. Each
+unicast connection still follows the single-client sender contract above and
+has its own socket, authentication/cipher/replay state, packet sequence history
+and playout clock. This does not change the v2 wire format or require a sender
+to serve multiple receivers.
+
+For multicast sources, a receiver selecting several senders filters each
+source by its selected sender address; joining the same group twice must not
+play every sender twice. Mixing and receiver-local buffer/gain settings are
+platform implementation details. Disconnecting one source sends CLIENT_BYE
+only for that source, and must not stop or reset the others.
+
+### 5.8 Multicast teardown
 
 A multicast server that stops sends `BYE` to the group three times, from a
 cancellation-safe path so that it is emitted however the send loop ends — clean
