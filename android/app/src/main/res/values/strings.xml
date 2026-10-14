@@ -824,6 +824,7 @@
     <string name="shizuku_error_bind_service">Cannot bind Shizuku UserService: %1$s</string>
     <string name="shizuku_error_remote_call">Shizuku UserService call failed: %1$s</string>
     <string name="shizuku_error_bridge_start">Shizuku bridge start failed: %1$s</string>
+    <string name="shizuku_sender_failure_toast">Sending failed. Open AudioBridge for details.</string>
     <string name="shizuku_bridge_active">Shizuku audio bridge active</string>
 
     <string name="playback_volume_card_title">Playback volume</string>
@@ -840,4 +841,27 @@
     <string name="diagnostics_export_success">Diagnostics saved</string>
     <string name="diagnostics_export_failed">Could not save diagnostics. Check the destination and try again.</string>
     <string name="auto_connect_unavailable">Automatic discovery paused by the system. Open the app to resume.</string>
+    <string name="source_list_title">Receiving sources</string>
+    <string name="source_playback_error">Playback could not recover. Reconnect this source; diagnostics have been saved.</string>
+    <string name="source_audio_focus_wait">Connected · waiting for audio focus</string>
+    <string name="source_start_error">Source could not start. Check settings and reconnect; diagnostics have been saved.</string>
+    <string name="source_notification_permission">Allow notifications to keep receiving in the background</string>
+    <string name="source_credential_error">Connected, but the key could not be saved securely. It may be needed again after restart.</string>
+    <string name="source_invalid_address">Enter a valid IP address and optional port</string>
+    <string name="source_probe_failed">Could not verify the sender. Check its address, network and sending state.</string>
+    <string name="source_summary">%1$d / %2$d sources connected</string>
+    <string name="source_wait_network">Waiting for network</string>
+    <string name="source_connected_silent">Connected · waiting for audio</string>
+    <string name="source_capacity">Up to %1$d sources can be received together</string>
+    <string name="source_transport_error">Connection error (%1$s)</string>
+    <string name="source_storage_error">Could not read or save receiver sources. Reconnect your sources to repair the saved configuration.</string>
+    <string name="source_foreground_denied">Open the app to start receiving</string>
+    <string name="source_mute">Mute this source</string>
+    <string name="source_volume">Source volume</string>
+    <string name="source_adaptive">Adaptive buffer</string>
+    <string name="source_manual_latency">Manual buffer (20–400 ms)</string>
+    <string name="source_buffer_status">Target %1$d ms · queued %2$d ms</string>
+    <string name="source_retry">Reconnect</string>
+    <string name="source_remove">Disconnect</string>
+    <string name="source_add_hint">Connect another device below to mix its audio. Microphone return is assigned to the first eligible source.</string>
 </resources>

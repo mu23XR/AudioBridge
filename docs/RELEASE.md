@@ -49,6 +49,12 @@ release notes in `docs/releases/MAJOR.MINOR.PATCH-test.N.md` before tagging.
 Assets include SHA-256 checksums and the exact Android source commit. Manual
 workflow dispatch remains available for artifact-only test builds.
 
+The test workflow opts into `desktop-windows.yml`'s typed `upload_artifact`
+input so its publisher receives the portable ZIP. Reused workflows inherit
+the caller's event; checking for event_name=workflow_call alone would skip
+uploads for PR/tag-triggered publication. Standalone PR builds keep the default
+off, while manual Desktop dispatch still uploads its artifact.
+
 Before this workflow reaches `main`, an in-repository PR may request a signed
 prerelease by changing `docs/releases/build-request.json` with a unique version
 and `publish: true`. Only same-repository PRs can run the signing job. The exact

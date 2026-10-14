@@ -37,6 +37,7 @@ jobs:
     with:
       source_ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
       version_name: ${{ inputs.version_name || (github.event_name == 'push' && github.ref_name) || '' }}
+      upload_artifact: true
 
   governance:
     uses: ./.github/workflows/governance.yml

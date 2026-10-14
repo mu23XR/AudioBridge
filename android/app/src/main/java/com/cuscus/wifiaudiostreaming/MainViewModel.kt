@@ -747,18 +747,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @SuppressLint("MissingPermission")
     fun startClientManually(rawIp: String) {
         val currentSettings = appSettings.value ?: return
-        val ip = NetAddr.normalize(rawIp)
-        if (ip.isBlank()) return
+        val endpoint = try { ManualEndpoint.parse(rawIp, currentSettings.streamingPort) }
+        catch (_: IllegalArgumentException) {
+            updateStatus(getApplication<Application>().getString(R.string.source_invalid_address))
+            return
+        }
+        val ip = endpoint.host
 
         viewModelScope.launch {
             updateStatus("Detecting mode for ${NetAddr.display(ip)}...")
-            val port = currentSettings.streamingPort
+            val port = endpoint.port
 
-            val knownServer = resolveFromDiscovery(ip, 2500)
+            val knownServer = resolveFromDiscovery(ip, 2500)?.takeIf { !endpoint.explicitPort || it.port == port }
 
-            val isMulti = knownServer?.isMulticast ?: NetworkManager.probeIsMulticast(ip, port)
+            val isMulti = knownServer?.isMulticast ?: NetworkManager.probeIsMulticast(ip, port,
+                getApplication<Application>(), currentSettings.networkInterface)
+            if (isMulti == null) {
+                updateStatus(getApplication<Application>().getString(R.string.source_probe_failed))
+                return@launch
+            }
 
-            val manualServerInfo = knownServer?.copy(port = port, isMulticast = isMulti)
+            val manualServerInfo = knownServer?.copy(port = if (endpoint.explicitPort) port else knownServer.port, isMulticast = isMulti)
                 ?: ServerInfo(ip = ip, isMulticast = isMulti, port = port)
             startClient(manualServerInfo)
         }
