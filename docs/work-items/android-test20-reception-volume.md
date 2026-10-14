@@ -38,6 +38,8 @@ Final integration after wire/probe correction: 90 JVM tests (zero failures/error
 
 Local implementation is ready for scoped commits and CI test20 preview publication. Original permanent test16 and both real-device test19 installations remain untouched. The source release request targets preview/publish=true, with explicit known acceptance limits in release notes. No stable publication, merge or issue closure is authorized by these checks.
 
+Implementation committed as 819eefc. The following release-request checkpoint targets CI-built 1.3.1-test.20; signing, Windows/governance and publication results remain pending until verified.
+
 ## Follow-up diagnosis (2026-10-14)
 
 - Rechecked both journals against the actual Shizuku sender: SENDER_CLIENT_CONNECTED is recorded only after the initial ACK send returns. This proves the sender processed HELLO and submitted an ACK, not successful delivery to the receiver. Repeated HELLO from the same client IP also receives another ACK; there is no one-shot-only ACK bug in this sender path.
