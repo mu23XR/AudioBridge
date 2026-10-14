@@ -9,6 +9,8 @@ package com.cuscus.wifiaudiostreaming.shizuku;
 
 import com.cuscus.wifiaudiostreaming.BuildConfig;
 import com.cuscus.wifiaudiostreaming.PcmSilence;
+import com.cuscus.wifiaudiostreaming.PcmGainLimiter;
+import com.cuscus.wifiaudiostreaming.RemoteVolumeProtocol;
 
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
@@ -70,6 +72,8 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
     private volatile DatagramSocket socket;
     private volatile AudioRecord recorder;
     private volatile float streamVolume = 1.0f;
+    private long volumeRevision;
+    private volatile RemoteVolumeProtocol.Server volumeSession;
     private volatile Object registeredAudioPolicy;
     private volatile Class<?> registeredAudioPolicyClass;
     private volatile AudioManager registeredAudioManager;
@@ -308,12 +312,30 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
     }
 
     @Override
-    public void setVolume(float volume) {
+    public synchronized void setVolume(float volume) {
         enforceCaller();
         if (Float.isNaN(volume) || Float.isInfinite(volume)) {
-            return;
+            throw new IllegalArgumentException("Stream volume must be finite");
         }
-        streamVolume = Math.max(0.0f, Math.min(volume, 2.0f));
+        float safe = Math.max(0.0f, Math.min(volume, 2.0f));
+        if (streamVolume != safe) {
+            if (volumeRevision == Long.MAX_VALUE) throw new IllegalStateException("Volume revision exhausted");
+            streamVolume = safe;
+            volumeRevision++;
+        }
+    }
+
+    @Override
+    public synchronized String getVolumeState() {
+        enforceCaller();
+        return volumeRevision + ";" + streamVolume;
+    }
+
+    private RemoteVolumeProtocol.Server offerVolume(String hello) {
+        return RemoteVolumeProtocol.offer(hello, "", "", "", new RemoteVolumeProtocol.Volume() {
+            @Override public int getPercent() { return Math.round(streamVolume * 50.0f); }
+            @Override public void setPercent(int value) { setVolume(value / 50.0f); }
+        });
     }
 
 
@@ -473,7 +495,9 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                     sendText(s, remote, "WFAS_INCOMPATIBLE;v=" + PROTOCOL_VERSION);
                     continue;
                 }
-                sendText(s, remote, "HELLO_ACK;v=" + PROTOCOL_VERSION);
+                volumeSession = offerVolume(text);
+                sendText(s, remote, "HELLO_ACK;v=" + PROTOCOL_VERSION +
+                        (volumeSession == null ? "" : volumeSession.ackSuffix()));
                 return remote;
             }
         }
@@ -521,18 +545,30 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                         if (version != PROTOCOL_VERSION) {
                             sendText(s, remote, "WFAS_INCOMPATIBLE;v=" + PROTOCOL_VERSION);
                         } else if (remote.getAddress().equals(clientIp)) {
+                            RemoteVolumeProtocol.Server control = volumeSession;
+                            if (control == null || !control.acceptsHello(text)) volumeSession = offerVolume(text);
                             client.set(remote);
                             lastClientActivityAt.set(System.currentTimeMillis());
-                            sendText(s, remote, "HELLO_ACK;v=" + PROTOCOL_VERSION);
+                            control = volumeSession;
+                            sendText(s, remote, "HELLO_ACK;v=" + PROTOCOL_VERSION +
+                                    (control == null ? "" : control.ackSuffix()));
                             Log.i(TAG, "client endpoint refreshed " + remote);
                         } else {
                             sendText(s, remote, "WFAS_BUSY");
                         }
-                    } else if ("PONG".equals(text) && remote.getAddress().equals(clientIp)) {
-                        client.set(remote);
+                    } else if ((text.startsWith(RemoteVolumeProtocol.GET) || text.startsWith(RemoteVolumeProtocol.SET)) &&
+                            remote.equals(client.get())) {
+                        RemoteVolumeProtocol.Server control = volumeSession;
+                        String reply = control == null ? null : control.receive(text);
+                        if (reply != null) {
+                            sendText(s, remote, reply);
+                            lastClientActivityAt.set(System.currentTimeMillis());
+                            trace("SENDER_VOLUME_ACK", "gain=" + streamVolume);
+                        }
+                    } else if ("PONG".equals(text) && remote.equals(client.get())) {
                         pongCapable.set(true);
                         lastClientActivityAt.set(System.currentTimeMillis());
-                    } else if ("CLIENT_BYE".equals(text) && remote.getAddress().equals(clientIp)) {
+                    } else if ("CLIENT_BYE".equals(text) && remote.equals(client.get())) {
                         trace("SENDER_CLIENT_BYE", remote.toString());
                         lastClientActivityAt.set(System.currentTimeMillis());
                         explicitClientBye.set(true);
@@ -551,6 +587,9 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                 try {
                     Thread.sleep(1000);
                     sendText(s, client.get(), "PING");
+                    RemoteVolumeProtocol.Server control = volumeSession;
+                    String update = control == null ? null : control.snapshot();
+                    if (update != null) sendText(s, client.get(), update);
                     if (pongCapable.get() &&
                             System.currentTimeMillis() - lastClientActivityAt.get() > 30_000L) {
                         Log.w(TAG, "client heartbeat timed out; releasing session");
@@ -576,10 +615,13 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         long lastSilenceKeepaliveAt = 0L;
         long lastDiagnosticAt = SystemClock.elapsedRealtime();
         long lastReadAt = lastDiagnosticAt;
+        long lastPositiveReadAt = lastDiagnosticAt;
         long maxReadGap = 0;
         long capturedFrames = 0;
         long zeroReads = 0;
-        long clippedSamples = 0;
+        long limitedSamples = 0;
+        long wouldClipSamples = 0;
+        long silentBuffers = 0;
 
         try {
             while (running.get() && sessionAlive.get()) {
@@ -600,18 +642,24 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                 long readAt = SystemClock.elapsedRealtime();
                 maxReadGap = Math.max(maxReadGap, readAt - lastReadAt);
                 lastReadAt = readAt;
+                if (alignedRead > 0) lastPositiveReadAt = readAt;
                 capturedFrames += alignedRead / frameSize;
-                clippedSamples += applyPcmGainInPlace(readBuffer, alignedRead, streamVolume);
+                boolean silentPcm = alignedRead > 0 && PcmSilence.isZero(readBuffer, 0, alignedRead);
+                if (alignedRead == 0) zeroReads++;
+                else if (silentPcm) silentBuffers++;
+                float gain = streamVolume;
+                wouldClipSamples += PcmGainLimiter.countWouldClip(readBuffer, 0, alignedRead, gain);
+                limitedSamples += PcmGainLimiter.applyInPlace(readBuffer, 0, alignedRead, gain);
                 if (readAt - lastDiagnosticAt >= 10000) {
                     trace("CAPTURE_STATS", "frames=" + capturedFrames + " packets=" + packets +
-                            "zeroReads=" + zeroReads + " maxReadGapMs=" + maxReadGap +
-                            "clippedSamples=" + clippedSamples + " gain=" + streamVolume +
-                            "mode=" + activeCaptureMode);
+                            " zeroReads=" + zeroReads + " silentBuffers=" + silentBuffers + " maxReadGapMs=" + maxReadGap +
+                            " lastPositiveReadAgeMs=" + (readAt - lastPositiveReadAt) +
+                            " limitedSamples=" + limitedSamples + " wouldClipSamples=" + wouldClipSamples + " gain=" + gain +
+                            " mode=" + activeCaptureMode);
                     maxReadGap = 0;
                     lastDiagnosticAt = readAt;
                 }
                 if (alignedRead == 0 || PcmSilence.isZero(readBuffer, 0, alignedRead)) {
-                    zeroReads++;
                     // AudioRecord may return full buffers of zero PCM indefinitely.
                     // Sending those to a media AudioTrack triggers OEM zero-audio
                     // suspension. Keep the session alive without playing fake PCM.
@@ -1103,24 +1151,6 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         public Context createPackageContext(String packageName, int flags) {
             return this;
         }
-    }
-
-    private static long applyPcmGainInPlace(byte[] pcm, int bytes, float gain) {
-        if (pcm == null || bytes < 2 || Math.abs(gain - 1.0f) < 0.0001f) {
-            return 0;
-        }
-        int limit = bytes - (bytes % 2);
-        long clipped = 0;
-        for (int i = 0; i < limit; i += 2) {
-            int sample = (short) ((pcm[i] & 0xFF) | (pcm[i + 1] << 8));
-            int scaled = Math.round(sample * gain);
-            if (scaled > Short.MAX_VALUE || scaled < Short.MIN_VALUE) clipped++;
-            if (scaled > Short.MAX_VALUE) scaled = Short.MAX_VALUE;
-            if (scaled < Short.MIN_VALUE) scaled = Short.MIN_VALUE;
-            pcm[i] = (byte) (scaled & 0xFF);
-            pcm[i + 1] = (byte) ((scaled >>> 8) & 0xFF);
-        }
-        return clipped;
     }
 
     private static int mediaOutputDevices() throws Exception {

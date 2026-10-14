@@ -59,9 +59,11 @@ for example so a constrained or embedded receiver can request small packets.
 sample index) on **every** audio packet, including silence frames, so a receiver
 can detect loss and reordering and conceal gaps by the exact missing duration.
 
-Control messages (Section 4) are plain ASCII and never begin with the bytes
-`0x57 0x46`, so a receiver distinguishes audio from control unambiguously by the
-two magic bytes.
+Streaming control messages (Section 4) are plain ASCII and must avoid the bytes
+`0x57 0x46` at their start. The legacy `WFAS_MCAST_ENC;` beacon in Section 8.4
+is an exception: multicast receivers recognize that complete bounded textual
+prefix before binary magic, then validate its MAC/epoch. Other `WF` packets
+remain subject to binary protocol-version validation.
 
 ### 2.1 Version byte rules
 
@@ -631,3 +633,100 @@ for the sender; no re-handshake exists in multicast to interrupt.
 `WfasPairingUri` (`build` / `parse`) is a pure, dependency-free function pair and is
 **duplicated verbatim** in the Android and Desktop code bases. The two copies must stay
 byte-identical; a change to the URI schema is a change to this section and to both files.
+
+## 10. Optional remote transmission-volume control
+
+This additive unicast extension leaves the WFAS v2 audio header and existing
+authorization handshake unchanged. Peers that do not implement it ignore its
+tokens/messages and continue streaming audio. Multicast has no authenticated
+per-receiver back-channel and does not support this control. A receiver must
+show unsupported remote control separately from its local playback/mix gain.
+
+The controlled value is the sender's transmission gain, not the receiver's
+device volume or one source's mixing weight. The integer display range is
+0–100: 0 is silence, 50 is unity gain, and 100 is gain 2. The sender is
+authoritative and retains its saved gain; joining/reconnecting does not reset
+it or apply a receiver default. A receiver queries the saved sender value.
+
+### 10.1 Capability and session binding
+
+A supporting receiver adds `;rvol=1;rvnonce=<hex>` to every HELLO in its existing
+handshake. `rvnonce` is a fresh random 16-byte lowercase-hex value per attempt.
+An authorized supporting sender adds `;rvol=1;rvsid=<hex>` to HELLO_ACK, with a
+fresh random 16-byte lowercase-hex session identifier. Repeated HELLO for that
+same receiver attempt repeats the same identifier, so a lost ACK does not
+invalidate controls. A new attempt/session retires its old identifier and
+request state. Controls are accepted only from the currently connected exact
+IP/UDP-port endpoint and only for the active `rvsid`.
+
+In Key mode the ACK additionally contains:
+
+```
+rvmac = hex(HMAC-SHA256(K,
+  "WFAS-RVOL-S:" + cnonce + ":" + snonce + ":" + rvnonce + ":" + rvsid + ":OFFER"))
+```
+
+The receiver verifies this MAC with the authenticated Section 7 nonces before
+enabling controls. Missing capability, malformed values or a bad offer MAC
+leave controls unavailable; they never enable unauthenticated control of a Key
+session. Existing key/encryption anti-downgrade checks still apply to audio.
+Off/Ask sessions use the fresh identifier and endpoint isolation without a
+MAC: these are session isolation, **not cryptographic authentication**. Use Key
+mode when protection from LAN spoofing is required.
+
+### 10.2 Messages, acknowledgements and updates
+
+ASCII bodies have this exact field order:
+
+```
+RVOL_GET;sid=<rvsid>;n=<request>
+RVOL_SET;sid=<rvsid>;n=<request>;pct=<0..100>
+RVOL_STATE;sid=<rvsid>;q=<request-or-0>;rev=<revision>;pct=<0..100>
+```
+
+`n` starts at 1 and increases per receiver session. Each sender session records
+the highest accepted `n`. A higher number is processed once; an identical
+duplicate of that last request receives an acknowledgement without applying
+the setter again. Older requests, changed bodies reusing a number, malformed
+fields and out-of-range values are rejected without advancing the request
+state. This prevents late UDP retries from restoring an old volume.
+
+The STATE `q` echoes a GET/SET request number. `q=0` is an unsolicited sender
+snapshot. `rev` starts at 0 in each new control session and increases whenever
+the observed authoritative displayed volume changes. The receiver retains its
+last confirmed value while SET is pending and confirms only an authenticated
+matching response. A late acknowledgement can finish its own pending request
+without overwriting a value from a newer revision. It cannot finish a newer
+request. Conflicting values at the same revision are rejected.
+
+The Android sender sends a small authoritative snapshot with its ordinary
+heartbeat (about once a second), so losing one change notification does not
+leave displays permanently out of sync. The receiver sends each request at
+most three times, one second apart, then reports an explicit control timeout
+while retaining audio and the last confirmed value. A later request/query can
+recover. One source's control result cannot update another source's UI state.
+
+### 10.3 Control authentication
+
+In Key mode append `;mac=<hex>` after the complete body above:
+
+```
+mac = hex(HMAC-SHA256(K,
+  "WFAS-RVOL-" + direction + ":" + cnonce + ":" + snonce + ":" +
+  rvnonce + ":" + rvsid + ":" + body))
+```
+
+`direction` is `C` for GET/SET and `S` for STATE. `body` excludes `;mac=` and is
+the exact ASCII message body. The key is UTF-8 as in the Section 7 proofs.
+Direction/domain separation prevents reflection; binding the authenticated
+nonces and both fresh volume identifiers prevents cross-session replay. MAC
+verification and exact endpoint/session checks precede all volume effects and
+request-state changes. Request ordering rejects replayed setters, while
+same-revision repeated STATE snapshots are inert and cannot roll state back.
+Off/Ask messages omit the MAC. Duplicate fields, extra fields, invalid decimal
+numbers and oversized/non-ASCII control messages are rejected.
+
+This extension is currently implemented by the Android standard and Shizuku
+senders/receiver. Shizuku currently offers Off authorization only; it does not
+claim authenticated controls. Existing Desktop and older Android peers remain
+audio-compatible and report remote controls as unsupported until implemented.

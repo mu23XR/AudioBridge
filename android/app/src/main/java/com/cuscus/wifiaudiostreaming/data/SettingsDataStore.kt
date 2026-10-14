@@ -159,6 +159,9 @@ data class AppSettings(
     // Muto il volume media mentre catturo l'audio interno, cosi' non si sente due
     // volte; spento, si sente sia qui che sul client.
     val muteRender: Boolean = true,
+    // Nullable to distinguish an explicit choice from the previous SDK default.
+    // muteRender was ignored by Shizuku; reusing it would change upgrade behavior.
+    val senderLocalPlayback: Boolean? = null,
     // In unicast: quando il client si stacca finisce la sessione, non il server.
     val serverPersist: Boolean = true,
     val clientTileIp: String = "",
@@ -220,6 +223,7 @@ class SettingsDataStore(context: Context) {
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val LAST_MULTICAST_MODE = booleanPreferencesKey("last_multicast_mode")
         val MUTE_RENDER = booleanPreferencesKey("mute_render")
+        val SENDER_LOCAL_PLAYBACK = booleanPreferencesKey("sender_local_playback")
         val SERVER_PERSIST = booleanPreferencesKey("server_persist")
         val NETWORK_INTERFACE = stringPreferencesKey("network_interface")
         val RTP_ENABLED = booleanPreferencesKey("rtp_enabled")
@@ -360,6 +364,7 @@ class SettingsDataStore(context: Context) {
             onboardingCompleted = preferences[PreferencesKeys.ONBOARDING_COMPLETED] ?: false,
             lastMulticastMode = preferences[PreferencesKeys.LAST_MULTICAST_MODE] ?: false,
             muteRender = preferences[PreferencesKeys.MUTE_RENDER] ?: true,
+            senderLocalPlayback = preferences[PreferencesKeys.SENDER_LOCAL_PLAYBACK],
             serverPersist = preferences[PreferencesKeys.SERVER_PERSIST] ?: true,
             networkInterface = preferences[PreferencesKeys.NETWORK_INTERFACE] ?: "Auto",
             rtpEnabled = preferences[PreferencesKeys.RTP_ENABLED] ?: false,
@@ -477,6 +482,12 @@ class SettingsDataStore(context: Context) {
     suspend fun saveMuteRender(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[PreferencesKeys.MUTE_RENDER] = enabled
+        }
+    }
+
+    suspend fun saveSenderLocalPlayback(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SENDER_LOCAL_PLAYBACK] = enabled
         }
     }
 

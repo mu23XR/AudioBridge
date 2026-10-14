@@ -44,6 +44,35 @@ When changing WFAS:
 
 Wire-incompatible changes require a protocol-version bump.
 
+## test20 focused fixtures
+
+JVM tests cover optional authenticated volume ordering/replay, legacy capability fallback,
+route selection, packet classification, PCM fades/peak protection and display mapping.
+Run Android lint plus debug/helper builds before native fixtures. Use an isolated emulator
+debug package; do not run the fixtures against an active real-device audio session.
+
+Core classes: MultiSourceDeviceTest, RemoteVolumeDeviceTest, ReceiverRetryDeviceTest,
+BackgroundIntentDeviceTest and DiagnosticShellExportDeviceTest. The shell-export fixture
+uses a separate test-APK UID probe to prove ordinary callers are denied, beyond pure UID tests.
+
+NotificationPermissionDeviceTest is an opt-in standalone run on an isolated debug emulator:
+host revokes POST_NOTIFICATIONS before launching instrumentation with
+allowNotificationFixture=true, and restores permission in a host finally block. Never revoke
+the permission from the instrumentation process itself. It waits 35 seconds to cover pending
+foreground promotion deadlines; no source capture/output is started.
+
+DestinationPathDeviceTest requires fixtureIp and fixturePort for a controlled host sender
+through a real managed network (not loopback). The sender replies with legacy HELLO_ACK;v=2
+and valid header-only silence; a separate port injects BYE/PING/sequence30000 packets.
+Assert continued valid reception, isolated sequence history, unsupported old-peer remote
+volume and explicit cleanup. Missing fixture arguments skip; skipped fixtures are not passes.
+
+Run VolumePersistenceDeviceTest#saveConcurrentChangesForSeparateProcessRestore and
+#restoreOnNewApplicationProcessThenReturnOriginalValues in separate instrumentation invocations,
+in that order. The second verifies Application restoration before any setter and returns
+the debug application's prior values. These quiet fixtures do not establish physical sender
+capture, OEM key arbitration, encrypted multicast delivery or prolonged subjective quality.
+
 
 ## Silent-source durability
 

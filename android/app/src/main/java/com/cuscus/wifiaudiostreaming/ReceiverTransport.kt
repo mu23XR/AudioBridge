@@ -20,10 +20,15 @@ internal class ReceiverTransport(
     private val onKey: (String) -> Unit,
     private val onStats: (LinkMetrics.Snapshot, Int, Int, Long) -> Unit,
     private val onFinished: (SourceFailure) -> Unit,
-    private val onMicrophoneReady: (WfasCrypto.Dir?) -> Unit
+    private val onMicrophoneReady: (WfasCrypto.Dir?) -> Unit,
+    private val onRemoteVolume: (RemoteVolumeState) -> Unit
 ) {
     val networkFingerprint get() = path.fingerprint
     @Volatile private var socket: DatagramSocket? = null
+    private var remoteEndpoint: InetSocketAddress? = null
+    @Volatile private var remoteVolume: RemoteVolumeProtocol.Client? = null
+    private var lastRemoteState: RemoteVolumeState? = null
+    private var rejectedEndpoints = 0L
     @Volatile private var stopped = false
     @Volatile private var failure: SourceFailure? = null
     private var player: ReceiverPlayout? = null
@@ -64,6 +69,7 @@ internal class ReceiverTransport(
             if (!format.isPlayable) throw SourceFailure("UNSUPPORTED_FORMAT",
                 context.getString(R.string.status_unsupported_format, format.describe()), false)
             val remote = InetAddress.getByName(peer.ip)
+            remoteEndpoint = InetSocketAddress(remote, peer.port)
             if (peer.isMulticast) {
                 val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
                 multicastLock = wifi.createMulticastLock("wfas:source:$id").apply { setReferenceCounted(false); acquire() }
@@ -80,15 +86,17 @@ internal class ReceiverTransport(
             } else DatagramSocket(null).apply {
                 path.bind(this)
                 bind(InetSocketAddress(path.localAddress, 0))
-                connect(remote, peer.port)
             }
             socket = sock
+            RuntimeDiagnostics.event("SOURCE_SOCKET_READY",
+                "source=$id interface=${path.name} network=${path.network?.networkHandle ?: 0} local=${sock.localSocketAddress} peer=${peer.ip}:${peer.port}", true)
             // Socket exists before output initialization: a stalled device call
             // cannot prevent handshake/control packets from being processed.
             sock.receiveBufferSize = 1 shl 18
             sock.soTimeout = 250
             if (!peer.isMulticast) handshake(sock)
             else {
+                publishRemoteVolume(RemoteVolumeState(RemoteVolumeSupport.UNSUPPORTED))
                 groupEpoch = expectedEpoch?.minus(1) ?: SettingsDataStore(context).getMcastClientEpoch(peer.ip)
                 encrypted = encrypted || key.isNotEmpty() || fromInvite || expectedEpoch != null
             }
@@ -112,12 +120,13 @@ internal class ReceiverTransport(
                 onStats(snapshot, player!!.targetMs, player!!.bufferedMs, player!!.playedFrames)
                 if (now() - lastJournal >= 10_000) {
                     RuntimeDiagnostics.event("SOURCE_NETWORK_STATS",
-                        "source=$id ${snapshot.format()} duplicates=${snapshot.duplicates} latePcmDiscard=$discardedLatePcm")
+                        "source=$id ${snapshot.format()} duplicates=${snapshot.duplicates} latePcmDiscard=$discardedLatePcm rejectedEndpoints=$rejectedEndpoints")
                     lastJournal = now()
                 }
                 lastReport = now()
             }
             while (currentCoroutineContext().isActive && !stopped) {
+                tickRemoteVolume(sock)
                 failure?.let { throw it }
                 player?.blockedReason()?.let { throw SourceFailure("PLAYBACK_OPERATION_TIMEOUT", it) }
                 try {
@@ -132,15 +141,21 @@ internal class ReceiverTransport(
                 }
                 // A multicast group can contain several senders. Each source
                 // must only consume its selected sender, not mix the group twice.
-                if (packet.address != remote) continue
+                if (!isPeer(packet)) continue
                 val length = packet.length
                 if (length <= 0) continue
-                if (length < 10 || buffer[0] != 0x57.toByte() || buffer[1] != 0x46.toByte()) {
+                if (!WfasDatagram.isAudio(buffer, length, peer.isMulticast)) {
                     val control = String(buffer, 0, length, Charsets.US_ASCII).trim()
                     when {
                         control == "PING" && !peer.isMulticast -> { send(sock, "PONG"); lastActivity = now() }
                         control == "BYE" -> reject("SERVER_BYE", R.string.status_server_disconnected, true)
-                        peer.isMulticast && control.startsWith(WfasCrypto.MSG_MCAST_ENC) -> {
+                        !peer.isMulticast && control.startsWith(RemoteVolumeProtocol.STATE) -> {
+                            if (remoteVolume?.receive(control) == true) {
+                                lastActivity = now()
+                                remoteVolume?.state()?.let(::publishRemoteVolume)
+                            }
+                        }
+                        peer.isMulticast && control.startsWith(WfasCrypto.MSG_MCAST_ENC + ";") -> {
                             if (groupBeacon(control)) lastActivity = now()
                         }
                     }
@@ -241,7 +256,7 @@ internal class ReceiverTransport(
                 if (player?.awaitStopped() == false) outcome = SourceFailure(
                     "PLAYBACK_CLEANUP_TIMEOUT", text(R.string.source_playback_error), false)
             }
-            RuntimeDiagnostics.event("SOURCE_SESSION_END", "source=$id reason=${outcome.reason} received=$received metrics=${lastMetrics?.snapshot()?.format()} latePcmDiscard=$discardedLatePcm", true)
+            RuntimeDiagnostics.event("SOURCE_SESSION_END", "source=$id reason=${outcome.reason} received=$received metrics=${lastMetrics?.snapshot()?.format()} latePcmDiscard=$discardedLatePcm rejectedEndpoints=$rejectedEndpoints", true)
             withContext(NonCancellable + Dispatchers.Main.immediate) { if (!stopped) onFinished(outcome) }
         }
     }
@@ -263,7 +278,10 @@ internal class ReceiverTransport(
     private suspend fun handshake(sock: DatagramSocket) {
         status(text(R.string.status_waiting_for_ack), false)
         val nonce = WfasAuth.nonceHex()
-        var hello = "HELLO_FROM_CLIENT;v=${NetworkManager.WFAS_PROTOCOL_VERSION};cnonce=$nonce"
+        val volumeNonce = RemoteVolumeProtocol.nonce()
+        val helloBase = "HELLO_FROM_CLIENT;v=${NetworkManager.WFAS_PROTOCOL_VERSION};cnonce=$nonce" +
+            RemoteVolumeProtocol.helloSuffix(volumeNonce)
+        var hello = helloBase
         var serverNonce = ""
         var proved = false
         val start = now()
@@ -276,9 +294,19 @@ internal class ReceiverTransport(
         while (currentCoroutineContext().isActive && !stopped && now() < deadline && now() < start + 120_000) {
             if (!anyReply && now() - start > 6000) reject("NO_ACK", R.string.status_server_silent_maybe_outdated, true)
             if (anyReply && now() - lastReply > 6000) reject("ACK_ACTIVITY_TIMEOUT", R.string.status_server_disconnected, true)
-            if (now() - lastSend >= 1000) { send(sock, hello); lastSend = now() }
+            if (now() - lastSend >= 1000) {
+                send(sock, hello); lastSend = now()
+                if (lastSend - start < 1000) RuntimeDiagnostics.event("SOURCE_HELLO_SENT", "source=$id", true)
+            }
             try { packet.length = buffer.size; sock.receive(packet) } catch (_: SocketTimeoutException) { continue }
+            if (!isPeer(packet)) continue
             val reply = String(buffer, 0, packet.length, Charsets.US_ASCII).trim()
+            // Record only known message kinds, never raw authentication payloads.
+            val replyKind = reply.substringBefore(';').takeIf {
+                it in setOf("HELLO_ACK", "WFAS_INCOMPATIBLE", "WFAS_BUSY", "WFAS_PENDING", "WFAS_UNAUTHORIZED", "WFAS_AUTH_REQUIRED")
+            }
+            if (!anyReply || replyKind == "HELLO_ACK") RuntimeDiagnostics.event("SOURCE_HANDSHAKE_REPLY",
+                "source=$id kind=${replyKind ?: "OTHER"} bytes=${packet.length} peer=${packet.socketAddress}", true)
             anyReply = true; lastReply = now()
             when {
                 reply.startsWith("WFAS_INCOMPATIBLE") -> {
@@ -292,7 +320,7 @@ internal class ReceiverTransport(
                 }
                 reply == "WFAS_UNAUTHORIZED" -> {
                     obtainKey(true); proved = false
-                    hello = "HELLO_FROM_CLIENT;v=${NetworkManager.WFAS_PROTOCOL_VERSION};cnonce=$nonce"
+                    hello = helloBase
                     send(sock, hello); lastReply = now(); deadline = now() + 30_000
                 }
                 reply.startsWith("WFAS_AUTH_REQUIRED") -> {
@@ -301,9 +329,9 @@ internal class ReceiverTransport(
                     val proof = WfasAuth.getToken(reply, "sproof").orEmpty()
                     if (!WfasAuth.constantTimeEquals(proof, WfasAuth.proof(key, 'S', nonce, serverNonce))) {
                         obtainKey(true); proved = false
-                        hello = "HELLO_FROM_CLIENT;v=${NetworkManager.WFAS_PROTOCOL_VERSION};cnonce=$nonce"
+                        hello = helloBase
                     } else {
-                        hello = "HELLO_FROM_CLIENT;v=${NetworkManager.WFAS_PROTOCOL_VERSION};cnonce=$nonce;cproof=${WfasAuth.proof(key, 'C', nonce, serverNonce)}"
+                        hello = "$helloBase;cproof=${WfasAuth.proof(key, 'C', nonce, serverNonce)}"
                         proved = true
                     }
                     send(sock, hello); lastSend = now(); lastReply = now(); deadline = now() + 30_000
@@ -318,6 +346,14 @@ internal class ReceiverTransport(
                     if (encrypted && !proved) reject("AUTH_REJECTED", R.string.status_unauthorized)
                     val dirs = if (proved) WfasCrypto.deriveUnicast(key, nonce, serverNonce) else null
                     recvDir = if (encrypted) dirs?.second else null
+                    remoteVolume = RemoteVolumeProtocol.accept(reply, volumeNonce,
+                        if (proved) key else "", nonce, serverNonce)
+                    if (remoteVolume == null) publishRemoteVolume(RemoteVolumeState(RemoteVolumeSupport.UNSUPPORTED))
+                    else {
+                        remoteVolume!!.query()
+                        publishRemoteVolume(remoteVolume!!.state())
+                        tickRemoteVolume(sock)
+                    }
                     if (proved) onKey(key)
                     onMicrophoneReady(if (encrypted) dirs?.first else null)
                     status(text(R.string.source_connected_silent), false)
@@ -325,6 +361,8 @@ internal class ReceiverTransport(
                 }
             }
         }
+        currentCoroutineContext().ensureActive()
+        if (stopped) throw CancellationException("Source stopped during handshake")
         reject("ACK_TIMEOUT", R.string.status_server_disconnected, true)
     }
 
@@ -358,7 +396,42 @@ internal class ReceiverTransport(
 
     private fun send(sock: DatagramSocket, message: String) {
         val bytes = message.toByteArray(Charsets.US_ASCII)
-        sock.send(DatagramPacket(bytes, bytes.size))
+        sock.send(DatagramPacket(bytes, bytes.size, checkNotNull(remoteEndpoint)))
+    }
+    private fun isPeer(packet: DatagramPacket): Boolean {
+        val expected = remoteEndpoint ?: return false
+        if (packet.address == expected.address && (peer.isMulticast || packet.port == expected.port)) return true
+        rejectedEndpoints++
+        if (rejectedEndpoints == 1L || rejectedEndpoints % 1000L == 0L) {
+            RuntimeDiagnostics.event("SOURCE_ENDPOINT_REJECTED",
+                "source=$id count=$rejectedEndpoints from=${packet.socketAddress} differentAddress=${packet.address != expected.address} differentPort=${packet.port != expected.port}")
+        }
+        return false
+    }
+    private fun tickRemoteVolume(sock: DatagramSocket) {
+        val control = remoteVolume ?: return
+        control.nextMessage(now())?.let {
+            try { send(sock, it) }
+            catch (failure: java.io.IOException) {
+                // A volume request is optional. Its bounded retry/error path
+                // must not tear down otherwise healthy incoming audio.
+                RuntimeDiagnostics.event("SOURCE_VOLUME_SEND_FAILED",
+                    "source=$id type=${failure.javaClass.simpleName}")
+            }
+        }
+        publishRemoteVolume(control.state())
+    }
+    private fun publishRemoteVolume(state: RemoteVolumeState) {
+        if (lastRemoteState == state) return
+        lastRemoteState = state
+        onRemoteVolume(state)
+    }
+    fun setRemoteVolume(percent: Int): Boolean {
+        require(percent in 0..100)
+        val control = remoteVolume ?: return false
+        control.setPercent(percent)
+        publishRemoteVolume(control.state())
+        return true
     }
     private fun version(message: String) = WfasAuth.getToken(message, "v")?.toIntOrNull() ?: 0
     private fun fadeIn(pcm: ByteArray, channels: Int) {

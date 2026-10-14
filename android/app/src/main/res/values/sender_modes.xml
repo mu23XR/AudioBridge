@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sender_playback_mode_title">Sender playback</string>
+    <string name="sender_playback_mode_description">Choose where captured audio plays. The choice is saved for the next sending session.</string>
+    <string name="sender_playback_stop_to_change">Stop sending before changing the playback route.</string>
+    <string name="sender_playback_local">Play on this device</string>
+    <string name="sender_playback_local_description">Keep local playback. Volume keys change this device’s media volume; transmission volume is separate. Requires Android 13 or newer and a supported capture route.</string>
+    <string name="sender_playback_remote">Remote playback only</string>
+    <string name="sender_playback_remote_description">Suppress local playback and use volume keys for transmission volume.</string>
+    <string name="sender_playback_hardware_limit">Other media apps and some systems may take over volume keys in the background. You can always adjust transmission volume in AudioBridge or its notification.</string>
+    <string name="sender_playback_save_failed">Could not save sender playback mode. Please try again.</string>
+    <string name="sender_local_playback_unavailable">The selected local playback mode is unavailable on this capture route. Sending was stopped. Choose remote playback only to continue.</string>
+    <string name="sender_volume_keys_unavailable">Hardware volume control is unavailable. Use AudioBridge or its notification to adjust transmission volume.</string>
+</resources>

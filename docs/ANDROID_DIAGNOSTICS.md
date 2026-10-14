@@ -11,3 +11,7 @@ Shizuku采集进程通过有界IPC队列报告事件和统计，由普通应用�
 观察字段：CAPTURE_READ_ERROR、SENDER_FAILED、SENDER_REMOTE_IDLE、SENDER_HOST_DESTROY、TASK_REMOVED、OFF_INFERRED_FROM_EMPTY_TASKS、AUTO_CONNECT_TIMEOUT/REJECTED、RECEIVER_SESSION_END、NETWORK_STATS、PLAYOUT_STATS、CAPTURE_STATS。它们区分主进程退出、发送桥失败、服务生命周期和播放故障。
 
 本次同时修复自动连接dataSync超时/配额拒绝导致崩溃，并将静音保活与真正的PCM供给分开，避免对正常静音作欠载恢复。不能据此声称OEM杀进程或全部长期音质故障已解决。真机跨夜证据仍是验收要求。
+
+test20 增加只读后台导出：已授权 ADB shell 使用 `content read --uri content://io.github.mu23xr.audiobridge.test.diagnostics/bundle` 获取相同白名单 ZIP。在电脑上用 `adb exec-out` 以二进制保存输出并校验 ZIP；不要用会重新编码文本的重定向方式。该 Provider 同时需要平台 DUMP 权限和 shell UID（或应用自身 UID），不授予普通应用读取权限。快照仅位于私有 cache，读取关闭时清理，下次导出也会清理残留；不自动创建 Download 下的公开日志。
+
+新增 SOURCE_SOCKET_READY、SOURCE_HANDSHAKE_REPLY、SOURCE_ENDPOINT_REJECTED 和 SOURCE_RETRY_SCHEDULED，用于区分回包、源校验与重试等待。被拒绝端点只采样记录，详细地址仍属于私有证据，不放入公开 Issue。HOST_DESTROY_KEEP_INTENT 与 TASK_REMOVED 区分系统销毁和明确用户退出。CAPTURE_STATS 分别统计 zeroReads、silentBuffers、lastPositiveReadAgeMs、wouldClipSamples、limitedSamples；普通后端还记录 mixClippedSamples。软峰值保护不能恢复已发生的内部音频/麦克风相加削波，限幅计数不代表所有音质原因。

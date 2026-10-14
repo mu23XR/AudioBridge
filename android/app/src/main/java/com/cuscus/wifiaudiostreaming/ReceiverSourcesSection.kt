@@ -25,12 +25,38 @@ internal fun ReceiverSourcesSection() {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(source.peer.hostname.ifBlank { source.peer.ip }, style = MaterialTheme.typography.titleMedium)
                     Text(source.status, style = MaterialTheme.typography.bodySmall)
+                    val remote = source.remoteVolume
+                    if (remote.support == RemoteVolumeSupport.SUPPORTED) {
+                        var requested by remember(source.id) { mutableFloatStateOf((remote.percent ?: 50).toFloat()) }
+                        var dragging by remember(source.id) { mutableStateOf(false) }
+                        LaunchedEffect(remote.percent, remote.pending, remote.error) {
+                            if (!dragging) remote.percent?.let { requested = it.toFloat() }
+                        }
+                        Text(stringResource(R.string.source_sender_volume,
+                            remote.percent?.toString() ?: "—"), style = MaterialTheme.typography.bodySmall)
+                        Slider(requested, {
+                            dragging = true; requested = it
+                        }, valueRange = 0f..100f,
+                            enabled = remote.percent != null && !remote.pending && !source.needsAttention,
+                            onValueChangeFinished = {
+                                dragging = false
+                                ClientSessionController.setRemoteVolume(source.id, requested.roundToInt())
+                            })
+                        if (remote.pending) Text(stringResource(R.string.source_sender_volume_pending),
+                            style = MaterialTheme.typography.bodySmall)
+                        if (remote.error != null) Text(stringResource(R.string.source_sender_volume_failed),
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    } else {
+                        Text(stringResource(if (remote.support == RemoteVolumeSupport.UNSUPPORTED)
+                            R.string.source_sender_volume_unsupported else R.string.source_sender_volume_loading),
+                            style = MaterialTheme.typography.bodySmall)
+                    }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(stringResource(R.string.source_mute), Modifier.weight(1f))
                         Switch(source.muted, { ClientSessionController.setMuted(source.id, it) })
                     }
                     var volume by remember(source.id, source.volume) { mutableFloatStateOf(source.volume) }
-                    Text("${stringResource(R.string.source_volume)} ${(volume * 100).roundToInt()}%",
+                    Text("${stringResource(R.string.source_mix_volume)} ${(volume * 100).roundToInt()}%",
                         style = MaterialTheme.typography.bodySmall)
                     Slider(volume, { volume = it; ClientSessionController.setVolume(source.id, it, save = false) }, onValueChangeFinished = {
                         ClientSessionController.setVolume(source.id, volume)

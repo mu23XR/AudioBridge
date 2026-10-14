@@ -138,10 +138,28 @@ object NetworkManager {
 
     // --- GESTIONE VOLUME ---
     /** Sender-side software gain for the stream sent over the network. */
-    val serverVolume = MutableStateFlow(1.0f)
+    private val senderGain = MutableStateFlow(1.0f)
+    val serverVolume: kotlinx.coroutines.flow.StateFlow<Float> = senderGain
 
     /** Receiver-side playback gain. */
-    val clientVolume = MutableStateFlow(1.0f)
+    private val receiverGain = MutableStateFlow(1.0f)
+    val clientVolume: kotlinx.coroutines.flow.StateFlow<Float> = receiverGain
+
+    internal fun restoreVolumes(sender: Float, receiver: Float) {
+        senderGain.value = sender
+        receiverGain.value = receiver
+    }
+
+    fun setServerVolume(value: Float, propagateToSender: Boolean = true) {
+        require(value.isFinite()) { "Sender gain must be finite" }
+        val safe = value.coerceIn(0f, 2f)
+        senderGain.value = safe
+        VolumeMemory.save()
+        // Remote-authoritative snapshots mirror here without echoing the same
+        // value back into the privileged sender and racing another receiver.
+        if (propagateToSender && com.cuscus.wifiaudiostreaming.shizuku.ShizukuAudioBridgeManager.isActive())
+            com.cuscus.wifiaudiostreaming.shizuku.ShizukuAudioBridgeManager.setVolume(safe)
+    }
     private val clientPlaybackTracks =
         java.util.Collections.newSetFromMap(
             java.util.concurrent.ConcurrentHashMap<AudioTrack, Boolean>()
@@ -150,7 +168,8 @@ object NetworkManager {
     fun setClientVolume(value: Float) {
         if (!value.isFinite()) return
         val safe = value.coerceIn(0f, 1f)
-        clientVolume.value = safe
+        receiverGain.value = safe
+        VolumeMemory.save()
         clientPlaybackTracks.forEach { track ->
             runCatching { track.setVolume(safe) }
         }
@@ -1541,6 +1560,15 @@ object NetworkManager {
                     var producerLoopCount = 0L
                     var producerTotalBytes = 0L
                     var producerDropped = 0L
+                    var zeroReads = 0L
+                    var silentBuffers = 0L
+                    var limitedSamples = 0L
+                    var wouldClipSamples = 0L
+                    var lastCaptureReport = android.os.SystemClock.elapsedRealtime()
+                    var lastCaptureRead = lastCaptureReport
+                    var maxCaptureReadGap = 0L
+                    var lastPositiveRead = lastCaptureReport
+                    var mixClippedSamples = 0L
 
                     Log.d(TAG, "[PRODUCER] avviato: streamInternal=$streamInternal projNull=${projection == null} internalRecordState=${activeInternalRecord?.state} micRecordState=${activeMicRecord?.state} safeBufferSize=$safeBufferSize bufMs=$bufMs")
 
@@ -1548,8 +1576,23 @@ object NetworkManager {
                         val iBytes = activeInternalRecord?.read(internalBuf!!, 0, internalBuf.size, AudioRecord.READ_NON_BLOCKING) ?: 0
                         val mBytes = activeMicRecord?.read(micBuf!!, 0, micBuf.size, AudioRecord.READ_NON_BLOCKING) ?: 0
 
-                        if (iBytes < 0) Log.e(TAG, "[PRODUCER] iBytes ERROR=$iBytes (AudioRecord error code)")
-                        if (mBytes < 0) Log.e(TAG, "[PRODUCER] mBytes ERROR=$mBytes (AudioRecord error code)")
+                        if (iBytes < 0 || mBytes < 0) {
+                            RuntimeDiagnostics.event("CAPTURE_READ_ERROR", "internal=$iBytes microphone=$mBytes", true)
+                            throw IllegalStateException("AudioRecord read failed: internal=$iBytes microphone=$mBytes")
+                        }
+
+                        val readAt = android.os.SystemClock.elapsedRealtime()
+                        maxCaptureReadGap = maxOf(maxCaptureReadGap, readAt - lastCaptureRead)
+                        lastCaptureRead = readAt
+                        if (iBytes > 0 || mBytes > 0) lastPositiveRead = readAt
+                        if (iBytes == 0 && mBytes == 0) zeroReads++
+                        if (readAt - lastCaptureReport >= 10_000) {
+                            RuntimeDiagnostics.event("CAPTURE_STATS", "bytes=$producerTotalBytes zeroReads=$zeroReads silentBuffers=$silentBuffers " +
+                                "limitedSamples=$limitedSamples wouldClipSamples=$wouldClipSamples mixClippedSamples=$mixClippedSamples " +
+                                "maxReadGapMs=$maxCaptureReadGap lastPositiveReadAgeMs=${readAt - lastPositiveRead} queueDropped=$producerDropped gain=${serverVolume.value}")
+                            maxCaptureReadGap = 0L
+                            lastCaptureReport = readAt
+                        }
 
                         val ei = iBytes.coerceAtLeast(0)
                         val em = mBytes.coerceAtLeast(0)
@@ -1573,8 +1616,9 @@ object NetworkManager {
                             val iShorts = ByteBuffer.wrap(internalBuf!!, 0, aligned).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
                             val mShorts = ByteBuffer.wrap(micBuf!!,      0, aligned).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
                             for (i in 0 until aligned / 2) {
-                                val s = (iShorts[i].toInt() + mShorts[i].toInt())
-                                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                                val mixed = iShorts[i].toInt() + mShorts[i].toInt()
+                                if (mixed !in Short.MIN_VALUE.toInt()..Short.MAX_VALUE.toInt()) mixClippedSamples++
+                                val s = mixed.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
                                 mixedBuf[2 * i]     = (s.toInt() and 0xff).toByte()
                                 mixedBuf[2 * i + 1] = (s.toInt() shr 8 and 0xff).toByte()
                             }
@@ -1582,15 +1626,11 @@ object NetworkManager {
                         } else if (streamInternal && ei > 0) internalBuf!! else micBuf!!
 
                         val vol = serverVolume.value
-                        if (vol != 1.0f) {
-                            val sb = ByteBuffer.wrap(raw, 0, aligned).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                            for (i in 0 until aligned / 2) {
-                                val s = (sb[i].toInt() * vol).toInt()
-                                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                                raw[2 * i]     = (s and 0xff).toByte()
-                                raw[2 * i + 1] = ((s shr 8) and 0xff).toByte()
-                            }
-                        }
+                        // Count actual silent PCM independently from a nonblocking
+                        // read with no data, before gain=0 can turn sound into zero.
+                        if (PcmSilence.isZero(raw, 0, aligned)) silentBuffers++
+                        wouldClipSamples += PcmGainLimiter.countWouldClip(raw, 0, aligned, vol)
+                        limitedSamples += PcmGainLimiter.applyInPlace(raw, 0, aligned, vol)
 
                         val chunk = raw.copyOf(aligned)
                         httpPcmQueue?.let { if (it.remainingCapacity() > 0) it.offer(chunk) }
@@ -1951,7 +1991,7 @@ object NetworkManager {
                         val rxAt = System.currentTimeMillis()
                         val clientAddress = clientDatagram.address
                         val message = clientDatagram.packet.readText().trim()
-                        Log.d(TAG, "[SERVER][UNICAST] datagram ricevuto da $clientAddress: '$message'")
+                        Log.d(TAG, "[SERVER][UNICAST] datagram from $clientAddress kind=${message.substringBefore(';')}")
 
                         if (message == "MODE_PROBE") {
                             Log.d(TAG, "[SERVER][UNICAST] rispondo UNICAST a MODE_PROBE da $clientAddress")
@@ -1960,7 +2000,7 @@ object NetworkManager {
                         }
 
                         if (!message.startsWith(NetworkSettings.CLIENT_HELLO_MESSAGE)) {
-                            Log.w(TAG, "[SERVER][UNICAST] messaggio ignorato (non HELLO): '$message'")
+                            Log.w(TAG, "[SERVER][UNICAST] ignored non-HELLO kind=${message.substringBefore(';')}")
                             continue
                         }
 
@@ -2054,7 +2094,14 @@ object NetworkManager {
                         // Svuota la coda: il client riceve solo audio fresco
                         udpAudioQueue.clear()
 
-                        val ackText = helloAckMessage() + if (encrypting) ";enc=1" else ""
+                        val volumeControl = RemoteVolumeProtocol.offer(message,
+                            if (SecurityMode.requiresKey(securityMode)) authKey else "", pendCnonce, pendSnonce,
+                            object : RemoteVolumeProtocol.Volume {
+                                override fun getPercent() = VolumeScale.percent(serverVolume.value, 2f)
+                                override fun setPercent(value: Int) { setServerVolume(VolumeScale.gain(value, 2f)) }
+                            })
+                        val ackText = helloAckMessage() + (if (encrypting) ";enc=1" else "") +
+                            (volumeControl?.ackSuffix() ?: "")
                         val ackPacket = buildPacket { writeText(ackText) }
                         sendSocket.send(Datagram(ackPacket, clientAddress))
                         Log.d(TAG, "[SERVER][TIMING] HELLO_ACK inviato a $clientAddress a +${System.currentTimeMillis() - rxAt}ms dalla ricezione")
@@ -2095,6 +2142,9 @@ object NetworkManager {
                                 delay(1000)
                                 try {
                                     sendSocket.send(Datagram(buildPacket { writeText("PING") }, clientAddress))
+                                    volumeControl?.snapshot()?.let { update ->
+                                        sendSocket.send(Datagram(buildPacket { writeText(update) }, clientAddress))
+                                    }
                                     pingCount++
                                     if (pingCount == 1L || pingCount % 10L == 0L) {
                                         Log.d(
@@ -2140,7 +2190,7 @@ object NetworkManager {
                                 while (isActive && clientAlive.get()) {
                                     val datagram = sendSocket.receive()
                                     val msg = datagram.packet.readText().trim()
-                                    Log.d(TAG, "[SERVER][UNICAST] byeJob ricevuto: '$msg' da ${datagram.address}")
+                                    Log.d(TAG, "[SERVER][UNICAST] control kind=${msg.substringBefore(';')} from ${datagram.address}")
                                     // Solo il client collegato puo' pilotare questa sessione:
                                     // senza questo controllo un CLIENT_BYE di un terzo
                                     // dispositivo chiuderebbe la connessione altrui.
@@ -2156,6 +2206,20 @@ object NetworkManager {
                                         } else {
                                             Log.w(TAG, "[SERVER][UNICAST] datagram da ${datagram.address} ignorato: sessione occupata")
                                         }
+                                        continue
+                                    }
+                                    if (msg.startsWith(RemoteVolumeProtocol.GET) || msg.startsWith(RemoteVolumeProtocol.SET)) {
+                                        volumeControl?.receive(msg)?.let { reply ->
+                                            sendSocket.send(Datagram(buildPacket { writeText(reply) }, clientAddress))
+                                            lastClientHeartbeatAt.set(System.currentTimeMillis())
+                                        }
+                                        continue
+                                    }
+                                    // An ACK can be lost while audio is already flowing. Only
+                                    // repeat it for this exact endpoint and negotiated session.
+                                    if (msg.startsWith(NetworkSettings.CLIENT_HELLO_MESSAGE) &&
+                                        (volumeControl == null || volumeControl.acceptsHello(msg))) {
+                                        sendSocket.send(Datagram(buildPacket { writeText(ackText) }, clientAddress))
                                         continue
                                     }
                                     when (msg) {

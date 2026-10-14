@@ -105,6 +105,8 @@ import androidx.graphics.shapes.RoundedPolygon
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cuscus.wifiaudiostreaming.data.AppScript
 import com.cuscus.wifiaudiostreaming.data.AppSettings
+import com.cuscus.wifiaudiostreaming.data.SettingsDataStore
+import com.cuscus.wifiaudiostreaming.shizuku.ShizukuAudioBridgeManager
 import com.cuscus.wifiaudiostreaming.data.AutoConnectEntry
 import com.cuscus.wifiaudiostreaming.scripting.ScriptActionType
 import com.cuscus.wifiaudiostreaming.scripting.ScriptCommand
@@ -807,6 +809,7 @@ fun SettingsScreenContent(
                                     onCheckedChange = onMuteRenderChange
                                 )
                             } else {
+                                SenderPlaybackSetting(appSettings.senderLocalPlayback)
                                 SettingsInfoItem(
                                     title = stringResource(R.string.shizuku_backend_info_title),
                                     description = stringResource(R.string.shizuku_backend_info_desc),
@@ -1867,6 +1870,57 @@ fun SettingsSwitchItem(
     }
 }
 
+
+@Composable
+private fun SenderPlaybackSetting(savedChoice: Boolean?) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val streaming by NetworkManager.isStreamingCurrent.collectAsState()
+    val bridgeState by ShizukuAudioBridgeManager.state.collectAsState()
+    var saving by remember { mutableStateOf(false) }
+    val active = (streaming && NetworkManager.isServerStreaming) ||
+        (bridgeState !is ShizukuAudioBridgeManager.State.Idle && ShizukuAudioBridgeManager.isActive())
+    val localPlayback = SenderPlaybackPolicy.keepPlayingOnDevice(savedChoice, android.os.Build.VERSION.SDK_INT)
+    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+        Text(stringResource(R.string.sender_playback_mode_title),
+            style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+        Text(stringResource(if (active) R.string.sender_playback_stop_to_change else R.string.sender_playback_mode_description),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        listOf(true, false).forEach { local ->
+            val enabled = !active && !saving && (!local || android.os.Build.VERSION.SDK_INT >= 33)
+            val select = {
+                // Check again at the action boundary: capture may have started
+                // since the last composition. Recreate its route only via Stop.
+                if (!ShizukuAudioBridgeManager.isActive() && !NetworkManager.isServerStreaming) {
+                    saving = true
+                    scope.launch {
+                        try {
+                            SettingsDataStore(context.applicationContext).saveSenderLocalPlayback(local)
+                        } catch (error: Exception) {
+                            if (error is kotlinx.coroutines.CancellationException) throw error
+                            RuntimeDiagnostics.event("SENDER_MODE_SAVE_FAILED", error.javaClass.simpleName, true)
+                            Toast.makeText(context, R.string.sender_playback_save_failed, Toast.LENGTH_LONG).show()
+                        } finally {
+                            saving = false
+                        }
+                    }
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = select)
+                .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = localPlayback == local, enabled = enabled, onClick = select)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(stringResource(if (local) R.string.sender_playback_local else R.string.sender_playback_remote),
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(if (local) R.string.sender_playback_local_description else R.string.sender_playback_remote_description),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Text(stringResource(R.string.sender_playback_hardware_limit),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
 
 @Composable
 fun SettingsChoiceItem(
@@ -3001,7 +3055,7 @@ fun ExpressiveStreamingControlCenter(
                         val volume by NetworkManager.serverVolume.collectAsState()
                         ExpressiveVolumeSlider(
                             volume = volume,
-                            onVolumeChange = { NetworkManager.serverVolume.value = it },
+                            onVolumeChange = { NetworkManager.setServerVolume(it) },
                             modifier = Modifier.fillMaxWidth(0.9f)
                         )
                     } else {
@@ -5064,7 +5118,7 @@ fun ExpressiveVolumeSlider(
     val displayTitle = title ?: stringResource(R.string.volume_card_title)
     val displaySubtitle = subtitle ?: stringResource(R.string.server_audio_restart_hint)
 
-    val percentage = (volume * 100).toInt()
+    val percentage = VolumeScale.percent(volume, safeMaxVolume)
     val volumeIcon = when {
         volume <= 0.01f -> Icons.Outlined.VolumeOff
         volume < 0.5f -> Icons.Outlined.VolumeMute
@@ -5181,8 +5235,8 @@ fun ExpressiveVolumeSlider(
             ExpressiveChoiceRow(
                 options = listOf(
                     ChoiceOption(Icons.Outlined.VolumeOff, stringResource(R.string.volume_muted), "0"),
-                    ChoiceOption(Icons.Outlined.VolumeDown, "100%", "1"),
-                    ChoiceOption(Icons.Outlined.VolumeUp, "200%", "2")
+                    ChoiceOption(Icons.Outlined.VolumeDown, "50%", "1"),
+                    ChoiceOption(Icons.Outlined.VolumeUp, "100%", "2")
                 ),
                 selectedValue = selected,
                 accent = badgeColor,

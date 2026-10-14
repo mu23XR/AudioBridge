@@ -24,7 +24,8 @@ class PlayoutGovernor internal constructor(
     private val tag: String,
     private val nowMs: () -> Long,
     private val warn: (String) -> Unit,
-    val adaptive: Boolean = false
+    val adaptive: Boolean = false,
+    private val onDiscontinuity: () -> Unit = {}
 ) {
     internal interface Output {
         val playbackHeadPosition: Int
@@ -38,7 +39,8 @@ class PlayoutGovernor internal constructor(
 
     constructor(track: AudioTrack, sampleRate: Int, frameSize: Int,
                 targetLatencyMs: Int, tag: String = "PLAYOUT",
-                adaptive: Boolean = false) : this(
+                adaptive: Boolean = false,
+                onDiscontinuity: () -> Unit = {}) : this(
         object : Output {
             override val playbackHeadPosition get() = track.playbackHeadPosition
             override val underruns get() = track.underrunCount
@@ -49,7 +51,7 @@ class PlayoutGovernor internal constructor(
             override fun play() = track.play()
             override fun setPlaybackRate(rate: Int) = track.setPlaybackRate(rate)
         }, sampleRate, frameSize, targetLatencyMs, tag,
-        { SystemClock.elapsedRealtime() }, { Log.w(tag, it) }, adaptive
+        { SystemClock.elapsedRealtime() }, { Log.w(tag, it) }, adaptive, onDiscontinuity
     )
     private val framesPerMs = (sampleRate / 1000.0).coerceAtLeast(1.0)
 
@@ -108,7 +110,8 @@ class PlayoutGovernor internal constructor(
     @Synchronized fun playbackRateHz(): Int = currentRate
 
     /** Never let a paused/full AudioTrack block the UDP receive and PONG loop. */
-    @Synchronized fun writePcm(pcm: ByteArray, offset: Int, length: Int): Int {
+    @Synchronized fun writePcm(pcm: ByteArray, offset: Int, length: Int,
+                               beforeWrite: (() -> Unit)? = null): Int {
         val head = playedFrames()
         val now = nowMs()
         if (now - lastWriteAt > 3000) failedLocalRecoveries = 0
@@ -129,6 +132,9 @@ class PlayoutGovernor internal constructor(
             warn("[PLAYOUT] stalled track recovered; stale PCM flushed")
             RuntimeDiagnostics.event("PLAYOUT_LOCAL_RECOVERY", "failures=$failedLocalRecoveries")
         }
+        // A local flush can restart the caller's fade. Prepare PCM only after
+        // that recovery so this very first write crosses the boundary softly.
+        beforeWrite?.invoke()
         val written = track.write(pcm, offset, length, AudioTrack.WRITE_NON_BLOCKING)
         check(written >= 0) { "AudioTrack.write failed: $written" }
         check(written <= length && written % frameSize == 0) { "AudioTrack.write returned an incomplete frame: $written" }
@@ -187,6 +193,7 @@ class PlayoutGovernor internal constructor(
         lastProgressHead = -1L
         lastProgressAt = nowMs()
         avgBufferedFrames = targetFrames.toDouble()
+        onDiscontinuity()
     }
 
     @Synchronized fun shouldDrop(incomingBytes: Int): Boolean {

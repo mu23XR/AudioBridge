@@ -1564,7 +1564,7 @@ private fun LiveControls(
             val volume by NetworkManager.serverVolume.collectAsState()
             ExpressiveVolumeSlider(
                 volume = volume,
-                onVolumeChange = { NetworkManager.serverVolume.value = it },
+                onVolumeChange = { NetworkManager.setServerVolume(it) },
                 accent = accent,
                 modifier = Modifier.fillMaxWidth()
             )

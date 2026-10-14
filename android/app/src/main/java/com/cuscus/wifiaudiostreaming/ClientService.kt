@@ -24,7 +24,6 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.widget.Toast
 import com.cuscus.wifiaudiostreaming.NetworkManager.updateWidgetState
 import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import com.cuscus.wifiaudiostreaming.data.SettingsDataStore
@@ -49,37 +48,17 @@ class ClientService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         RuntimeDiagnostics.event("RECEIVER_HOST_START", "startId=$startId redelivered=${intent == null}", true)
         RoleSelectionGate.initialize(applicationContext)
-        if (
-            StreamingActionReceiver.wasRecentlyTaskRemoved(this) ||
-            !RoleSelectionGate.isReceiverSelected()
-        ) {
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        // A sticky service restart must not depend on MainActivity being opened.
-        // Recreate the process-wide network watcher here so reconnect can recover
-        // after Android kills/restarts the app process in background.
-        NetworkManager.prewarmAudio()
-        NetworkManager.startNetworkWatch(applicationContext)
-
-        if (!NotificationCenter.canPost(this)) {
-            ClientSessionController.foregroundUnavailable(this, getString(R.string.source_notification_permission))
-            Toast.makeText(this, "Notifications permission missing", Toast.LENGTH_SHORT).show()
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        serviceScope.launch { updateWidgetState(this@ClientService, true, false) }
-
+        // A delivered startForegroundService request must be promoted even if
+        // its role or permission changed before onStartCommand was dispatched.
+        // Android can retain its promotion deadline after an early stopSelf.
         NotificationCenter.ensureChannels(this)
         try {
-        startForeground(
-            NotificationCenter.ID_CLIENT,
-            NotificationCenter.clientNotification(
-                this,
-                getString(R.string.notif_connecting),
-                NetworkManager.clientVolume.value
+            startForeground(
+                NotificationCenter.ID_CLIENT,
+                NotificationCenter.clientNotification(
+                    this, getString(R.string.notif_connecting), NetworkManager.clientVolume.value
+                )
             )
-        )
         } catch (failure: RuntimeException) {
             if (Build.VERSION.SDK_INT < 31 || failure !is android.app.ForegroundServiceStartNotAllowedException) throw failure
             RuntimeDiagnostics.event("RECEIVER_FOREGROUND_REJECTED", failure.javaClass.simpleName, true)
@@ -87,6 +66,24 @@ class ClientService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (
+            StreamingActionReceiver.wasRecentlyTaskRemoved(this) ||
+            !RoleSelectionGate.isReceiverSelected()
+        ) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (!NotificationCenter.canPost(this)) {
+            RuntimeDiagnostics.event("RECEIVER_NOTIFICATION_PERMISSION_REVOKED", critical = true)
+            ClientSessionController.foregroundUnavailable(this, getString(R.string.source_notification_permission))
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        // A sticky service restart must not depend on MainActivity being opened.
+        // Do not allocate audio or network resources before the startup guards.
+        NetworkManager.prewarmAudio()
+        NetworkManager.startNetworkWatch(applicationContext)
+        serviceScope.launch { updateWidgetState(this@ClientService, true, false) }
 
         // Keep both CPU and Wi-Fi fully awake while WFAS is receiving. Several
         // Android devices aggressively power-save Wi-Fi after screen-off even

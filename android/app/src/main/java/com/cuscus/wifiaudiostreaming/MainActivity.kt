@@ -492,7 +492,10 @@ class MainActivity : AppCompatActivity() {
                     sampleRate = params.sampleRate,
                     channels = if (params.channelConfig.equals("STEREO", ignoreCase = true)) 2 else 1,
                     packetBytes = settings?.maxPayloadBytes ?: 512,
-                    keepPlayingOnDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                    keepPlayingOnDevice = SenderPlaybackPolicy.keepPlayingOnDevice(
+                        settings?.senderLocalPlayback, Build.VERSION.SDK_INT
+                    ),
+                    requireLocalPlayback = settings?.senderLocalPlayback == true,
                     networkInterfaceName = params.networkInterface,
                     persistAfterClient = true
                 )
@@ -1047,14 +1050,18 @@ class MainActivity : AppCompatActivity() {
         requestServerStart(ScriptExecutor.resolveServerParams(settings, command))
     }
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (NetworkManager.isServerStreaming && !ShizukuAudioBridgeManager.isActive()) {
+        if (SenderPlaybackPolicy.interceptHardwareVolume(
+                NetworkManager.isServerStreaming,
+                ShizukuAudioBridgeManager.isActive(),
+                ShizukuAudioBridgeManager.keepsLocalPlayback()
+            )) {
             when (keyCode) {
                 KeyEvent.KEYCODE_VOLUME_UP -> {
-                    NetworkManager.serverVolume.value = (NetworkManager.serverVolume.value + 0.1f).coerceAtMost(2.0f)
+                    NetworkManager.setServerVolume((NetworkManager.serverVolume.value + 0.1f).coerceAtMost(2.0f))
                     return true // Consuma l'evento: impedisce al sistema di alzare il suo audio!
                 }
                 KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                    NetworkManager.serverVolume.value = (NetworkManager.serverVolume.value - 0.1f).coerceAtLeast(0.0f)
+                    NetworkManager.setServerVolume((NetworkManager.serverVolume.value - 0.1f).coerceAtLeast(0.0f))
                     return true
                 }
             }
@@ -1063,8 +1070,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        if (NetworkManager.isServerStreaming &&
-            !ShizukuAudioBridgeManager.isActive() &&
+        if (SenderPlaybackPolicy.interceptHardwareVolume(
+                NetworkManager.isServerStreaming,
+                ShizukuAudioBridgeManager.isActive(),
+                ShizukuAudioBridgeManager.keepsLocalPlayback()
+            ) &&
             (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
             return true // Consuma l'evento: previene il classico "BEEP" di sistema al rilascio del tasto
         }

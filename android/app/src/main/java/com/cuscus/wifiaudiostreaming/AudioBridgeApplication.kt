@@ -7,5 +7,6 @@ class AudioBridgeApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         RuntimeDiagnostics.initialize(this)
+        VolumeMemory.initialize(this)
     }
 }

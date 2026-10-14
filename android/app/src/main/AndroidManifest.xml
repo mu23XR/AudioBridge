@@ -48,6 +48,15 @@
         </service>
 
         <!-- Lab: receive the Shizuku binder used to launch our shell-uid UserService. -->
+        <!-- Only authorized ADB shell (checked again by UID) may read a private
+             diagnostic snapshot. This permission grants no ordinary app access. -->
+        <provider
+            android:name=".diagnostics.DiagnosticExportProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:permission="android.permission.DUMP" />
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

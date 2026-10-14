@@ -15,6 +15,7 @@ internal class ReceiverPlayout(
     private val onFailure: (String) -> Unit
 ) {
     private val frame = format.channels * 2
+    private val ramp = PcmRamp(format.channels, maxOf(1, format.sampleRate / 200))
     private val initialTarget = if (adaptive) 20 else latencyMs.coerceIn(20, 400)
     private val fifo = PcmQueue(frame, format.sampleRate * frame * 60 / 1000 / frame * frame)
     private val pendingConfiguration = java.util.concurrent.atomic.AtomicReference<Pair<Boolean, Int>?>(null)
@@ -65,7 +66,8 @@ internal class ReceiverPlayout(
         val result = builder.build()
         track = result // Cleanup can find a candidate even if later setup fails.
         ReceiverMixer.register(id, result)
-        val governor = PlayoutGovernor(result, format.sampleRate, frame, target, "WFAS_SOURCE_$id", adaptive)
+        val governor = PlayoutGovernor(result, format.sampleRate, frame, target,
+            "WFAS_SOURCE_$id", adaptive, onDiscontinuity = ramp::restart)
         // Normal/resampled tracks may wait for their entire capacity before
         // starting. Our bounded writer never fills that much, so choose a
         // start threshold explicitly; older APIs need a full initial preroll.
@@ -85,7 +87,7 @@ internal class ReceiverPlayout(
         var lastTune = lastSample
         var lastLog = lastSample
         var lastPcm = lastSample
-        var rampFrames = 0
+        var outputCopy = ByteArray(0)
         try {
             val (_, initial) = buildOutput(targetMs)
             var governor = initial
@@ -96,31 +98,27 @@ internal class ReceiverPlayout(
                     releaseOutput()
                     governor = buildOutput(targetMs).second
                     health = PlaybackHealth(adaptive)
-                    rampFrames = maxOf(1, format.sampleRate / 200)
+                    ramp.restart()
                     RuntimeDiagnostics.event("SOURCE_BUFFER_CONFIG", "source=$id adaptive=$automatic manualMs=$manual")
                 }
                 val now = SystemClock.elapsedRealtime()
                 val pending = fifo.bytes()
                 if (pending > 0) {
                     lastPcm = now
-                    if (fifo.takeDiscontinuity()) rampFrames = maxOf(1, format.sampleRate / 200)
+                    if (fifo.takeDiscontinuity()) ramp.restart()
                     if (governor.bufferedMs() <= governor.targetMs() + 15) {
                         operation("WRITE") {
                             fifo.drain { bytes, offset, length ->
-                                if (rampFrames > 0) {
-                                    val n = minOf(length / frame, rampFrames)
-                                    val full = maxOf(1, n)
-                                    for (i in 0 until n) for (ch in 0 until format.channels) {
-                                        val at = offset + i * frame + ch * 2
-                                        val value = ((bytes[at].toInt() and 255) or (bytes[at + 1].toInt() shl 8)).toShort().toInt()
-                                        val gain = (i + 1).toFloat() / full
-                                        val scaled = (value * gain).toInt()
-                                        bytes[at] = scaled.toByte(); bytes[at + 1] = (scaled shr 8).toByte()
-                                    }
-                                    // Mark these samples once, even on a zero write.
-                                    rampFrames = 0
+                                // Retain original queue samples across zero or
+                                // partial writes. Only accepted frames advance
+                                // the fade; retrying a tail never scales it twice.
+                                if (outputCopy.size < length) outputCopy = ByteArray(length)
+                                bytes.copyInto(outputCopy, 0, offset, offset + length)
+                                val accepted = governor.writePcm(outputCopy, 0, length) {
+                                    ramp.applyInPlace(outputCopy, 0, length)
                                 }
-                                governor.writePcm(bytes, offset, length)
+                                ramp.acceptedBytes(accepted)
+                                accepted
                             }
                         }
                     }
@@ -141,7 +139,7 @@ internal class ReceiverPlayout(
                         releaseOutput()
                         val (_, replacement) = buildOutput(targetMs)
                         governor = replacement; health = PlaybackHealth(adaptive)
-                        rampFrames = maxOf(1, format.sampleRate / 200)
+                        ramp.restart()
                         RuntimeDiagnostics.event("SOURCE_OUTPUT_REBUILD", "source=$id attempts=$rebuilds", true)
                     }
                     lastSample = now

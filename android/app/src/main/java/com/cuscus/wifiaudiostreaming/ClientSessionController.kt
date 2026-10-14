@@ -22,7 +22,8 @@ data class ReceiverSourceState(
     val adaptive: Boolean = true, val manualLatencyMs: Int = 40,
     val targetMs: Int = 20, val bufferedMs: Int = 0,
     val playedFrames: Long = 0,
-    val metrics: LinkMetrics.Snapshot = LinkMetrics.Snapshot()
+    val metrics: LinkMetrics.Snapshot = LinkMetrics.Snapshot(),
+    val remoteVolume: RemoteVolumeState = RemoteVolumeState()
 )
 
 /** Durable receiver intent with independent transport ownership for every source. */
@@ -141,7 +142,8 @@ object ClientSessionController {
         }
         val e = old ?: Entry(ReceiverSourceState(UUID.randomUUID().toString(), serverInfo))
         stopEntry(e)
-        e.state = e.state.copy(peer = serverInfo, connected = false, needsAttention = false)
+        e.state = e.state.copy(peer = serverInfo, connected = false, needsAttention = false,
+            remoteVolume = RemoteVolumeState())
         e.settingsOverride = settingsOverride
         if (presharedKey != null) { e.key = presharedKey; e.fromInvite = keyFromInvite }
         else e.fromInvite = false
@@ -193,7 +195,10 @@ object ClientSessionController {
 
     private fun startAttempt(e: Entry) {
         val context = app ?: return
-        if (paused || e.blocked || e.job?.isActive == true || !RoleSelectionGate.isReceiverSelected()) return
+        // A failed attempt publishes streaming=false, which wakes ClientService.
+        // That observer must not bypass the retry job's backoff deadline.
+        if (paused || e.blocked || e.job?.isActive == true || e.retry?.isActive == true ||
+            !RoleSelectionGate.isReceiverSelected()) return
         val token = ++e.generation
         e.job = scope.launch(start = CoroutineStart.LAZY) {
             try {
@@ -227,7 +232,8 @@ object ClientSessionController {
             val latency = e.latencyOverride ?: if (e.state.peer.viaUsb || UsbLink.isUsbPeer(e.state.peer.ip))
                 UsbLink.effectiveLatencyMs(settings.latencyMs) else settings.latencyMs
             e.state = e.state.copy(adaptive = auto, manualLatencyMs = latency,
-                status = context.getString(R.string.notif_connecting), needsAttention = false)
+                status = context.getString(R.string.notif_connecting), needsAttention = false,
+                remoteVolume = RemoteVolumeState())
             val transportedSettings = settings.copy(connectionSoundEnabled = settings.connectionSoundEnabled && e.announce)
             val transport = ReceiverTransport(context, e.state.id, e.state.peer, transportedSettings, auto, latency,
                 e.key, e.fromInvite, e.epoch, path,
@@ -268,7 +274,7 @@ object ClientSessionController {
                         e.blocked = !problem.retryable || e.playbackFailures >= 3
                         e.state = e.state.copy(status = if (problem.reason.startsWith("PLAYBACK"))
                             context.getString(R.string.source_playback_error) else problem.message,
-                            connected = false, needsAttention = e.blocked)
+                            connected = false, needsAttention = e.blocked, remoteVolume = RemoteVolumeState())
                         if (!e.blocked) schedule(e, token)
                         publish()
                     }
@@ -278,6 +284,9 @@ object ClientSessionController {
                         microphoneSource = e.state.id
                         NetworkManager.startReceiverMicrophone(context, e.state.id, e.state.peer, settings, direction)
                     }
+                } },
+                onRemoteVolume = { value -> scope.launch {
+                    if (owns(e, token)) { e.state = e.state.copy(remoteVolume = value); publish() }
                 } })
             e.transport = transport
             persist(); publish()
@@ -302,6 +311,7 @@ object ClientSessionController {
         if (!owns(e, token) || e.blocked || e.retry?.isActive == true) return
         val wait = if (offline) 10_000L else delays[e.attempts.coerceAtMost(delays.lastIndex)]
         if (!offline) e.attempts++
+        RuntimeDiagnostics.event("SOURCE_RETRY_SCHEDULED", "source=${e.state.id} generation=$token delayMs=$wait offline=$offline")
         e.retry = scope.launch {
             delay(wait)
             e.retry = null
@@ -336,6 +346,15 @@ object ClientSessionController {
         val e = entries[id] ?: return
         e.state = e.state.copy(muted = muted); persist(); publish()
     }
+    fun setRemoteVolume(id: String, percent: Int) {
+        require(percent in 0..100)
+        val e = entries[id] ?: return
+        if (e.transport?.setRemoteVolume(percent) != true) {
+            e.state = e.state.copy(remoteVolume = e.state.remoteVolume.copy(
+                pending = false, error = "UNAVAILABLE"))
+            publish()
+        }
+    }
     fun setLatency(id: String, adaptive: Boolean, manualMs: Int) {
         val e = entries[id] ?: return
         require(manualMs in 20..400)
@@ -366,7 +385,7 @@ object ClientSessionController {
         e.retry?.cancel(); e.retry = null
         NetworkManager.stopReceiverMicrophone(e.state.id)
         if (microphoneSource == e.state.id) microphoneSource = null
-        e.state = e.state.copy(connected = false)
+        e.state = e.state.copy(connected = false, remoteVolume = RemoteVolumeState())
     }
     private fun publish() {
         _sources.value = entries.values.map {
@@ -427,6 +446,13 @@ object ClientSessionController {
     }
     private fun ensureClientService(): Boolean {
         val context = app ?: return false
+        if (!NotificationCenter.canPost(context)) {
+            val message = context.getString(R.string.source_notification_permission)
+            RuntimeDiagnostics.event("RECEIVER_NOTIFICATION_PERMISSION_DENIED", critical = true)
+            foregroundUnavailable(context, message)
+            NetworkManager.connectionStatus.value = message
+            return false
+        }
         try {
             val intent = Intent(context, ClientService::class.java)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
