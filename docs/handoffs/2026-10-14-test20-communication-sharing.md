@@ -1,8 +1,10 @@
 # test20 checkpoint: communication sharing
 
+Current result: test20 prerelease is published and downloaded/verified; no real-device upgrade. Source065cb01, implementation819eefc, Draft PR #40 remains open. Final outcome and next physical acceptance are at the end; preceding paragraphs preserve diagnostic/implementation history.
+
 User confirmed Xiaomi communication sharing for the test19 ACK failure; test16 works in the same configuration. This narrows compatibility investigation but does not prove the exact failed route or response endpoint. Both private diagnostic ZIPs have been obtained; do not operate device screens again.
 
-Branch: fix/android-multisource-recovery, HEAD 7d5800f, Draft PR #40. Current uncommitted implementation covers observer/backoff guard, handshake diagnostics and cancellation handling, normalized sender display and volume persistence; new unit and instrumentation fixtures accompany it. No installed application or signing change, no release. Mode selection and acknowledged remote sender controls remain outstanding.
+Initial diagnostic checkpoint: branch fix/android-multisource-recovery, HEAD 7d5800f, Draft PR #40. At that point uncommitted work covered observer/backoff guard, handshake diagnostics and cancellation handling, normalized sender display and volume persistence; new unit and instrumentation fixtures accompanied it. Mode selection and acknowledged remote sender controls were outstanding. This paragraph is history, not the final publication status below.
 
 Validation: 61 JVM tests, lint and instrumentation compilation pass. Retry instrumentation has not executed. ACK compatibility and long-duration audio remain unverified. The connected UDP endpoint and destination-network selection differ from the former receiver and require isolated route/endpoint tests before a fix is claimed. Preserve per-source isolation and authentication.
 
@@ -21,3 +23,7 @@ Pre-commit final validation: 90 JVM tests, lint zero errors and debug/helper bui
 Implementation checkpoint committed as 819eefc on the existing branch. Release request and known-limit notes form the next checkpoint for CI preview publication. Do not interpret a requested build as a successful signed artifact or published release.
 
 Request 8ec5883 pushed; Android, Windows and governance validation passed. Run38587636228 built/verified the permanent-signed preview, but publication failed because Windows portable upload checked an inherited event incorrectly and produced no ZIP artifact. #49 tracks the minimal typed upload_artifact opt-in correction; no test20 Release exists yet. Do not manually upload/re-sign to bypass CI. Rebuild after the workflow correction; actual release and artifact verification remain required.
+
+Final handoff: 065cb01 workflow correction is pushed; all four implementation CI workflows pass. Run38588977969 successfully published https://github.com/mu23XR/AudioBridge/releases/tag/v1.3.1-test.20 as prerelease/latest=false. Local downloaded APK/Windows/source SHA256SUMS match, source065cb01, preview package io.github.mu23xr.audiobridge.test, version1.3.1-test.20/code610141524 and permanent signer verified. Build request is disarmed (publish=false) in the documentation checkpoint; further artifact-only builds do not overwrite this Release. Private artifacts/reports remain ignored.
+
+No real-device installation/UI/audio/settings changes. Read-only package checks confirm both physical devices still retain original test16 and test19. All runtime Issues and Draft PR #40 remain open pending separately agreed physical acceptance. Next action is preview-only install/verification in that window, followed by normal-use long-duration diagnostics. Persistent project memory includes this handoff, the active work item, audio work item, diagnostics/testing/release docs and PROJECT_STATE.

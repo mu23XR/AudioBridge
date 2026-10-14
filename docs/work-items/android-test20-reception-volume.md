@@ -1,6 +1,6 @@
 # Android test20: receiver regression and volume controls
 
-Status: active, authorized implementation. Branch fix/android-multisource-recovery; base 7d5800f, Draft PR #40. Preserve test16, signer and independent preview identity. No stable release or issue closure.
+Status: implemented and published as independent test20 prerelease; physical acceptance remains open. Branch fix/android-multisource-recovery; base 7d5800f, Draft PR #40. Preserve test16, signer and independent preview identity. No stable release, merge or runtime issue closure.
 
 Implementation resumed after user approval of the consolidated plan. Focused Issues #44 (background intent), #45 (audio continuity) and #46 (authorized background export) created before edits. Current shared checkout assignments separate mode/UI, remote protocol/server and PCM continuity changes; existing local gain/retry edits are retained. Device screens, playback, installation and settings remain untouched.
 
@@ -42,6 +42,14 @@ Implementation committed as 819eefc. The following release-request checkpoint ta
 
 CI request 8ec5883: Android validation, Windows validation, governance and the signed Android build/verification all succeeded. Test workflow run38587636228 failed only at publication because the reused Windows workflow skipped artifact upload for a pull_request caller, leaving no ZIP for the publish gate. Focused #49 was created before correcting the reusable workflow input/caller opt-in. No Release was created by this failed attempt. The correction preserves default standalone PR behavior and all publish/signing gates; a fresh same-source-code CI build is required.
 
+## Published result and final boundary
+
+Workflow correction 065cb01 is pushed. All four CI workflows for that exact SHA succeeded; test run38588977969 completed build, Windows artifact upload, governance and publication. CI created https://github.com/mu23XR/AudioBridge/releases/tag/v1.3.1-test.20 as prerelease, with latest=false; public metadata confirms prerelease=true/draft=false and source065cb01. Final APK is 1.3.1-test.20 / code610141524, package io.github.mu23xr.audiobridge.test, permanent signer verified by CI and local apksigner. APK, Windows ZIP and source file were downloaded and their SHA256SUMS verified; local private verification/output remains ignored under out/verified-test20-release. Metadata was obtained through the authenticated connector after unauthenticated API rate limiting; Windows TLS download retained certificate checking.
+
+The completed publish request is reset to publish=false in the documentation checkpoint so future PR synchronization cannot try creating the same tag again. Any resulting artifact-only CI is separate from the verified published source065cb01 and does not change the Release. No code changes after the verified implementation. Both physical devices still have stable-package test16/code609301952 and preview test19/code610131347, checked read-only; test20 has not been installed there. No app UI/audio/settings/battery/VPN changes.
+
+Next acceptance requires a separately agreed physical test window: upgrade preview only, verify communication-sharing reception and mode/local routing/keys, remote volume and source mixing, then collect naturally occurring long-run sound evidence. Keep all runtime Issues and Draft PR open; do not interpret successful emulator/CI as all real-device bugs fixed. Known residual risks include OEM key arbitration/force-stop, unverified encrypted multicast delivery, mixed-input clipping and the Shizuku volume persistence polling tail. RTP/Snapcast stale-command promotion risk was observed but not changed in this WFAS-focused work.
+
 ## Follow-up diagnosis (2026-10-14)
 
 - Rechecked both journals against the actual Shizuku sender: SENDER_CLIENT_CONNECTED is recorded only after the initial ACK send returns. This proves the sender processed HELLO and submitted an ACK, not successful delivery to the receiver. Repeated HELLO from the same client IP also receives another ACK; there is no one-shot-only ACK bug in this sender path.
@@ -53,7 +61,7 @@ CI request 8ec5883: Android validation, Windows validation, governance and the s
 
 ## Next actions
 
-Isolate route versus reply-endpoint behavior with a controlled local fixture, and implement the remaining independent volume/mode stages. Communication-sharing acceptance needs a later agreed test window; do not occupy the user's devices to obtain it. Keep Draft PR and runtime issues open until actual acceptance.
+The controlled managed-network and volume/mode implementation stages are complete. Next is a separately agreed physical preview-only acceptance window, including communication-sharing reception, capture/routes/keys and remote gain synchronization, followed by natural long-run diagnostic evidence. Do not occupy devices without that agreement. Keep Draft PR and runtime issues open until actual acceptance.
 
 ## Consolidated proposal requested by user (2026-10-14)
 
