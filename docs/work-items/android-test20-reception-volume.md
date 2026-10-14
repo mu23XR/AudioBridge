@@ -40,6 +40,8 @@ Local implementation is ready for scoped commits and CI test20 preview publicati
 
 Implementation committed as 819eefc. The following release-request checkpoint targets CI-built 1.3.1-test.20; signing, Windows/governance and publication results remain pending until verified.
 
+CI request 8ec5883: Android validation, Windows validation, governance and the signed Android build/verification all succeeded. Test workflow run38587636228 failed only at publication because the reused Windows workflow skipped artifact upload for a pull_request caller, leaving no ZIP for the publish gate. Focused #49 was created before correcting the reusable workflow input/caller opt-in. No Release was created by this failed attempt. The correction preserves default standalone PR behavior and all publish/signing gates; a fresh same-source-code CI build is required.
+
 ## Follow-up diagnosis (2026-10-14)
 
 - Rechecked both journals against the actual Shizuku sender: SENDER_CLIENT_CONNECTED is recorded only after the initial ACK send returns. This proves the sender processed HELLO and submitted an ACK, not successful delivery to the receiver. Repeated HELLO from the same client IP also receives another ACK; there is no one-shot-only ACK bug in this sender path.
