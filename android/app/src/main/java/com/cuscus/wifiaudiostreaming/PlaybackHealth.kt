@@ -11,7 +11,7 @@ internal class PlaybackHealth(private val adaptive: Boolean) {
     private var lastSampleAt: Long? = null
 
     fun sample(now: Long, underruns: Int, flowing: Boolean,
-               stalledMs: Long, failedRecoveries: Int): Decision {
+               stalledMs: Long, failedRecoveries: Int, hasQueuedAudio: Boolean = flowing): Decision {
         if (lastSampleAt?.let { now - it > 2500 } == true) {
             cleanSince = null
             shortageSeconds = 0
@@ -26,7 +26,8 @@ internal class PlaybackHealth(private val adaptive: Boolean) {
         stormSeconds = if (flowing && delta > 200) stormSeconds + 1 else 0
         // Repeated flush/play failures survive the governor's local resets.
         // Adaptive at its ceiling must still escalate a dead playback track.
-        val rebuild = flowing && (stalledMs >= 5000 || failedRecoveries >= 3 || stormSeconds >= 3)
+        val rebuild = ((flowing || hasQueuedAudio) && (stalledMs >= 5000 || failedRecoveries >= 3)) ||
+            (flowing && stormSeconds >= 3)
         var targetDelta = 0
         if (adaptive && shortageSeconds >= 2) {
             targetDelta = 10

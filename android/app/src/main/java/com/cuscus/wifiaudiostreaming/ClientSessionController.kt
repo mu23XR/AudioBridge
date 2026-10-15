@@ -43,7 +43,7 @@ object ClientSessionController {
         var epoch: Long? = null
         var adaptiveOverride: Boolean? = null
         var latencyOverride: Int? = null
-        var announce = true
+        val connectionCue = ConnectionCuePolicy()
         var settingsOverride: com.cuscus.wifiaudiostreaming.data.AppSettings? = null
         var blocked = false
         var waitingNetwork = false
@@ -142,6 +142,7 @@ object ClientSessionController {
         }
         val e = old ?: Entry(ReceiverSourceState(UUID.randomUUID().toString(), serverInfo))
         stopEntry(e)
+        e.connectionCue.reset()
         e.state = e.state.copy(peer = serverInfo, connected = false, needsAttention = false,
             remoteVolume = RemoteVolumeState())
         e.settingsOverride = settingsOverride
@@ -159,14 +160,18 @@ object ClientSessionController {
     fun restartCurrent(context: Context) {
         initialize(context); paused = false
         RoleSelectionGate.selectReceiver(app!!); StreamingActionReceiver.clearTaskRemovedStop(app!!)
-        for (e in entries.values) { stopEntry(e); e.blocked = false; e.playbackFailures = 0; e.attempts = 0 }
+        for (e in entries.values) {
+            stopEntry(e); e.connectionCue.reset()
+            e.blocked = false; e.playbackFailures = 0; e.attempts = 0
+        }
         NetworkManager.startNetworkWatch(app!!)
         if (ensureClientService()) resumeIfNeeded(app!!)
     }
 
     fun retry(id: String) {
         val e = entries[id] ?: return
-        stopEntry(e); e.blocked = false; e.playbackFailures = 0; e.attempts = 0
+        stopEntry(e); e.connectionCue.reset()
+        e.blocked = false; e.playbackFailures = 0; e.attempts = 0
         if (ensureClientService()) startAttempt(e)
     }
 
@@ -234,12 +239,11 @@ object ClientSessionController {
             e.state = e.state.copy(adaptive = auto, manualLatencyMs = latency,
                 status = context.getString(R.string.notif_connecting), needsAttention = false,
                 remoteVolume = RemoteVolumeState())
-            val transportedSettings = settings.copy(connectionSoundEnabled = settings.connectionSoundEnabled && e.announce)
-            val transport = ReceiverTransport(context, e.state.id, e.state.peer, transportedSettings, auto, latency,
+            val transport = ReceiverTransport(context, e.state.id, e.state.peer, settings, auto, latency,
                 e.key, e.fromInvite, e.epoch, path,
                 onStatus = { status, connected -> scope.launch {
                     if (owns(e, token)) {
-                        if (connected) { e.announce = false; e.attempts = 0 }
+                        if (connected) e.attempts = 0
                         e.state = e.state.copy(status = status, connected = connected); publish()
                     }
                 } },
@@ -287,7 +291,7 @@ object ClientSessionController {
                 } },
                 onRemoteVolume = { value -> scope.launch {
                     if (owns(e, token)) { e.state = e.state.copy(remoteVolume = value); publish() }
-                } })
+                } }, connectionCue = e.connectionCue.beginAttempt(settings.connectionSoundEnabled))
             e.transport = transport
             persist(); publish()
             withContext(Dispatchers.IO) { transport.run() }

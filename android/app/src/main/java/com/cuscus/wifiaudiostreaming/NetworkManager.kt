@@ -2394,11 +2394,9 @@ object NetworkManager {
     }
 
     fun playConnectionSound(context: Context) {
-        try {
-            val player = android.media.MediaPlayer.create(context, R.raw.connection_sound)
-            player?.setOnCompletionListener { it.release() }
-            player?.start()
-        } catch (_: Exception) {}
+        // Resource/player initialization must not stall the source's UDP loop.
+        val app = context.applicationContext
+        scope.launch { ConnectionSoundPlayback.play(app) }
     }
 
     fun playDisconnectionSound(context: Context) {

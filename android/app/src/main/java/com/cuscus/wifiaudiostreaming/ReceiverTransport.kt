@@ -21,7 +21,10 @@ internal class ReceiverTransport(
     private val onStats: (LinkMetrics.Snapshot, Int, Int, Long) -> Unit,
     private val onFinished: (SourceFailure) -> Unit,
     private val onMicrophoneReady: (WfasCrypto.Dir?) -> Unit,
-    private val onRemoteVolume: (RemoteVolumeState) -> Unit
+    private val onRemoteVolume: (RemoteVolumeState) -> Unit,
+    private val connectionCue: ConnectionCuePolicy.Attempt =
+        ConnectionCuePolicy().beginAttempt(settings.connectionSoundEnabled),
+    private val onConnectionCue: () -> Unit = { NetworkManager.playConnectionSound(context) }
 ) {
     val networkFingerprint get() = path.fingerprint
     @Volatile private var socket: DatagramSocket? = null
@@ -111,7 +114,6 @@ internal class ReceiverTransport(
             var lastActivity = now()
             var lastReport = lastActivity
             var lastJournal = lastActivity
-            var connectedAnnounced = false
             var inSilence = true
             var previousPcm: ByteArray? = null
             var previousSeq = -1
@@ -139,6 +141,8 @@ internal class ReceiverTransport(
                     }
                     continue
                 }
+                currentCoroutineContext().ensureActive()
+                if (stopped) break
                 // A multicast group can contain several senders. Each source
                 // must only consume its selected sender, not mix the group twice.
                 if (!isPeer(packet)) continue
@@ -186,13 +190,18 @@ internal class ReceiverTransport(
                     pcm = buffer.copyOfRange(10, length)
                 }
                 if (pcm.size % (format.channels * 2) != 0) continue
+                if (pcm.isEmpty() && (flags and 1) == 0) continue
                 val silence = (flags and 1) != 0 || PcmSilence.isZero(pcm, 0, pcm.size)
                 lastActivity = now()
                 val fresh = metrics.observe(seq, samplePosition, silence)
                 if (!fresh && !silence) discardedLatePcm++
-                if (!received) {
+                if (fresh && !received) {
                     received = true
                     status(text(R.string.status_streaming), true)
+                }
+                if (fresh && connectionCue.onValidFrame()) {
+                    RuntimeDiagnostics.event("SOURCE_CONNECTION_CUE", "source=$id silent=$silence")
+                    onConnectionCue()
                 }
                 if (!silence && fresh) {
                     val gap = if (previousSeq < 0) 0 else (seq - previousSeq - 1) and 65535
@@ -225,15 +234,14 @@ internal class ReceiverTransport(
                             pcm[at * 2 + 1] = (samples[at].toInt() shr 8).toByte()
                         }
                     }
-                    if (!connectedAnnounced && settings.connectionSoundEnabled) {
-                        // Controller passes false for an established logical source's retry.
-                        NetworkManager.playConnectionSound(context); connectedAnnounced = true
-                    }
                     if (inSilence) fadeIn(pcm, format.channels)
                     player!!.offer(pcm)
                     previousPcm = pcm
                     inSilence = false
-                } else if (silence) { inSilence = true; previousPcm = null }
+                } else if (fresh && silence) {
+                    player!!.noteSilence()
+                    inSilence = true; previousPcm = null
+                }
                 if (fresh) previousSeq = seq
                 if (now() - lastReport >= 1000) {
                     report()

@@ -100,4 +100,14 @@ class AudioSilenceRegressionTest {
         track.playbackHeadPosition = 0 // Unsigned 32-bit wrap, not a new track.
         assertEquals(before - 1, governor.bufferedFrames())
     }
+
+    @Test fun deliberateIdleRestoresNominalRateWithoutFlushingAudio() {
+        val track = FakeTrack()
+        val governor = PlayoutGovernor(track, 48000, 4, 20, "test", { 0L }, {})
+        governor.retune()
+        assertTrue(governor.playbackRateHz() < 48000)
+        governor.retune(activeInput = false)
+        assertEquals(48000, governor.playbackRateHz())
+        assertEquals(0, track.flushes)
+    }
 }

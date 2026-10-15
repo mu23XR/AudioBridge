@@ -226,14 +226,16 @@ class PlayoutGovernor internal constructor(
         return true
     }
 
-    @Synchronized fun retune() {
+    @Synchronized fun retune(activeInput: Boolean = true) {
         val buffered = bufferedFrames().toDouble()
-        avgBufferedFrames = avgBufferedFrames * 0.9 + buffered * 0.1
+        // A deliberate idle interval is not a slow sender clock. Preserve a
+        // neutral baseline so resuming audio does not inherit a low-pitch rate.
+        avgBufferedFrames = if (activeInput) avgBufferedFrames * 0.9 + buffered * 0.1 else targetFrames.toDouble()
         val errFrames = avgBufferedFrames - targetFrames
         val errRatio = errFrames / targetFrames.toDouble()
         val factor = (1.0 + errRatio * 0.08).coerceIn(0.992, 1.008)
         val desiredRate = (sampleRate * factor).toInt().coerceAtLeast(1)
-        val newRate = currentRate + (desiredRate - currentRate).coerceIn(-12, 12)
+        val newRate = if (activeInput) currentRate + (desiredRate - currentRate).coerceIn(-12, 12) else sampleRate
         if (kotlin.math.abs(newRate - currentRate) >= 4) {
             val result = track.setPlaybackRate(newRate)
             if (result == AudioTrack.SUCCESS) currentRate = newRate

@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.SystemClock
 import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import java.util.concurrent.atomic.AtomicLong
 
 internal class ReceiverPlayout(
@@ -14,10 +15,17 @@ internal class ReceiverPlayout(
     private var adaptive: Boolean, latencyMs: Int,
     private val onFailure: (String) -> Unit
 ) {
+    internal data class Snapshot(val targetMs: Int, val totalBufferedMs: Int, val nativeBufferedMs: Int,
+        val queuedBytes: Int, val discardedBytes: Long, val playedFrames: Long, val rebuilds: Int)
     private val frame = format.channels * 2
     private val ramp = PcmRamp(format.channels, maxOf(1, format.sampleRate / 200))
+    private val silenceTail = PcmSilenceTail(format.channels, maxOf(1, format.sampleRate / 200))
+    private val input = ReceiverInputActivity()
     private val initialTarget = if (adaptive) 20 else latencyMs.coerceIn(20, 400)
     private val fifo = PcmQueue(frame, format.sampleRate * frame * 60 / 1000 / frame * frame)
+    private val pump = PcmDrainPump(fifo, format.sampleRate, frame)
+    private val backlog = ReceiverBacklogPolicy(format.sampleRate, frame)
+    private val wake = Channel<Unit>(Channel.CONFLATED)
     private val pendingConfiguration = java.util.concurrent.atomic.AtomicReference<Pair<Boolean, Int>?>(null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var worker: Job? = null
@@ -33,13 +41,28 @@ internal class ReceiverPlayout(
         private set
     @Volatile private var track: AudioTrack? = null
     private var rebuilds = 0
+    @Volatile private var latestSnapshot = Snapshot(initialTarget, 0, 0, 0, 0, 0, 0)
+
+    internal fun snapshot(): Snapshot = latestSnapshot
 
     fun offer(pcm: ByteArray) {
         if (stopped || pcm.isEmpty()) return
+        input.pcm(SystemClock.elapsedRealtime())
+        silenceTail.remember(pcm)
         fifo.offer(pcm)
         if (worker == null) worker = scope.launch { runPlayer() }
+        wake.trySend(Unit)
     }
-    fun configure(adaptive: Boolean, manualMs: Int) { pendingConfiguration.set(adaptive to manualMs.coerceIn(20, 400)) }
+    fun noteSilence() {
+        if (stopped) return
+        input.silence()
+        silenceTail.begin()?.let { fifo.offer(it) }
+        wake.trySend(Unit)
+    }
+    fun configure(adaptive: Boolean, manualMs: Int) {
+        pendingConfiguration.set(adaptive to manualMs.coerceIn(20, 400))
+        wake.trySend(Unit)
+    }
 
     fun blockedReason(now: Long = SystemClock.elapsedRealtime()): String? {
         val start = busyAt.get()
@@ -86,7 +109,6 @@ internal class ReceiverPlayout(
         var lastSample = SystemClock.elapsedRealtime()
         var lastTune = lastSample
         var lastLog = lastSample
-        var lastPcm = lastSample
         var outputCopy = ByteArray(0)
         try {
             val (_, initial) = buildOutput(targetMs)
@@ -98,17 +120,21 @@ internal class ReceiverPlayout(
                     releaseOutput()
                     governor = buildOutput(targetMs).second
                     health = PlaybackHealth(adaptive)
+                    backlog.reset()
                     ramp.restart()
                     RuntimeDiagnostics.event("SOURCE_BUFFER_CONFIG", "source=$id adaptive=$automatic manualMs=$manual")
                 }
                 val now = SystemClock.elapsedRealtime()
-                val pending = fifo.bytes()
-                if (pending > 0) {
-                    lastPcm = now
+                var drained: PcmDrainPump.Result? = null
+                backlog.softwareLimit(now, governor.targetMs(), governor.bufferedFrames(), fifo.bytes())?.let { limit ->
+                    val discarded = fifo.trimTo(limit)
+                    if (discarded > 0) RuntimeDiagnostics.event("SOURCE_BACKLOG_TRIM",
+                        "source=$id bytes=$discarded targetMs=${governor.targetMs()} nativeMs=${governor.bufferedMs()}")
+                }
+                if (fifo.bytes() > 0) {
                     if (fifo.takeDiscontinuity()) ramp.restart()
-                    if (governor.bufferedMs() <= governor.targetMs() + 15) {
-                        operation("WRITE") {
-                            fifo.drain { bytes, offset, length ->
+                    drained = operation("WRITE") {
+                        pump.drain(governor.targetMs(), governor::bufferedFrames) { bytes, offset, length ->
                                 // Retain original queue samples across zero or
                                 // partial writes. Only accepted frames advance
                                 // the fade; retrying a tail never scales it twice.
@@ -119,18 +145,18 @@ internal class ReceiverPlayout(
                                 }
                                 ramp.acceptedBytes(accepted)
                                 accepted
-                            }
                         }
                     }
                 }
                 if (now - lastTune >= 200) {
-                    operation("RATE") { governor.retune() }; lastTune = now
+                    operation("RATE") { governor.retune(input.isFlowing(now)) }; lastTune = now
                 }
                 if (now - lastSample >= 1000) {
                     val t = track ?: break
                     val decision = operation("HEALTH") {
-                        health.sample(now, t.underrunCount, pending > 0 || now - lastPcm < 3000,
-                            governor.stalledForMs(), governor.recoveryFailures())
+                        health.sample(now, t.underrunCount, input.isFlowing(now),
+                            governor.stalledForMs(), governor.recoveryFailures(),
+                            hasQueuedAudio = !input.isSilent() && (fifo.bytes() > 0 || governor.bufferedFrames() > 0))
                     }
                     if (decision.targetDeltaMs != 0) governor.retargetMs(decision.targetDeltaMs)
                     if (decision.rebuild) {
@@ -139,6 +165,7 @@ internal class ReceiverPlayout(
                         releaseOutput()
                         val (_, replacement) = buildOutput(targetMs)
                         governor = replacement; health = PlaybackHealth(adaptive)
+                        backlog.reset()
                         ramp.restart()
                         RuntimeDiagnostics.event("SOURCE_OUTPUT_REBUILD", "source=$id attempts=$rebuilds", true)
                     }
@@ -147,11 +174,19 @@ internal class ReceiverPlayout(
                 targetMs = governor.targetMs()
                 bufferedMs = governor.bufferedMs() + fifo.bytes() * 1000 / (format.sampleRate * frame)
                 playedFrames = operation("HEAD") { (track?.playbackHeadPosition?.toLong() ?: 0L) and 0xffffffffL }
+                latestSnapshot = Snapshot(targetMs, bufferedMs, governor.bufferedMs(), fifo.bytes(),
+                    fifo.discardedBytes, playedFrames, rebuilds)
                 if (now - lastLog >= 10_000) {
                     RuntimeDiagnostics.event("SOURCE_PLAYOUT_STATS", "source=$id targetMs=$targetMs totalBufferedMs=$bufferedMs queueDiscardBytes=${fifo.discardedBytes} rate=${governor.playbackRateHz()}")
                     lastLog = now
                 }
-                delay(2)
+                when {
+                    // A bounded batch yielded while there is still writable
+                    // work. No per-packet sleep limits small-packet throughput.
+                    drained?.limited == true -> yield()
+                    fifo.bytes() > 0 -> delay(2)
+                    else -> withTimeoutOrNull(200) { wake.receive() }
+                }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {

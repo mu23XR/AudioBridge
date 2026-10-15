@@ -7,7 +7,7 @@ internal class PcmQueue(private val frameSize: Int, private val capacityBytes: I
     data class Chunk(val bytes: ByteArray, var offset: Int = 0) { val remaining get() = bytes.size - offset }
     private val chunks = ArrayDeque<Chunk>()
     private var size = 0
-    var discardedBytes = 0L
+    @Volatile var discardedBytes = 0L
         private set
     var discontinuity = false
         private set
@@ -30,10 +30,12 @@ internal class PcmQueue(private val frameSize: Int, private val capacityBytes: I
     }
 
     /** Never hold a queue lock during a device call: OEM output can still stall. */
-    fun drain(write: (ByteArray, Int, Int) -> Int): Int {
+    fun drain(maxBytes: Int = Int.MAX_VALUE, write: (ByteArray, Int, Int) -> Int): Int {
+        require(maxBytes >= frameSize)
         val first = synchronized(this) { chunks.peekFirst() } ?: return 0
-        val written = write(first.bytes, first.offset, first.remaining)
-        check(written in 0..first.remaining && written % frameSize == 0) { "Invalid PCM write result: $written/${first.remaining}" }
+        val length = minOf(first.remaining, maxBytes - maxBytes % frameSize)
+        val written = write(first.bytes, first.offset, length)
+        check(written in 0..length && written % frameSize == 0) { "Invalid PCM write result: $written/$length" }
         synchronized(this) {
             // An overflow/stop may have evicted this chunk while the output call
             // was in progress; its removal already accounted for queue bytes.
@@ -43,6 +45,24 @@ internal class PcmQueue(private val frameSize: Int, private val capacityBytes: I
             }
         }
         return written
+    }
+
+    /** Player-only stale-backlog trimming; preserve the newest frame-aligned tail. */
+    @Synchronized fun trimTo(maxBytes: Int): Int {
+        require(maxBytes >= 0 && maxBytes % frameSize == 0)
+        val remove = (size - maxBytes).coerceAtLeast(0)
+        var remaining = remove
+        while (remaining > 0) {
+            val first = checkNotNull(chunks.peekFirst()) { "PCM byte accounting exceeds queued chunks" }
+            val count = minOf(remaining, first.remaining)
+            first.offset += count
+            remaining -= count
+            if (first.remaining == 0) chunks.removeFirst()
+        }
+        if (remove > 0) {
+            size -= remove; discardedBytes += remove; discontinuity = true
+        }
+        return remove
     }
 
     @Synchronized fun bytes(): Int = size
