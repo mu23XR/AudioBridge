@@ -85,32 +85,62 @@ class ReceiverBufferPolicyTest {
         assertTrue(timed.limited)
     }
 
-    @Test fun transientBurstsDoNotDiscardButSustainedExcessHasACooldown() {
+    @Test fun oneNormalQueueCannotOverflowTheBoundAfterAResumedPumpFilledItsReservation() {
+        // The FIFO's own capacity is the budget. A queue that fits inside it is
+        // ordinary traffic, not stale backlog, even when the pump has already
+        // filled the native side.
         val policy = ReceiverBacklogPolicy(48_000, 4)
-        val native = 30L * 48
-        val queued = 40 * 192
-        assertNull(policy.softwareLimit(0, 20, native, queued))
-        assertNull(policy.softwareLimit(99, 20, native, queued))
-        assertNull(policy.softwareLimit(100, 20, 0, 192)) // Burst drained normally.
-        assertNull(policy.softwareLimit(200, 20, native, queued))
-        assertEquals(5 * 192, policy.softwareLimit(300, 20, native, queued))
-        assertNull(policy.softwareLimit(301, 20, native, queued))
-        assertNull(policy.softwareLimit(549, 20, native, queued))
-        assertEquals(5 * 192, policy.softwareLimit(550, 20, native, queued))
+        val fullReservation = 15L * 48
+        val normalQueue = (ms(ReceiverPlayout.QUEUE_CAPACITY_MS) * 4).toInt()
+        assertNull(policy.softwareLimit(0, fullReservation, normalQueue))
+        assertNull(policy.softwareLimit(2_000, fullReservation, normalQueue))
+        assertNull(policy.softwareLimit(9_000, fullReservation, normalQueue))
+    }
+
+    @Test fun sustainedExcessIsTrimmedImmediatelyAndThenCoolsDown() {
+        val policy = ReceiverBacklogPolicy(48_000, 4)
+        val queuedFrames = ms(ReceiverPlayout.QUEUE_CAPACITY_MS + 10)
+        val queued = queuedFrames.toInt() * 4
+        val excess = (queuedFrames - ms(ReceiverPlayout.QUEUE_RETENTION_MS)).toInt() * 4
+        // Trimming keeps exactly the retention window and drops only the excess.
+        assertEquals(excess, policy.softwareLimit(0, 0L, queued))
+        // The cooldown then suppresses the next trim, so a single burst cannot
+        // be cut repeatedly while the queue is still refilling.
+        assertNull(policy.softwareLimit(99, 0L, queued))
+        assertNull(policy.softwareLimit(249, 0L, queued))
+        assertEquals(excess, policy.softwareLimit(250, 0L, queued))
+    }
+
+    @Test fun trimmingRetainsTheWholeReservationInsteadOfThePumpCeiling() {
+        // The old bound subtracted the current native frames from the target,
+        // and the drain pump stops accepting at that same ceiling. Once it was
+        // filled, the subtraction collapsed the retained queue to zero and the
+        // receiver wiped its whole buffer on every trim after each silence.
+        val policy = ReceiverBacklogPolicy(48_000, 4)
+        val queuedFrames = ms(ReceiverPlayout.QUEUE_CAPACITY_MS + 10)
+        val queued = queuedFrames.toInt() * 4
+        val excess = queuedFrames - ms(ReceiverPlayout.QUEUE_RETENTION_MS)
+        // Only the excess over retention is dropped, and the queue keeps
+        // servicing its newest frames instead of collapsing to zero.
+        assertEquals(excess.toInt() * 4, policy.softwareLimit(0, 0L, queued))
     }
 
     @Test fun largeManualTargetsAreNotReplacedByAnAdaptiveBudget() {
         val policy = ReceiverBacklogPolicy(48_000, 4)
-        assertNull(policy.softwareLimit(0, 400, 400L * 48, 60 * 192))
-        assertNull(policy.softwareLimit(5_000, 400, 400L * 48, 60 * 192))
+        assertNull(policy.softwareLimit(0, 400L * 48, 60 * 192))
+        assertNull(policy.softwareLimit(5_000, 400L * 48, 60 * 192))
     }
 
     @Test fun naturallyDrainedBurstCannotArmImmediateTrimmingOfANewBurst() {
         val policy = ReceiverBacklogPolicy(48_000, 4)
-        assertNull(policy.softwareLimit(0, 20, 30L * 48, 40 * 192))
-        assertNull(policy.softwareLimit(50, 20, 30L * 48, 0))
-        assertNull(policy.softwareLimit(500, 20, 30L * 48, 40 * 192))
-        assertEquals(5 * 192, policy.softwareLimit(600, 20, 30L * 48, 40 * 192))
+        val queuedFrames = ms(ReceiverPlayout.QUEUE_CAPACITY_MS + 10)
+        val queued = queuedFrames.toInt() * 4
+        val kept = (queuedFrames - ms(ReceiverPlayout.QUEUE_RETENTION_MS)).toInt() * 4
+        assertEquals(kept, policy.softwareLimit(0, 0L, queued))
+        assertNull(policy.softwareLimit(50, 0L, 0))
+        // A burst that drained naturally still has to wait out the cooldown.
+        assertNull(policy.softwareLimit(200, 0L, queued))
+        assertEquals(kept, policy.softwareLimit(300, 0L, queued))
     }
 
     @Test fun trimmingRemovesOnlyOldAlignedFramesAfterAPartialWrite() {
@@ -120,7 +150,9 @@ class ReceiverBufferPolicyTest {
         queue.drain { _, _, _ -> 4 }
         assertEquals(12, queue.trimTo(8))
         assertEquals(12L, queue.discardedBytes)
-        assertTrue(queue.takeDiscontinuity())
+        // A trim drops stale backlog without marking the queue discontinuous;
+        // the surviving frames are still contiguous audio.
+        assertFalse(queue.takeDiscontinuity())
         queue.drain { bytes, offset, length ->
             assertArrayEquals(pcm.copyOfRange(16, 24), bytes.copyOfRange(offset, offset + length)); length
         }
@@ -167,4 +199,7 @@ class ReceiverBufferPolicyTest {
         assertNull(fade.begin())
         assertArrayEquals(byteArrayOf(0x10, 0x27, 0xf0.toByte(), 0xd8.toByte()), pcm)
     }
+
+    /** Stereo 16-bit frames in [ms] of the fixture's 48 kHz stream. */
+    private fun ms(ms: Int): Long = 48_000L * ms / 1_000
 }

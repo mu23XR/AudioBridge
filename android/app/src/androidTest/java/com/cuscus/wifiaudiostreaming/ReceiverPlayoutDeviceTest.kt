@@ -45,7 +45,7 @@ class ReceiverPlayoutDeviceTest {
         try {
             firstInput.resume()
             await("first output starts", firstInput) { first.playedFrames > 2_400 }
-            val single = observe(first, firstInput, 6_000)
+            val single = observe(first, firstInput, 6_000, label = "manual45-single")
             assertSustained("single source", single)
             assertEquals(45, first.targetMs)
 
@@ -57,7 +57,7 @@ class ReceiverPlayoutDeviceTest {
             val secondAtTwo = second.playedFrames
             val firstDiscardAtTwo = first.snapshot().discardedBytes
             val secondDiscardAtTwo = second.snapshot().discardedBytes
-            val both = observe(first, firstInput, 6_000, second, secondInput)
+            val both = observe(first, firstInput, 6_000, second, secondInput, "manual45-and73")
             assertSustained("first of two sources", both)
             assertProgress("second source", second.playedFrames - secondAtTwo, both.elapsedMs)
             assertDiscardBound("second source", second.snapshot().discardedBytes - secondDiscardAtTwo)
@@ -69,12 +69,12 @@ class ReceiverPlayoutDeviceTest {
             firstInput.pauseAndAwait()
             first.noteSilence()
             val secondDuringPause = second.playedFrames
-            observe(second, secondInput, 3_000)
+            observe(second, secondInput, 3_000, label = "manual73-other-source-silent")
             assertTrue("a silent/absent peer became a common playback barrier",
                 second.playedFrames - secondDuringPause > RATE * 2)
             assertTrue("pause released the first source's output", ReceiverMixer.hasOutput(firstOutput.id))
             firstInput.resume()
-            val resumed = observe(first, firstInput, 3_000, second, secondInput)
+            val resumed = observe(first, firstInput, 3_000, second, secondInput, "manual45-dual-resume")
             assertProgress("resumed first source", resumed.frames, resumed.elapsedMs)
             assertEquals(45, first.targetMs)
             assertEquals(73, second.targetMs)
@@ -85,26 +85,41 @@ class ReceiverPlayoutDeviceTest {
 
     @Test fun intentionalSilenceDoesNotRaiseAdaptiveTargetOrRebuildOutput() = runBlocking {
         requireEmulatorWindow()
-        val output = player("silence", true, 20)
+        soleOutputSilenceAndResume(adaptive = true, targetMs = 20)
+    }
+
+    @Test fun soleManualOutputResumesAfterIntentionalSilenceWithoutDiscardStorm() = runBlocking {
+        requireEmulatorWindow()
+        soleOutputSilenceAndResume(adaptive = false, targetMs = 45)
+    }
+
+    private suspend fun soleOutputSilenceAndResume(adaptive: Boolean, targetMs: Int) {
+        val mode = if (adaptive) "adaptive" else "manual$targetMs"
+        val output = player("sole-$mode-silence", adaptive, targetMs)
         val player = output.player
         val input = PacedPcm { player.offer(it) }
         try {
             input.resume()
-            await("adaptive output starts", input) { player.playedFrames > 2_400 }
-            assertSustained("adaptive before silence", observe(player, input, 3_000))
+            await("$mode output starts", input) { player.playedFrames > 2_400 }
+            assertSustained("$mode before silence",
+                observe(player, input, 3_000, label = "$mode-sole-before-silence"))
             input.pauseAndAwait()
             player.noteSilence()
             val before = player.snapshot()
-            observe(player, input, 4_500)
+            observe(player, input, 4_500, label = "$mode-sole-intentional-silence")
             val silent = player.snapshot()
-            assertEquals("intentional silence raised the adaptive target", before.targetMs, silent.targetMs)
+            assertEquals("intentional silence changed $mode target", before.targetMs, silent.targetMs)
             assertEquals("intentional silence rebuilt the output", before.rebuilds, silent.rebuilds)
             assertTrue("intentional silence lost its AudioTrack", ReceiverMixer.hasOutput(output.id))
 
             input.resume()
-            val resumed = observe(player, input, 3_000)
-            assertSustained("adaptive after silence", resumed)
+            // Measure from resume immediately. A warmup here would conceal the
+            // sole-output idle failure that this regression must keep catching.
+            val resumed = observe(player, input, 3_000, label = "$mode-sole-after-silence")
+            assertSustained("$mode after silence", resumed)
             assertEquals("resume unnecessarily rebuilt the output", before.rebuilds, player.snapshot().rebuilds)
+            if (!adaptive) assertEquals("resume changed the sole source's manual target",
+                targetMs, player.snapshot().targetMs)
         } finally {
             cleanup(listOf(output), listOf(input))
         }
@@ -123,11 +138,16 @@ class ReceiverPlayoutDeviceTest {
     private data class Observation(val elapsedMs: Long, val frames: Long, val discardedBytes: Long)
 
     private fun observe(player: ReceiverPlayout, input: PacedPcm, durationMs: Long,
-                        other: ReceiverPlayout? = null, otherInput: PacedPcm? = null): Observation {
+                        other: ReceiverPlayout? = null, otherInput: PacedPcm? = null,
+                        label: String): Observation {
         val begin = SystemClock.elapsedRealtime()
+        val beginWall = System.currentTimeMillis()
         val start = player.snapshot()
+        val inputStart = input.snapshot()
+        Log.i("PLAYOUT_FIXTURE", "phase=$label START wallMs=$beginWall elapsedMs=$begin durationMs=$durationMs player=$start producer=$inputStart otherPlayer=${other?.snapshot()} otherProducer=${otherInput?.snapshot()}")
         var maximumBufferedMs = 0
         var maximumQueuedBytes = 0
+        var lastDiagnosticAt = begin
         while (SystemClock.elapsedRealtime() - begin < durationMs) {
             checkHealthy(input, otherInput)
             assertBufferBound(player)
@@ -136,13 +156,18 @@ class ReceiverPlayoutDeviceTest {
                 maximumBufferedMs = maxOf(maximumBufferedMs, it.totalBufferedMs)
                 maximumQueuedBytes = maxOf(maximumQueuedBytes, it.queuedBytes)
             }
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastDiagnosticAt >= 200) {
+                Log.i("PLAYOUT_FIXTURE", "phase=$label sampleMs=${now - begin} wallMs=${System.currentTimeMillis()} player=${player.snapshot()} producer=${input.snapshot()} otherPlayer=${other?.snapshot()} otherProducer=${otherInput?.snapshot()}")
+                lastDiagnosticAt = now
+            }
             SystemClock.sleep(20)
         }
         checkHealthy(input, otherInput)
         val end = player.snapshot()
         val observed = Observation(SystemClock.elapsedRealtime() - begin,
             end.playedFrames - start.playedFrames, end.discardedBytes - start.discardedBytes)
-        Log.i("PLAYOUT_FIXTURE", "$observed maxBufferedMs=$maximumBufferedMs maxQueuedBytes=$maximumQueuedBytes end=$end")
+        Log.i("PLAYOUT_FIXTURE", "phase=$label END wallMs=${System.currentTimeMillis()} $observed producedPackets=${input.snapshot().producedPackets - inputStart.producedPackets} maxBufferedMs=$maximumBufferedMs maxQueuedBytes=$maximumQueuedBytes end=$end producer=${input.snapshot()} otherPlayer=${other?.snapshot()} otherProducer=${otherInput?.snapshot()}")
         return observed
     }
 
@@ -210,6 +235,9 @@ class ReceiverPlayoutDeviceTest {
         private val acknowledgedPause = AtomicBoolean(false)
         private val problem = AtomicReference<Throwable?>()
         private val produced = AtomicLong()
+        private val maximumLagNanos = AtomicLong()
+        private val epochStartedAtNanos = AtomicLong(-1)
+        private val epochStartedAtWallMs = AtomicLong(-1)
         private val pcm = ByteArray(PAYLOAD_BYTES).apply {
             for (offset in indices step 2) {
                 this[offset] = 0x20
@@ -229,10 +257,18 @@ class ReceiverPlayoutDeviceTest {
                     }
                     acknowledgedPause.set(false)
                     val now = SystemClock.elapsedRealtimeNanos()
-                    if (epoch < 0) { epoch = now; epochPackets = 0 }
+                    if (epoch < 0) {
+                        epoch = now; epochPackets = 0
+                        epochStartedAtNanos.set(now)
+                        epochStartedAtWallMs.set(System.currentTimeMillis())
+                    }
                     val due = (now - epoch) * PACKETS_PER_SECOND / 1_000_000_000
                     val pending = due - epochPackets
-                    check(pending <= 60) { "Fixture producer stalled for >80 ms; cannot attribute queue loss to playout" }
+                    val lagNanos = ((now - epoch) - epochPackets * 1_000_000_000 / PACKETS_PER_SECOND).coerceAtLeast(0)
+                    noteMaximumLag(lagNanos)
+                    check(pending <= 60) {
+                        "Fixture producer stalled for >80 ms; pendingPackets=$pending maxLagUs=${maximumLagNanos.get() / 1_000}; cannot attribute queue loss to playout"
+                    }
                     if (pending < 6) {
                         LockSupport.parkNanos(500_000)
                         continue
@@ -248,6 +284,19 @@ class ReceiverPlayoutDeviceTest {
             } catch (failure: Throwable) { problem.set(failure) }
         }.apply { name = "wfas-paced-750pps"; isDaemon = true; start() }
 
+        data class Snapshot(val producedPackets: Long, val maxLagUs: Long,
+                            val epochStartNs: Long, val epochStartWallMs: Long, val paused: Boolean)
+
+        fun snapshot() = Snapshot(produced.get(), maximumLagNanos.get() / 1_000,
+            epochStartedAtNanos.get(), epochStartedAtWallMs.get(), paused.get())
+
+        private fun noteMaximumLag(value: Long) {
+            while (true) {
+                val previous = maximumLagNanos.get()
+                if (value <= previous || maximumLagNanos.compareAndSet(previous, value)) return
+            }
+        }
+
         fun resume() { checkHealthy(); paused.set(false); LockSupport.unpark(worker) }
         fun pauseAndAwait() {
             paused.set(true)
@@ -258,7 +307,7 @@ class ReceiverPlayoutDeviceTest {
             check(acknowledgedPause.get()) { "Fixture producer did not acknowledge pause" }
         }
         fun checkHealthy() {
-            problem.get()?.let { throw AssertionError("Paced PCM producer failed after ${produced.get()} packets", it) }
+            problem.get()?.let { throw AssertionError("Paced PCM producer failed: ${snapshot()}", it) }
         }
         fun requestStop() { running.set(false); LockSupport.unpark(worker) }
         fun awaitStopped(): Boolean { worker.join(1_000); return !worker.isAlive }

@@ -13,7 +13,7 @@ internal class PcmDrainPump(
               write: (ByteArray, Int, Int) -> Int): Result {
         val started = nowNanos()
         val batchBytes = framesForMs(20) * frameSize
-        val ceiling = framesForMs(targetMs + 15)
+        val ceiling = framesForMs(targetMs + NATIVE_CEILING_MS)
         var bytes = 0
         var calls = 0
         while (queue.bytes() > 0 && bytes < batchBytes && calls < 64 &&
@@ -36,32 +36,61 @@ internal class PcmDrainPump(
     }
 
     private fun framesForMs(ms: Int): Int = (sampleRate.toLong() * ms / 1000).toInt()
+
+    private companion object {
+        /** Kept in step with the drain pump's admission ceiling. */
+        const val NATIVE_CEILING_MS = 15
+    }
 }
 
 /** Network bursts govern stale queue disposal, never instantaneous playback pitch. */
 internal class ReceiverBacklogPolicy(private val sampleRate: Int, private val frameSize: Int) {
-    private var highSince: Long? = null
+    /**
+     * The queue is the pump's source, never its sink. [PcmDrainPump] admits at
+     * most [NATIVE_CEILING_MS] beyond the target before it stops, so total
+     * latency is bounded by that ceiling plus the FIFO capacity in
+     * [ReceiverPlayout]; the bound does not move with the target because both
+     * sides do. Deriving the software allowance from the *current* native
+     * frames instead charged the pump's own admission against the queue and
+     * collapsed to zero exactly once the pump had filled, which is an ordinary
+     * post-silence state: a receiver that just resumed would then empty its
+     * whole queue on every trim and drop roughly a tenth of a second of audio
+     * instead of the excess. Trimming is also immediate rather than debounced,
+     * because a deferred trim leaves the queue to overflow its hard capacity
+     * first, which discards the oldest audio instead of the excess.
+     */
+    private val ceilingFrames = framesForMs(NATIVE_CEILING_MS)
+    private val capacityFrames = framesForMs(ReceiverPlayout.QUEUE_CAPACITY_MS)
+    private val retainedFrames = framesForMs(ReceiverPlayout.QUEUE_RETENTION_MS)
     private var lastTrimAt: Long? = null
 
-    fun softwareLimit(nowMs: Long, targetMs: Int, nativeFrames: Long, queuedBytes: Int): Int? {
+    fun softwareLimit(nowMs: Long, nativeFrames: Long, queuedBytes: Int): Int? {
         val queuedFrames = queuedBytes / frameSize
-        val highFrames = framesForMs(targetMs + maxOf(30, targetMs / 2))
-        if (queuedBytes == 0 || nativeFrames + queuedFrames <= highFrames) {
-            highSince = null
-            return null
-        }
-        val since = highSince ?: nowMs.also { highSince = it }
-        if (nowMs - since < 100 || lastTrimAt?.let { nowMs - it < 250 } == true) return null
-        val keep = (framesForMs(targetMs + 15) - nativeFrames).coerceAtLeast(0)
-            .coerceAtMost(queuedFrames.toLong()).toInt() * frameSize
+        // Only a backlog beyond the queue's own capacity is stale.
+        if (queuedBytes == 0 || queuedFrames <= capacityFrames) return null
+        // An overrun is trimmed on the first sample that sees it. Waiting for a
+        // debounce window lets the producer fill the queue to its hard capacity,
+        // where PcmQueue.offer starts dropping the oldest audio — losing far
+        // more than the excess the trim would have removed.
+        if (lastTrimAt?.let { nowMs - it < 250 } == true) return null
+        // Reserve what the pump may still be holding, then discard only what
+        // exceeds the retention target. Computing the excess first and
+        // subtracting it cannot retain zero bytes; the old target-minus-native
+        // subtraction could, and did.
+        val reservation = nativeFrames.coerceAtMost(ceilingFrames).coerceAtLeast(0L)
+        val keep = (queuedFrames.toLong() - reservation - retainedFrames).coerceAtLeast(0L).coerceAtMost(queuedFrames.toLong()).toInt() * frameSize
         if (keep >= queuedBytes) return null
         lastTrimAt = nowMs
-        highSince = null
         return keep
     }
 
-    fun reset() { highSince = null; lastTrimAt = null }
+    fun reset() { lastTrimAt = null }
     private fun framesForMs(ms: Int): Long = sampleRate.toLong() * ms / 1000
+
+    private companion object {
+        /** Kept in step with the drain pump's admission ceiling. */
+        const val NATIVE_CEILING_MS = 15
+    }
 }
 
 /** Only fresh input, not old queued audio, establishes a flowing source. */
