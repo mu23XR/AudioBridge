@@ -172,6 +172,14 @@ internal class ReceiverPlayout(
                     if (fifo.takeDiscontinuity()) ramp.restart()
                     drained = operation("WRITE") {
                         pump.drain(governor.targetMs(), governor::bufferedFrames) { bytes, offset, length ->
+                                // Entering idle already drained the old FIFO.
+                                // Detect its next write here, so a concurrent
+                                // offer cannot pass a loop-level resume check.
+                                if (feedingSilence) {
+                                    ramp.restart()
+                                    feedingSilence = false
+                                    RuntimeDiagnostics.event("SOURCE_OUTPUT_RESUME", "source=$id")
+                                }
                                 // Retain original queue samples across zero or
                                 // partial writes. Only accepted frames advance
                                 // the fade; retrying a tail never scales it twice.
@@ -203,9 +211,6 @@ internal class ReceiverPlayout(
                     }
                     if (!feedingSilence) RuntimeDiagnostics.event("SOURCE_OUTPUT_IDLE", "source=$id")
                     feedingSilence = true
-                } else if (feedingSilence && !input.isSilent()) {
-                    feedingSilence = false
-                    RuntimeDiagnostics.event("SOURCE_OUTPUT_RESUME", "source=$id")
                 }
                 if (now - lastTune >= 200) {
                     operation("RATE") { governor.retune(input.isFlowing(now)) }; lastTune = now

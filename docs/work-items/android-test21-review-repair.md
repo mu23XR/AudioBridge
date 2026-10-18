@@ -257,3 +257,22 @@ and debug/helper builds pass. Independent refill review is clear. Actual standar
 consumer quantum still exceeds20ms, so only the unchanged native run can decide
 continuity acceptance; do not infer success from fake-output coverage. WFAS single/
 multicast share this player; RTP/Snapcast PcmPlaybackSink are outside this change.
+
+Standard native refill acceptance now passes: run39116906589, artifact12132084385,
+PR merge c8be68d6ca45dbb526741f763d5f22f48b7208ba for head a4dd846. result.json
+and acceptance.json confirm11starts/completions,0failures/skips and all7 classes;
+all prior loss/progress/native-budget limits remain unchanged. Original MuMu
+failures are retained, not retroactively invalidated. Evidence downloaded to
+ignored out/native-ci-a4.
+
+One additional worker-owned continuity defect is confirmed under Issue45: after
+idle zero feed, the ramp is already exhausted and the old RESUME branch ran only
+after draining, so the first nonzero PCM could jump from zero at full amplitude.
+Restart the existing5ms ramp at the first FIFO write callback after feedingSilence,
+before native write/copy preparation; clear the flag there, irrespective of a
+later SILENCE changing input state. Admission-full keeps the flag until a real
+write attempt; zero/partial writes preserve existing accepted-frame ramp rules.
+Short silence whose old FIFO/fade tail never drained is deliberately outside this
+change. Existing ramp partial/zero/240-frame tests cover its function semantics;
+final full build/native regression will cover the changed callsite. This does
+not establish that every reported pop has this cause. No new buffering or target.
