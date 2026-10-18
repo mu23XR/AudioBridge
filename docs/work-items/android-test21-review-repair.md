@@ -2,7 +2,7 @@
 
 Status: implementation complete; final135 JVM and15 Python tests pass, zero-error
 lint/debug/helper builds pass. Full native acceptance waits for a resource-isolated
-window; no11/11claim. Owner: Codex,
+investigation of the remaining adaptive20ms failure; no11/11claim. Owner: Codex,
 branch fix/android-multisource-recovery, existing Draft PR40. Related Issues5,
 14,45,50,51; review: docs/handoffs/2026-10-18-test21-code-review.md.
 
@@ -107,3 +107,39 @@ commits. Local135 includes its10 existing JVM methods; the correction's committe
 test set is125 methods. A CI artifact-only test21 request can validate that clean
 commit without publishing a Release or installing it on devices. It does not
 silently include the separate pending VPN fix.
+
+## Final implementation/validation checkpoint
+
+Correction commits25ede1e and e45a7f6 are pushed to existing Draft PR40. Android,
+Windows, governance and signed artifact-only test21 CI all pass for exact source
+e45a7f650999e753c11f0da420e22d78c5ea9470. Run39109951133 creates Android/Windows
+artifacts; publication is correctly skipped. No Release or installation. The
+pending VPN tracked/untracked files remain unchanged and unstaged.
+
+After the other task completed checkpoint3233196 and closed1, the serial run
+out/test21-emulator/20261018-160923 completed11 methods,10passed/no skips. This
+time the remaining adaptive test failed its **actual discard assertion**, not the
+producer guard: the before-silence3.006s phase discarded48128B after its warmup,
+while producer maximum lag was27.212ms. The head stayed2560 at phase start and
+203ms, then advanced again; this does not by itself establish why output stalled
+or whether the device position was temporarily stale. The small-packet single/
+dual test, manual silence/resume and35s silence contract all passed in this run.
+
+A single-method follow-up, focused-adaptive-20261018-161813, still failed before
+silence on progress90656/163008frames. Raw AudioTrack head resets during local
+flushes can also distort that progress metric; correlate the persistent journal's
+local-recovery/underrun/rate/trim events before naming a cause. Do not dismiss this
+as a producer-only/environment-invalid result, and do not weaken assertions,
+raise the default target or add a warmup to conceal it. The four reviewed code/
+provenance mechanisms are corrected, but adaptive20ms runtime acceptance remains
+open and this candidate must not be promoted as fully validated.
+
+The serial host remained severely memory constrained (0.01–0.53GiB observed even
+with only the owned VM active). No user app/foreign process was terminated to
+free RAM. Own2 was closed and its owner window released; no further VM occupation
+is planned without a usable resource window. Next: with adequate host resources,
+collect the existing debug journal through run-as/provider on owned2 and compare
+AudioTrack head/timestamp/start-threshold/operation-duration evidence around the
+initial adaptive stall, distinguishing counter resets from FIFO/native output
+loss. Repeat the unchanged focused test, then the full suite after any actual fix.
+Keep Issues5/14/50/51/52 open; CI success is not a native-quality acceptance.

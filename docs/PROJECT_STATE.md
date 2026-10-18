@@ -10,9 +10,13 @@ silence refills at most10ms at a time inside the native target; full admission n
 longer suppresses local stall recovery, whose reset/restart is explicitly primed
 and counted. Connection cue instances are strongly owned through completion/error/
 timeout. Local135 JVM and15 artifact-tool tests pass, lint0errors and debug/helper
-builds pass; independent source review is clear. Native runs remain incomplete
-(9/11 then8/11, all failed methods hit the producer's >80ms scheduler guard under
-0.5–0.6GiB available host memory). Dedicated2 is closed for serial coordination;
+builds pass; independent source review is clear. Exact e45a7f6 also passes Android,
+Windows, governance and signed artifact-only test21 CI (no publication). Native
+runs remain incomplete:9/11 and8/11 hit producer scheduling guards; a subsequent
+serial10/11 run instead fails actual adaptive20ms before-silence discard48128B,
+and a focused follow-up fails progress. This is not a producer-only invalidation;
+adaptive acceptance remains open pending journal/head/reset correlation with
+adequate host resources (0.01–0.53GiB available observed). Dedicated2 is closed;
 no1/global-ADB/physical-device action, Release publication or Issue closure.
 Old local test21 bundle is explicitly unverified; clean-source immutable bundle
 checks prevent repeating its source/version/hash mismatch. Separate pending VPN
