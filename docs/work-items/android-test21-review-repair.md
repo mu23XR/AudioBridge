@@ -1,6 +1,6 @@
 # test21 review corrections — 2026-10-18
 
-Status: continued repair/validation in progress; final local140 JVM and15 Python
+Status: continued repair/validation in progress; final local140 JVM and22 Python
 tests pass, zero-error lint/debug/helper builds pass. Latest MuMu native9/12 is
 not acceptance; standard SDK-emulator CI is being added without weakening the
 old bounds. Owner: Codex, branch fix/android-multisource-recovery, existing Draft
@@ -217,3 +217,14 @@ keep the MuMu failures visible even if a different emulator succeeds. No instanc
 or physical-device action. Issue53 tracks the newly identified clock-control
 incompatibility separately from initial stalls. Next: verify source/workflow,
 push scoped commit, inspect actual native CI result before candidate claims.
+
+Standard CI first run39114822655 passed build/package/source guards but exited
+before Android boot: avdmanager's default user directory differed from emulator
+37.2's lookup (Unknown AVD name). No native method ran; this is harness setup
+failure, not an app failure/pass. Diagnostics artifact12132485030 retained.
+Set ANDROID_USER_HOME/ANDROID_EMULATOR_HOME/ANDROID_AVD_HOME explicitly under
+runner.temp, create the AVD at that path and assert its ini/list-avds before build.
+Added seven parser regressions (all22 Python methods pass) for skip/partial/
+duplicate/missing-class/count/runner-error rejection. Retry the exact same native
+contract without changing any audio threshold. Non-native72e128f Android/Windows/
+governance CI pass; signed artifact workflow remains separate/no publication.

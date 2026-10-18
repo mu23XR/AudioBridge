@@ -11,7 +11,7 @@ output/loop stalls and actual native mode/rate, and prevents normal stop from
 reporting an interrupted call as playback failure. FAST rejects drift-rate changes
 (Issue53); a normal rate-adjustable output candidate is under validation with the
 same20ms adaptive target/admission policy. Local140 JVM (130 committed +10 pending
-VPN),15 tool tests, zero-error lint/debug/helper builds pass. MuMu acceptance still
+VPN),22 Python tests (15 artifact +7 harness), zero-error lint/debug/helper builds pass. MuMu acceptance still
 fails: latest9/12 includes adaptive initial loss,35s-resume21408B over the old cap,
 and one126ms producer gap; fixedmanual20 passes.4CPU did not remove the failure.
 Own2 is closed/restored2CPU; no1/global-ADB/physical-device action. A reusable
