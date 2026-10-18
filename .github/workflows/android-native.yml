@@ -32,9 +32,9 @@ jobs:
       PULSE_SINK: audiobridge_native
       # avdmanager and newer emulator releases otherwise disagree on the
       # default Android user directory on hosted Linux runners.
-      ANDROID_USER_HOME: ${{ runner.temp }}/audiobridge-android
-      ANDROID_EMULATOR_HOME: ${{ runner.temp }}/audiobridge-android
-      ANDROID_AVD_HOME: ${{ runner.temp }}/audiobridge-android/avd
+      ANDROID_USER_HOME: /tmp/audiobridge-native-android
+      ANDROID_EMULATOR_HOME: /tmp/audiobridge-native-android
+      ANDROID_AVD_HOME: /tmp/audiobridge-native-android/avd
     steps:
       - name: Checkout exact tested source
         uses: actions/checkout@v4

@@ -228,3 +228,8 @@ Added seven parser regressions (all22 Python methods pass) for skip/partial/
 duplicate/missing-class/count/runner-error rejection. Retry the exact same native
 contract without changing any audio threshold. Non-native72e128f Android/Windows/
 governance CI pass; signed artifact workflow remains separate/no publication.
+The first directory correction's job-level runner.temp expressions were rejected
+by workflow validation before creating any job (run39115418127). Use an explicit
+/tmp/audiobridge-native-android directory on each disposable isolated Linux runner;
+job-level env does not provide the runner context. This is another harness setup
+failure, not native acceptance. Audio source/targets/assertions remain unchanged.
