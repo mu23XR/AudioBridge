@@ -150,7 +150,7 @@ class Acceptance:
             self.args.emulator, "-avd", AVD, "-port", "5554", "-no-window",
             "-gpu", "swiftshader_indirect", "-no-snapshot", "-no-boot-anim",
             "-camera-back", "none", "-camera-front", "none",
-            "-memory", "2048", "-cores", "2", "-accel", "on",
+            "-memory", "2048", "-cores", "4", "-accel", "on",
         ], cwd=ROOT, stdout=self.emulator_log, stderr=subprocess.STDOUT)
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:

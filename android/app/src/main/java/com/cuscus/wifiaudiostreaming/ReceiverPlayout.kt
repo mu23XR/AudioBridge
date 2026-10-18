@@ -191,14 +191,15 @@ internal class ReceiverPlayout(
                         "source=$id bytes=$discarded targetMs=${governor.targetMs()} nativeMs=${governor.bufferedMs()}")
                 }
                 // Preserve an active sink through intentional silence. Refill
-                // at most10ms per tick, only up to the current target. The same
+                // in at most two10ms chunks per tick, within the current target. The same
                 // accounting includes zeros, so returning PCM finds no hidden
                 //50ms block outside its configured latency budget.
                 val idle = input.isSilent() && fifo.bytes() == 0
                 if (idle) {
-                    val count = silenceFeed.bytesToWrite(governor.targetMs(), governor.bufferedFrames())
-                    if (count > 0) operation("IDLE_SILENCE") {
-                        governor.writePcm(silenceFeed.pcm, 0, count, recoverStall = false)
+                    operation("IDLE_SILENCE") {
+                        silenceFeed.refill(governor.targetMs(), governor::bufferedFrames) { pcm, count ->
+                            governor.writePcm(pcm, 0, count, recoverStall = false)
+                        }
                     }
                     if (!feedingSilence) RuntimeDiagnostics.event("SOURCE_OUTPUT_IDLE", "source=$id")
                     feedingSilence = true

@@ -1,6 +1,6 @@
 # test21 review corrections — 2026-10-18
 
-Status: continued repair/validation in progress; final local140 JVM and22 Python
+Status: continued repair/validation in progress; final local145 JVM and22 Python
 tests pass, zero-error lint/debug/helper builds pass. Latest MuMu native9/12 is
 not acceptance; standard SDK-emulator CI is being added without weakening the
 old bounds. Owner: Codex, branch fix/android-multisource-recovery, existing Draft
@@ -233,3 +233,27 @@ by workflow validation before creating any job (run39115418127). Use an explicit
 /tmp/audiobridge-native-android directory on each disposable isolated Linux runner;
 job-level env does not provide the runner context. This is another harness setup
 failure, not native acceptance. Audio source/targets/assertions remain unchanged.
+
+Standard API35 run39115588079 now executes the entire clean11-method contract:
+9pass/2fail, zero skips (artifact12132680469; tested PR merge db43043cfe0da4563d19d8007d32293b3783ffce).
+Adaptive before-silence now passes143896frames/3.013s with0discard; its resumed
+phase instead fails the unchanged97.290ms producer guard. The independent35s
+silence case fails real head progress; periodic stats show only~38kframes/s and
+>40underruns/s with native<=20ms, no reset/rebuild. Runtime/system output evidence
+is saved privately under out/native-ci-bc3. Hostavailable memory11.7GiB, so the
+silence failure cannot be dismissed as the Windows host memory condition.
+
+The per-tick single10ms refill waits for a second scheduling round even when
+quantized head progress freed the entire20ms budget (standard HAL period1088
+frames/22.67ms). Fix bounded refill: same tick up to two10ms chunks, recomputing
+native headroom each time, stop on short/zero write, and never exceed target or
+20ms batch. Five pure regressions cover budget/full/partial/zero/invalid writes.
+No target/threshold/progress/loss acceptance changes. Standard AVD uses4CPU for
+the next run to reduce producer scheduling invalidation; unchanged guard still
+rejects any >80ms source gap. Real audio, targets and physical devices untouched.
+
+Refill final-source validation:145 JVM/25suites,0failures/errors/skips; lint0errors
+and debug/helper builds pass. Independent refill review is clear. Actual standard
+consumer quantum still exceeds20ms, so only the unchanged native run can decide
+continuity acceptance; do not infer success from fake-output coverage. WFAS single/
+multicast share this player; RTP/Snapcast PcmPlaybackSink are outside this change.

@@ -68,6 +68,24 @@ internal class ReceiverBacklogPolicy(private val sampleRate: Int, private val fr
 internal class ReceiverSilenceFeed(private val sampleRate: Int, private val frameSize: Int) {
     val pcm = ByteArray((sampleRate.toLong() * 10 / 1000).toInt() * frameSize)
 
+    fun refill(targetMs: Int, nativeFrames: () -> Long, write: (ByteArray, Int) -> Int): Int {
+        var acceptedBytes = 0
+        // A quantized playback head can expose an entire target's headroom in
+        // one tick. Refill it without an extra scheduler gap between10ms chunks,
+        // while bounding this tick to two calls and20ms of submitted silence.
+        repeat(2) {
+            val requested = bytesToWrite(targetMs, nativeFrames())
+            if (requested == 0) return acceptedBytes
+            val accepted = write(pcm, requested)
+            check(accepted in 0..requested && accepted % frameSize == 0) {
+                "Invalid silent PCM write result: $accepted/$requested"
+            }
+            acceptedBytes += accepted
+            if (accepted < requested) return acceptedBytes
+        }
+        return acceptedBytes
+    }
+
     fun bytesToWrite(targetMs: Int, nativeFrames: Long): Int {
         val room = (sampleRate.toLong() * targetMs / 1000 - nativeFrames).coerceAtLeast(0L)
         return minOf(room, (pcm.size / frameSize).toLong()).toInt() * frameSize

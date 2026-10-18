@@ -170,6 +170,80 @@ class ReceiverBufferPolicyTest {
         assertTrue(feed.pcm.all { it == 0.toByte() })
     }
 
+    @Test fun silentRefillRestoresTheTwentyMillisecondBudgetInTheSameTick() {
+        val feed = ReceiverSilenceFeed(48_000, 4)
+        var native = 0L
+        var calls = 0
+        val accepted = feed.refill(20, { native }) { pcm, requested ->
+            assertSame(feed.pcm, pcm)
+            assertEquals(1_920, requested)
+            calls++
+            native += requested / 4
+            assertTrue(native <= 960)
+            requested
+        }
+        assertEquals(2, calls)
+        assertEquals(3_840, accepted)
+        assertEquals(960L, native)
+    }
+
+    @Test fun silentRefillRechecksRemainingHeadroomAndStopsAtTheExactTarget() {
+        val feed = ReceiverSilenceFeed(48_000, 4)
+        var native = 100L
+        val lengths = ArrayList<Int>()
+        val accepted = feed.refill(20, { native }) { _, requested ->
+            lengths.add(requested)
+            native += requested / 4
+            requested
+        }
+        assertEquals(listOf(1_920, 1_520), lengths)
+        assertEquals(3_440, accepted)
+        assertEquals(960L, native)
+        assertEquals(0, feed.refill(20, { native }) { _, _ -> fail("Full output must not be written"); 0 })
+        assertEquals(0, feed.refill(20, { 20_000 }) { _, _ -> fail("Over-budget output must not be written"); 0 })
+    }
+
+    @Test fun silentRefillDoesNotRetryAZeroOrShortWriteWithinTheTick() {
+        val feed = ReceiverSilenceFeed(48_000, 4)
+        for (accepted in listOf(0, 12)) {
+            var calls = 0
+            var native = 0L
+            assertEquals(accepted, feed.refill(20, { native }) { _, requested ->
+                assertEquals(1_920, requested)
+                calls++
+                native += accepted / 4
+                accepted
+            })
+            assertEquals(1, calls)
+            assertEquals((accepted / 4).toLong(), native)
+        }
+    }
+
+    @Test fun silentRefillCannotGrowIntoAnUnboundedBatchWhenTheHeadKeepsAdvancing() {
+        val feed = ReceiverSilenceFeed(48_000, 4)
+        var calls = 0
+        val accepted = feed.refill(400, { 0 }) { _, requested ->
+            calls++
+            assertTrue(requested <= 1_920)
+            requested
+        }
+        assertEquals(2, calls)
+        assertEquals(3_840, accepted)
+    }
+
+    @Test fun silentRefillRejectsInvalidNativeWriteResults() {
+        val feed = ReceiverSilenceFeed(48_000, 4)
+        for (result in listOf(-1, 2, 1_924)) {
+            try {
+                feed.refill(20, { 0 }) { _, _ -> result }
+                fail("Invalid result accepted: $result")
+            } catch (_: IllegalStateException) {
+                // A device error, incomplete frame or excessive count must be
+                // visible instead of silently corrupting the native budget.
+            }
+        }
+    }
+
     @Test fun freshInputAndIntentionalSilenceAreIndependentFromQueueOccupancy() {
         val input = ReceiverInputActivity()
         assertFalse(input.isFlowing(0))

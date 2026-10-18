@@ -59,3 +59,23 @@ physical install. The old local test21 bundle remains explicitly unverified;
 clean-source receipts, not refreshed metadata, establish new artifact provenance.
 
 Current detailed work item: docs/work-items/android-test21-review-repair.md.
+
+
+## Standard-emulator follow-up
+
+After the AVD setup repairs (a6363e3/bc3d01b), run39115588079 actually executes
+11 methods:9pass/2fail. Adaptive initial3.013s has143896frames/0discard and real
+rate changes. Resume hits97ms producer invalidation. The independent35s silent
+head fails progress at roughly38kframes/s, within20ms occupancy with no reset.
+This is not a Windows-memory-only diagnosis (11.7GiB available on the runner).
+The normal consumer quantum is1088frames/22.67ms; supplying one10ms chunk then
+waiting for another scheduling round creates avoidable refill gaps.
+
+New bounded refill supplies at most two10ms chunks in the same tick, re-reading
+remaining native budget before each call and stopping on short/zero. It never
+raises the target or adds50ms silence. Five budget/partial/error regressions bring
+local JVM total to145 (135 committed plus10 pending VPN); lint/debug/helper builds
+pass,22 Python checks pass and independent review is clear. Standard AVD4CPU
+reduces fixture-producer scheduling risk without changing its80ms invalidation
+threshold. Native rerun remains required. WFAS single/multicast use this output;
+RTP/Snapcast still use their separate PcmPlaybackSink and are not covered.

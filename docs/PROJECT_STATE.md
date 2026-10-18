@@ -10,13 +10,15 @@ across flush/replacement, separates native tail loss from progress, records shor
 output/loop stalls and actual native mode/rate, and prevents normal stop from
 reporting an interrupted call as playback failure. FAST rejects drift-rate changes
 (Issue53); a normal rate-adjustable output candidate is under validation with the
-same20ms adaptive target/admission policy. Local140 JVM (130 committed +10 pending
+same20ms adaptive target/admission policy. Local145 JVM (135 committed +10 pending
 VPN),22 Python tests (15 artifact +7 harness), zero-error lint/debug/helper builds pass. MuMu acceptance still
 fails: latest9/12 includes adaptive initial loss,35s-resume21408B over the old cap,
 and one126ms producer gap; fixedmanual20 passes.4CPU did not remove the failure.
-Own2 is closed/restored2CPU; no1/global-ADB/physical-device action. A reusable
-standard Android35 SDK-emulator CI check retains all thresholds, zero-skip counts
-and diagnostics for cross-platform investigation. It is pending, not a pass.
+Own2 is closed/restored2CPU; no1/global-ADB/physical-device action. Standard Android35 SDK-emulator CI executes11 methods with9passes: adaptive
+initial playback passes with0discard, resume hits a97ms producer guard, while35s
+silence fails actual progress. Same-tick refill now supplies up to two10ms chunks
+inside the unchanged target; five budget/partial regressions pass. Native rerun
+is pending; it is not a full pass.
 Prior exact e45a7f6 Android/Windows/governance/signed artifact-only CI passed; no
 Release was published. Old local test21 bundle remains unverified; clean-source
 bundle checks prevent relabeling. Keep runtime Issues5/14/51/53 open and preserve
