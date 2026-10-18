@@ -1,14 +1,14 @@
 # test21 review corrections — 2026-10-18
 
-Status: continued repair after failed final-source native acceptance. The new
-writable-continuation-before-trim and in-flight actual-loss accounting fixes are
-implemented;157 local JVM tests pass (147 committed-source plus10 pending VPN).
-Zero-error lint/debug/helper builds also pass; clean native rerun remains required.
-Prior ce353f6 Android/Windows/governance/signed artifact-only checks pass, but both
-native attempts are10/11 (producer122ms guard, then real adaptive-resume28540B
-loss). Earlier a4dd846 native11/11 and MuMu9/12 remain separate evidence.
+Status: review corrections implemented and scoped regression passed for9ecbbc4.
+147 committed-source JVM tests (157 local with10 separate pending VPN),22 Python,
+zero-error lint/debug/helper build, Android/Windows/governance CI and all11 strict
+standard API35 native methods pass,0skips. Permanent-signed artifact-only CI also
+passes; fresh candidate identity verified, publication skipped. Earlier failed
+native attempts remain evidence; OEM/overnight acoustic
+quality, old-API behavior and post-fix MuMu acceptance remain unverified.
 Owner: Codex, branch fix/android-multisource-recovery, existing Draft
-PR40. Related Issues5,14,45,50,51,52,53; review:
+PR40. Related Issues5,14,45,50,51,52,53,54; review:
 docs/handoffs/2026-10-18-test21-code-review.md.
 
 ## Authorization and boundaries
@@ -352,3 +352,52 @@ Independent final queue review is clear: prefix intersections remain contiguous,
 request-external loss counts immediately, counted/stop clear and invalid/throwing
 writes settle correctly, and accepted bytes are not removed twice after partial
 trim. Ready for scoped push and unchanged clean native contract.
+
+Source9ecbbc466758b6b62bee5bb15ec9d4808f28323f is pushed to existing Draft PR40.
+Clean native run39119476807 is executing; governance39119476909 and Windows
+39119476821 pass, Android/signing checks still running. Issue54 separately tracks
+the deterministic in-flight loss accounting bug;5/51 retain the real audio-loss
+repair. No Issue closure or new Release. Only original pending VPN edits remain
+outside the scoped commit.
+
+Final native acceptance checkpoint: source9ecbbc4 run39119476807 succeeds;
+artifact12133468841 tested PR merge7e60dbbdd47ea27d446868a0d84a187b3b871c3a.
+Downloaded archive CRC, result.json, acceptance.json, SOURCE_COMMIT and actual
+instrumentation OK(11 tests) verify11starts/completions, all7 expected classes,
+0failures/skips. Evidence retained privately under out/native-ci-9ec. Both prior
+ce353f6 failures, earlier MuMu reports and their actual loss remain preserved;
+no thresholds were relaxed.147 committed-source JVM tests/157 local,22 Python,
+zero-error lint/debug/helper builds and Android39119476866/Windows39119476821/
+governance39119476909 all pass. Signed artifact workflow39119476829 is finishing;
+do not reuse the failed ce353f6 APK as this source's candidate.
+
+Remaining acceptance is explicit: no post-fix MuMu rerun, no real acoustic latency
+measurement or physical/OEM overnight listening, no API<31 device acceptance.
+Normal mixer latency can differ from FAST. WFAS single/multicast use the changed
+player; separate RTP/Snapcast output is outside this repair. All runtime Issues
+stay open, Draft PR40 stays unmerged and no Release/stable promotion/installation
+is authorized here. Dedicated2 remains closed/restored2CPU;1/globalADB/physical
+devices were untouched. Pending VPN source/native fixture/protocol/state/stable
+notes remain excluded and unchanged.
+
+Final artifact/CI checkpoint: all five workflows for implementation9ecbbc4 pass:
+native39119476807, Android39119476866, Windows39119476821,
+governance39119476909 and signed artifact-only39119476829 (publish skipped).
+Fresh Android artifact12133678144 downloaded to ignored out/test21-ci-9ecbbc4;
+ZIP CRC, declared/downloaded SHA256, SOURCE_COMMIT9ecbbc466758b6b62bee5bb15ec9d4808f28323f,
+package io.github.mu23xr.audiobridge.test,1.3.1-test.21/code610181030 and permanent
+APK signer all verified. verified.json records integrity and the exact native
+merge/run, without attributing this APK to a later documentation-only commit.
+GitHub Git-tree verification also confirms packaged head9ecbbc4 and native-tested
+merge7e60dbb have identical tree d82f512287f0a6f3287818666ce3439fae992ab6.
+Old unverified bundle and failed ce candidate remain separate. Latest Release
+is still test20; no installation/publication/stable promotion/merge/Issue closure.
+
+This scoped repair is implemented and verified to the recorded automated
+contract. Remaining real listening/overnight/platform acceptance above is not
+claimed complete. Project state, testing/diagnostics contracts and this handoff
+are updated; only the existing pending VPN edits remain outside these commits.
+
+Issues5/45/51/52/53/54 now record final scoped automated acceptance and explicit
+remaining limits without closing them. Final follow-up commit contains memory
+only; tested/packaged implementation stays9ecbbc4.

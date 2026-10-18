@@ -4,7 +4,7 @@ Last governance refresh: 2026-09-29
 
 ## Android multi-source receiver and runtime recovery
 
-2026-10-18 test21 review corrections: Draft PR40/sourcece353f6 fixes observed
+2026-10-18 test21 review corrections: Draft PR40/implementation9ecbbc4 fixes observed
 playback accounting across flush/replacement, native tail-loss reporting,
 normal-stop false errors, actual clock-rate control, same-tick bounded silence
 refill and first-PCM fade after silence. Existing queue/cue/provenance corrections
@@ -14,15 +14,18 @@ Local157 JVM (147 committed-source +10 pending VPN),22 Python checks and zero-er
 lint/debug/helper builds pass after two further confirmed corrections: let a
 writable time/batch-limited pump continue before soft trim, and count in-flight
 queue eviction only after actual accepted bytes are known. Twelve new scheduling/
-concurrency regressions pass; all audio bounds remain unchanged. Clean native
-rerun is required. Prior ce353f6 Android/Windows/governance/permanent-signed
-artifact-only CI pass, but native attempts both10/11 (122ms producer guard, then
-actual28540B adaptive-resume loss). Its artifact identity/signature is verified,
-not audio accepted. No Release/publication/installation; old mismatched bundle
-stays unverified. Earlier a4dd846 native11/11 and MuMu9/12 remain separate evidence,
-with no post-refill MuMu rerun.
+concurrency regressions pass; all audio bounds remain unchanged. Exact9ecbbc4
+Android/Windows/governance/permanent-signed artifact-only and strict standard
+API35 native CI all pass. Native39119476807 executes11/11,0skips on tested merge
+7e60dbbdd47ea27d446868a0d84a187b3b871c3a. Fresh signed artifact12133678144/source
+9ecbbc4/package.test/version1.3.1-test.21/code610181030 has downloaded checksum and
+permanent signer verified under ignored out/test21-ci-9ecbbc4. Publish is skipped;
+latest Release remains test20. Earlier ce353f6 failures, a4dd84611/11 and MuMu9/12
+remain separate evidence, with no post-fix MuMu rerun. Acoustic latency, API<31/
+OEM/overnight and separate RTP/Snapcast output remain unverified/outside scope.
+No Release/publication/installation; old mismatched bundle stays unverified.
 Own2 is closed/restored2CPU; no1/global-ADB/physical-device action. Keep runtime
-Issues5/14/45/51/53 open and preserve separate pending VPN changes. See
+Issues5/14/45/51/53/54 open and preserve separate pending VPN changes. See
 docs/work-items/android-test21-review-repair.md and the2026-10-18 adaptive handoff.
 
 2026-10-15 repair execution: user authorized the focused test20 playback/cue repair and requires emulator-only validation, with no physical-device connections or changes. Bounded batch scheduling, total-backlog disposal separated from clock correction, explicit-silence continuity/health and generation-bound connection cues are implemented locally.106 JVM tests, debug/helper builds and zero-error lint pass; independent review is clear after correcting the empty-FIFO debounce edge. MuMu native fixtures/CI delivery are pending; an offline emulator stopped the first native attempt before installs/tests. See docs/work-items/android-test21-playout.md. No stable promotion or runtime issue closure.

@@ -20,12 +20,12 @@ unstaged and excluded from the correction.
 - FAST output accepts creation but rejects setPlaybackRate(-3), so clock drift
   was not actually corrected (Issue53). The normal-output candidate does apply
   native rate changes, verified by AudioTrack readback. Same target/threshold/
-  admission bounds are retained. It remains under native validation; system mixer
-  latency may differ, and emulator queue counters are not acoustic measurements.
+  admission bounds are retained. Final standard native regression passes; system
+  mixer latency may differ, and queue counters are not acoustic measurements.
 
 ## Evidence and acceptance
 
-Local145 JVM methods/25suites pass (135 committed plus10 pending VPN methods),
+Local157 JVM methods/26suites pass (147 committed-source plus10 pending VPN methods),
 lint0errors/231warnings/20hints and debug/helper builds pass. Fifteen artifact-tool
 tests pass; seven native-result parser tests add22 Python methods in total.
 Independent review found no remaining product-code blocker; its second-source
@@ -52,10 +52,9 @@ resume; native loss is included rather than hidden by the monotonic counter.
 
 ## Next action
 
-Run clean native acceptance for the new continuation/in-flight-loss fixes and
-inspect retained system/journal evidence before accepting the output candidate.
-Preserve all MuMu failures even if another
-emulator passes. Keep Issues5/14/51/53 open, no Release/stable promotion/merge or
+Scoped regressions and signed artifact verification pass for source9ecbbc4.
+Keep the explicit acceptance limits below and preserve all MuMu failures. Keep
+Issues5/14/45/51/53/54 open, no Release/stable promotion/merge or
 physical install. The old local test21 bundle remains explicitly unverified;
 clean-source receipts, not refreshed metadata, establish new artifact provenance.
 
@@ -119,3 +118,35 @@ queue/batch limits and native assertions remain unchanged; no dedicated thread
 architecture added. Next: independent queue review, scoped push, clean native
 run. Prior failing ce artifact has NATIVE_VALIDATION_FAILED.txt locally; identity
 verification must not be confused with runtime acceptance.
+
+## Final native acceptance
+
+Source9ecbbc4 run39119476807 passes11/11,0skips on the isolated audio-enabled
+standard API35 emulator; tested merge7e60dbbdd47ea27d446868a0d84a187b3b871c3a,
+artifact12133468841. Downloaded result/acceptance/source/instrumentation and CRC
+verify all7 class counts under out/native-ci-9ec.147 committed-source JVM methods
+(157 local with10 pending VPN),22 Python and zero-error lint/debug/helper builds
+pass; Android/Windows/governance CI pass. Signed artifact-only39119476829 is
+finishing; its identity must be independently verified. Earlier ce10/11 actual-
+loss/producer failures and MuMu9/12 remain retained, not reclassified.
+
+Remaining: post-fix MuMu, API<31/OEM/overnight and acoustic latency are unverified;
+normal mixer latency may differ from FAST, and RTP/Snapcast use a separate sink.
+No physical devices, instance1/sharedADB, merge, Release or Issue closure. Pending
+VPN work stays separate. Issue54 tracks the deterministic in-flight accounting
+defect in addition to real playout loss in5/51.
+
+All five workflows for implementation9ecbbc4 are now successful, including
+signed artifact-only39119476829; publish job skipped. Fresh artifact12133678144
+under out/test21-ci-9ecbbc4 verifies source9ecbbc4, declared/downloaded checksum,
+permanent signer and package io.github.mu23xr.audiobridge.test/version1.3.1-test.21/
+code610181030. verified.json records exact source and native merge/run; it must
+not be relabeled to a later docs-only commit. Latest Release remains test20.
+This scoped repair is complete to its recorded automated contract; future
+physical/OEM/overnight/acoustic acceptance stays open, with no implicit device
+window requested. Final docs checkpoint updates state/work item/handoff only;
+existing pending VPN files remain unchanged and excluded.
+
+Git-tree API verification confirms native-tested PR merge7e60dbb and signed
+head9ecbbc4 share exact tree d82f512287f0a6f3287818666ce3439fae992ab6. Final
+acceptance checkpoints are also in Issues5/45/51/52/53/54, all kept open.
