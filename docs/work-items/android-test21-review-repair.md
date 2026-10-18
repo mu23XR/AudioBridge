@@ -1,9 +1,13 @@
 # test21 review corrections — 2026-10-18
 
-Status: continued repair/validation in progress; final local145 JVM and22 Python
-tests pass, zero-error lint/debug/helper builds pass. Latest MuMu native9/12 is
-not acceptance; standard SDK-emulator CI is being added without weakening the
-old bounds. Owner: Codex, branch fix/android-multisource-recovery, existing Draft
+Status: continued repair after failed final-source native acceptance. The new
+writable-continuation-before-trim and in-flight actual-loss accounting fixes are
+implemented;157 local JVM tests pass (147 committed-source plus10 pending VPN).
+Zero-error lint/debug/helper builds also pass; clean native rerun remains required.
+Prior ce353f6 Android/Windows/governance/signed artifact-only checks pass, but both
+native attempts are10/11 (producer122ms guard, then real adaptive-resume28540B
+loss). Earlier a4dd846 native11/11 and MuMu9/12 remain separate evidence.
+Owner: Codex, branch fix/android-multisource-recovery, existing Draft
 PR40. Related Issues5,14,45,50,51,52,53; review:
 docs/handoffs/2026-10-18-test21-code-review.md.
 
@@ -276,3 +280,75 @@ Short silence whose old FIFO/fade tail never drained is deliberately outside thi
 change. Existing ramp partial/zero/240-frame tests cover its function semantics;
 final full build/native regression will cover the changed callsite. This does
 not establish that every reported pop has this cause. No new buffering or target.
+
+Final-source checkpoint ce353f6:145 JVM/25 suites,0failures/errors/skips and22
+Python checks pass; lint0errors/231warnings/20hints, debug/helper builds pass.
+Independent final diff/strict-runner review is clear. Android39117465057,
+Windows39117465029, governance39117465025 and permanent-signed artifact-only
+39117465077 succeed; publish job is skipped and latest Release remains test20.
+Downloaded artifact12133365734 into fresh ignored out/test21-ci-ce353f6: source
+ce353f68db43912de578d1e2faad09f7a1adf54e, package io.github.mu23xr.audiobridge.test,
+version1.3.1-test.21/code610180959, declared/downloaded SHA256 and permanent APK
+certificate verified. The old unverified bundle is unchanged; this is not a
+physical install or a published/promoted Release.
+
+Final native first attempt39117465042 tests PR merge
+e359f011db8c68a655b8d87335dff32ef6b0368f and completes10/11,0skips. The35s
+silent head/budget assertions pass, then resumed producer has122021us max lag
+and trips the unchanged80ms fixture guard before acceptance can be established.
+Other10 methods pass. This failed run/artifact12132333679 is retained in ignored
+out/native-ci-ce, not relabeled as a pass. Retry only this failed native job once,
+with identical source/thresholds; inspect its actual result before final claims.
+
+Final-source retry39117465042 attempt2 is still10/11, but now fails REAL adaptive
+resume software discard28540B, not the producer guard. Preserve artifact12133606053
+under out/native-ci-ce-retry. Before3.018s has145508frames/0drop; after3.013s has
+137053frames (~94.8%, progress passes), native loss/recovery/rebuild all0; producer
+max63.269ms stays below80ms. Worker loop gaps67/43ms and WRITE42ms are observed.
+Two independent reviews identify a definite ordering defect: a pump limited by
+its2ms/20ms budget still has native headroom, but ReceiverPlayout soft-trims FIFO
+before yielding/continuing. At WRITE42ms return native is only1ms yet3840B trimmed;
+another2560B trims with native13ms. Correct writable limited continuation before
+soft trim, preserve hard60ms FIFO,20ms target/20ms batch and all assertions.6400B
+is only part of28540B, so do not claim this alone guarantees acceptance; remaining
+overflow/scheduling and in-flight accounting need separate evidence. Implement
+the confirmed minimal ordering fix with a deterministic delayed-write pipeline
+regression before further native tests. No more unchanged retries until a fix.
+
+Also confirmed independently: overflow can evict a chunk during an unlocked
+native write and count its entire remaining prefix as discarded, including bytes
+the native sink actually accepts on return. Correct in-flight counted-discard
+accounting separately, keeping the cumulative actual-loss counter monotonic and
+distinguishing non-counted stop clear. Zero/partial/full/throwing/invalid writes
+need deterministic coverage; no queue lock during native writes. This accounting
+fix is not a substitute for the actual scheduling/soft-trim repair and cannot
+explain the full148.6ms measured loss. Dedicated per-source audio scheduling is
+not yet implemented; first verify the small confirmed corrections.
+
+Implementation checkpoint: ReceiverBacklogPolicy now receives the actual pump's
+limited continuation state and defers soft trim without consuming its cooldown.
+The next truly admission-blocked/short-write iteration still evaluates trim;
+hard FIFO bounds remain independent. Two real queue/pump/policy regressions
+simulate42ms preemption, verify byte-for-byte eventual drain and unchanged
+admission, then verify blocked trimming/cooldown/hard overflow.
+
+PcmQueue now owns one in-flight write, defers counted eviction of its request
+prefix until accepted bytes are known, and immediately counts losses outside the
+request. Count stays monotonic; stop clear(false) is distinct; partial trim does
+not remove accepted bytes twice. Finally settles ownership on invalid/throwing
+output, without holding the queue lock across the native call. Ten new boundary/
+error regressions pass alongside the existing real-thread unlocked-write test.
+Local157 JVM/26suites,0failures/errors/skips. No native threshold, target, queue
+capacity, batch limit or production scheduling architecture changed. Continue
+full build/review, then commit/push and run clean native acceptance once.
+
+Full build checkpoint:157 JVM/26suites all pass, lint0errors/231warnings/20hints,
+debug and instrumentation helper assemble pass in3m11s. Existing22 Python checks
+remain passing with no tool-source changes since that run. Pending VPN source,
+protocol/native fixture and stable notes still match the saved baseline and
+remain unstaged/excluded. Await final independent queue review, then push.
+
+Independent final queue review is clear: prefix intersections remain contiguous,
+request-external loss counts immediately, counted/stop clear and invalid/throwing
+writes settle correctly, and accepted bytes are not removed twice after partial
+trim. Ready for scoped push and unchanged clean native contract.

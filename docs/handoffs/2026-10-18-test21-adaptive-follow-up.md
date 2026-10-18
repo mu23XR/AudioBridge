@@ -25,7 +25,7 @@ unstaged and excluded from the correction.
 
 ## Evidence and acceptance
 
-Local140 JVM methods/25suites pass (130 committed plus10 pending VPN methods),
+Local145 JVM methods/25suites pass (135 committed plus10 pending VPN methods),
 lint0errors/231warnings/20hints and debug/helper builds pass. Fifteen artifact-tool
 tests pass; seven native-result parser tests add22 Python methods in total.
 Independent review found no remaining product-code blocker; its second-source
@@ -52,8 +52,9 @@ resume; native loss is included rather than hidden by the monotonic counter.
 
 ## Next action
 
-Inspect standard native CI result and retained system/journal evidence before
-accepting the output candidate. Preserve all MuMu failures even if another
+Run clean native acceptance for the new continuation/in-flight-loss fixes and
+inspect retained system/journal evidence before accepting the output candidate.
+Preserve all MuMu failures even if another
 emulator passes. Keep Issues5/14/51/53 open, no Release/stable promotion/merge or
 physical install. The old local test21 bundle remains explicitly unverified;
 clean-source receipts, not refreshed metadata, establish new artifact provenance.
@@ -79,3 +80,42 @@ pass,22 Python checks pass and independent review is clear. Standard AVD4CPU
 reduces fixture-producer scheduling risk without changing its80ms invalidation
 threshold. Native rerun remains required. WFAS single/multicast use this output;
 RTP/Snapcast still use their separate PcmPlaybackSink and are not covered.
+
+## Final-source checkpoint
+
+Refill source a4dd846 passes strict standard native11/11,0skips in39116906589
+(tested merge c8be68d6ca45dbb526741f763d5f22f48b7208ba; artifact12132084385).
+Final ce353f6 additionally restarts the existing5ms ramp at the first actual
+PCM write after idle silence, preserving zero/partial-write accounting and
+unchanged buffering targets. Independent review is clear; local145 JVM/22 Python,
+zero-error lint/debug/helper builds pass. Android/Windows/governance and signed
+artifact-only CI all succeed. Fresh artifact12133365734/sourcece353f6/package
+io.github.mu23xr.audiobridge.test/version1.3.1-test.21/code610180959 has verified
+source, downloaded checksum and permanent signer under out/test21-ci-ce353f6.
+No Release or installation; the old mismatched local bundle remains unverified.
+
+Final native first attempt39117465042/merge e359f011db8c68a655b8d87335dff32ef6b0368f
+completes10/11,0skips:35s silent progress/budget passes; its immediate resumed
+producer then stalls122ms and hits the unchanged80ms guard. Artifact12132333679
+and diagnostics are retained under out/native-ci-ce. One unchanged-source
+failed-job retry is in progress; do not report final native acceptance yet.
+
+The identical-source retry is now10/11 with real adaptive-resume software loss
+28540B, producer max63ms below80ms guard, native loss/recovery/rebuild0. Artifact
+12133606053 retained in out/native-ci-ce-retry. Worker gaps67/43ms and WRITE42ms
+are observed. Two independent reviews confirm soft trim precedes writable
+limited-batch continuation:3840B dropped at native1ms and2560B at native13ms.
+Fix this ordering while retaining all bounds, plus independently confirmed
+in-flight counted-discard overstatement. Do not perform more unchanged retries
+or call the signed artifact's identity verification audio acceptance. Current
+implementation and next native run remain in the active work item.
+
+The continuation-before-trim repair and in-flight monotonic actual-loss repair
+are implemented in five source/test files, with12 new deterministic regressions.
+Local157 JVM/26suites,0failures/errors/skips; lint0errors/231warnings/20hints and
+debug/helper builds pass.147 methods belong to the committed-source candidate,
+10 to the separate pending VPN work.22 Python checks remain passing. All targets,
+queue/batch limits and native assertions remain unchanged; no dedicated thread
+architecture added. Next: independent queue review, scoped push, clean native
+run. Prior failing ce artifact has NATIVE_VALIDATION_FAILED.txt locally; identity
+verification must not be confused with runtime acceptance.

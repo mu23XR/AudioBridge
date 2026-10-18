@@ -52,7 +52,11 @@ internal class ReceiverBacklogPolicy(private val sampleRate: Int, private val fr
     private val retainedBytes = framesForMs(ReceiverPlayout.QUEUE_RETENTION_MS) * frameSize
     private var lastTrimAt: Long? = null
 
-    fun softwareLimit(nowMs: Long, queuedBytes: Int): Int? {
+    fun softwareLimit(nowMs: Long, queuedBytes: Int, hasWritableContinuation: Boolean = false): Int? {
+        // A bounded batch may yield while native admission still has room.
+        // Continue that work before treating its remaining FIFO as stale;
+        // the hard queue ceiling remains enforced independently by offer().
+        if (hasWritableContinuation) return null
         if (queuedBytes <= triggerBytes) return null
         if (lastTrimAt?.let { nowMs - it < 250 } == true) return null
         lastTrimAt = nowMs

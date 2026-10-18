@@ -19,3 +19,5 @@ test20 增加只读后台导出：已授权 ADB shell 使用 `content read --uri
 test21 补充播放证据：SOURCE_OUTPUT_READY 记录实际启动阈值、容量、最小缓冲、输出模式和系统速率；PLAYOUT_RATE 每个输出最多每10秒记录一次调速结果。PLAYOUT_STATS 的 totalPlayedFrames 累计实际观察到的播放头增量，跨本地 flush 保留；nativeDiscardedFrames 单独记录 flush 清掉的未播放尾部，不能算成成功播放。SOURCE_PLAYOUT_STATS 还保留跨重建的累计值、输出 epoch、恢复次数和系统速率读回值。零填充也会推进播放头，因此累计量仍不等于收到的源音频量。
 
 SOURCE_OUTPUT_OPERATION_SLOW 与 SOURCE_OUTPUT_LOOP_GAP 记录40毫秒以上的操作或循环停顿，每类每个源最多每秒一条。它们帮助区分应用调度、原生调用和系统输出不推进；冷启动 BUILD 本身也可能被记录。多源 governor 事件带 output 标识，不能把另一输出的恢复与当前输出的停顿混在一起。
+
+queueDiscardBytes 只累计真正未被输出接受的已丢弃软件队列字节。若包在原生写入期间被挤出，正在写入的前缀要等调用返回后结算，已接受部分不计丢失；计数保持单调，停止时的不计数清空不产生丢音记录。SOURCE_BACKLOG_TRIM 的 bytes 表示当次从软件队列移除的字节；在与写入重叠的诊断场景中，应结合累计实际丢弃量，不能简单相加代替总损失。

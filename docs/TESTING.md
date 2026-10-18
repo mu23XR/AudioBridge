@@ -84,6 +84,14 @@ trigger and retains40ms, cooldown never removes the60ms hard safety bound, and
 trim/overflow boundaries signal a frame-based ramp. Numeric queues above the
 hard capacity cannot serve as the sole acceptance test.
 
+A simulated42ms device call must exhaust the pump budget while leaving native
+headroom; writable continuation retains and drains the exact PCM before soft
+trimming. A later admission-blocked batch still trims, without losing cooldown
+eligibility. PcmQueueInFlightTest covers overflow/trim during an unlocked write:
+count only unaccepted evicted bytes, keep loss monotonic, preserve partial tails
+and queue bounds, distinguish counted/stop clears, and release writer ownership
+after invalid/throwing output. Neither fix relaxes native progress/loss limits.
+
 AudioSilenceRegressionTest covers a frozen full output independently of write
 admission, one-time startup-threshold priming after a flush, and explicit failure
 of incomplete priming. CuePlaybackLifetimeTest covers owned player lifetime,

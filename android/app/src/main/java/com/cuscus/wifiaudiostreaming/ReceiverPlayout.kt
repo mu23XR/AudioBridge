@@ -193,7 +193,7 @@ internal class ReceiverPlayout(
                         }
                     }
                 }
-                backlog.softwareLimit(now, fifo.bytes())?.let { limit ->
+                backlog.softwareLimit(now, fifo.bytes(), hasWritableContinuation = drained?.limited == true)?.let { limit ->
                     val discarded = fifo.trimTo(limit)
                     if (discarded > 0) RuntimeDiagnostics.event("SOURCE_BACKLOG_TRIM",
                         "source=$id bytes=$discarded targetMs=${governor.targetMs()} nativeMs=${governor.bufferedMs()}")

@@ -115,6 +115,71 @@ class ReceiverBufferPolicyTest {
         assertEquals(0L, queue.discardedBytes)
     }
 
+    @Test fun preemptedWritableBatchContinuesWithoutDiscardingRealPcm() {
+        val queue = PcmQueue(4, 11_520)
+        val original = ByteArray(11_008) { (it / 256 + it * 31).toByte() }
+        original.asList().chunked(256).forEach { queue.offer(it.toByteArray()) }
+        val policy = ReceiverBacklogPolicy(48_000, 4)
+        var nowNanos = 0L
+        var nativeFrames = 0L
+        val pump = PcmDrainPump(queue, 48_000, 4) { nowNanos }
+        val accepted = ArrayList<Byte>()
+        val first = pump.drain(20, { nativeFrames }) { pcm, offset, length ->
+            accepted.addAll(pcm.copyOfRange(offset, offset + length).toList())
+            nativeFrames += length / 4
+            nowNanos += 42_000_000 //A single device call/preemption exhausts the2ms CPU budget.
+            length
+        }
+        assertEquals(1, first.writes)
+        assertEquals(256, first.bytes)
+        assertTrue(first.limited)
+        assertFalse(first.blocked)
+        assertEquals(10_752, queue.bytes()) //56ms queued, with only1.3ms native occupancy.
+        assertNull(policy.softwareLimit(42, queue.bytes(), first.limited))
+        assertEquals(0L, queue.discardedBytes)
+
+        var batches = 0
+        while (queue.bytes() > 0) {
+            val result = pump.drain(20, { nativeFrames }) { pcm, offset, length ->
+                accepted.addAll(pcm.copyOfRange(offset, offset + length).toList())
+                nativeFrames += length / 4
+                assertTrue(nativeFrames <= 1_680) //The existing35ms admission ceiling remains exact.
+                length
+            }
+            assertNull(policy.softwareLimit(nowNanos / 1_000_000, queue.bytes(), result.limited))
+            if (result.blocked) {
+                nowNanos += 20_000_000
+                nativeFrames = (nativeFrames - 960).coerceAtLeast(0)
+            }
+            assertTrue("Continuation did not finish", ++batches < 10)
+        }
+        assertArrayEquals(original, accepted.toByteArray())
+        assertEquals(0L, queue.discardedBytes)
+    }
+
+    @Test fun admissionBlockedAfterAPreemptedBatchStillTrimsWithoutAConsumedCooldown() {
+        val queue = PcmQueue(4, 11_520)
+        repeat(43) { queue.offer(ByteArray(256)) }
+        val policy = ReceiverBacklogPolicy(48_000, 4)
+        var nowNanos = 0L
+        val pump = PcmDrainPump(queue, 48_000, 4) { nowNanos }
+        val limited = pump.drain(20, { 0 }) { _, _, length -> nowNanos += 42_000_000; length }
+        assertTrue(limited.limited)
+        assertNull(policy.softwareLimit(42, queue.bytes(), limited.limited))
+        val blocked = pump.drain(20, { 1_680 }) { _, _, _ -> fail("Full native output must not be written"); 0 }
+        assertTrue(blocked.blocked)
+        assertFalse(blocked.limited)
+        assertEquals(0, blocked.writes)
+        val retained = policy.softwareLimit(43, queue.bytes(), blocked.limited)!!
+        assertEquals(7_680, retained)
+        assertEquals(3_072, queue.trimTo(retained))
+        assertEquals(3_072L, queue.discardedBytes)
+        assertTrue(queue.takeDiscontinuity())
+        repeat(50) { queue.offer(ByteArray(256)) }
+        assertTrue(queue.bytes() <= 11_520)
+        assertTrue(queue.discardedBytes > 3_072)
+    }
+
     @Test fun trimCooldownDoesNotPreventHardCapacityProtection() {
         val queue = PcmQueue(4, 11_520)
         val policy = ReceiverBacklogPolicy(48_000, 4)
