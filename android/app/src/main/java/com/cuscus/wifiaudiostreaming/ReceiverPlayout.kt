@@ -16,7 +16,11 @@ internal class ReceiverPlayout(
     private val onFailure: (String) -> Unit
 ) {
     internal data class Snapshot(val targetMs: Int, val totalBufferedMs: Int, val nativeBufferedMs: Int,
-        val queuedBytes: Int, val discardedBytes: Long, val playedFrames: Long, val rebuilds: Int)
+        val queuedBytes: Int, val discardedBytes: Long, val playedFrames: Long, val rebuilds: Int,
+        val nativeDiscardedFrames: Long = 0, val localRecoveries: Long = 0,
+        val outputEpoch: Int = 0, val rawHead: Long = 0, val underruns: Int = 0,
+        val startThresholdFrames: Int = 0, val maxLoopGapMs: Long = 0,
+        val rateHz: Int = 0, val actualRateHz: Int = 0, val performanceMode: Int = -1)
     private val frame = format.channels * 2
     private val ramp = PcmRamp(format.channels, maxOf(1, format.sampleRate / 200))
     private val silenceTail = PcmSilenceTail(format.channels, maxOf(1, format.sampleRate / 200))
@@ -43,6 +47,11 @@ internal class ReceiverPlayout(
     @Volatile private var track: AudioTrack? = null
     private lateinit var governor: PlayoutGovernor
     private var rebuilds = 0
+    private var retiredPlayedFrames = 0L
+    private var retiredNativeDiscardedFrames = 0L
+    private var retiredRecoveries = 0L
+    private var outputEpoch = 0
+    private var lastSlowOperationAt = -1_000L
     @Volatile private var latestSnapshot = Snapshot(initialTarget, 0, 0, 0, 0, 0, 0)
 
     internal fun snapshot(): Snapshot = latestSnapshot
@@ -72,8 +81,17 @@ internal class ReceiverPlayout(
     }
 
     private inline fun <T> operation(label: String, block: () -> T): T {
-        phase = label; busyAt.set(SystemClock.elapsedRealtime())
-        return try { block() } finally { busyAt.set(-1); phase = "WAIT_PCM" }
+        val start = SystemClock.elapsedRealtime()
+        phase = label; busyAt.set(start)
+        return try { block() } finally {
+            val end = SystemClock.elapsedRealtime()
+            if (end - start >= 40 && end - lastSlowOperationAt >= 1_000) {
+                lastSlowOperationAt = end
+                RuntimeDiagnostics.event("SOURCE_OUTPUT_OPERATION_SLOW",
+                    "source=$id operation=$label durationMs=${end - start}")
+            }
+            busyAt.set(-1); phase = "WAIT_PCM"
+        }
     }
 
     private fun buildOutput(target: Int): Pair<AudioTrack, PlayoutGovernor> = operation("BUILD") {
@@ -87,7 +105,9 @@ internal class ReceiverPlayout(
             .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setSampleRate(format.sampleRate).setChannelMask(mask).build())
             .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(bytes)
-        if (Build.VERSION.SDK_INT >= 26) builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+        // FAST tracks reject setPlaybackRate, disabling the clock-drift
+        // correction this live stream needs. Keep a normal rate-adjustable
+        // track; admission and startup threshold still bound queued latency.
         val result = builder.build()
         track = result // Cleanup can find a candidate even if later setup fails.
         ReceiverMixer.register(id, result)
@@ -104,7 +124,8 @@ internal class ReceiverPlayout(
             "AudioTrack startup priming was incomplete"
         }
         result.play()
-        RuntimeDiagnostics.event("SOURCE_OUTPUT_READY", "source=$id ${format.describe()} targetMs=$target startFrames=$startFrames capacityFrames=${result.bufferCapacityInFrames}")
+        outputEpoch++
+        RuntimeDiagnostics.event("SOURCE_OUTPUT_READY", "source=$id ${format.describe()} targetMs=$target startFrames=$startFrames capacityFrames=${result.bufferCapacityInFrames} minBytes=$min rateHz=${result.playbackRate} performanceMode=${if (Build.VERSION.SDK_INT >= 26) result.performanceMode else -1}")
         result to governor
     }
 
@@ -115,6 +136,9 @@ internal class ReceiverPlayout(
         var lastLog = lastSample
         var outputCopy = ByteArray(0)
         var feedingSilence = false
+        var previousLoopAt = SystemClock.elapsedRealtime()
+        var maxLoopGapMs = 0L
+        var lastGapLogAt = -1_000L
         try {
             val (_, initial) = buildOutput(targetMs)
             governor = initial
@@ -122,6 +146,7 @@ internal class ReceiverPlayout(
                 pendingConfiguration.getAndSet(null)?.let { (automatic, manual) ->
                     adaptive = automatic
                     targetMs = if (automatic) 20 else manual
+                    retireProgress()
                     releaseOutput()
                     governor = buildOutput(targetMs).second
                     feedingSilence = false
@@ -131,6 +156,14 @@ internal class ReceiverPlayout(
                     RuntimeDiagnostics.event("SOURCE_BUFFER_CONFIG", "source=$id adaptive=$automatic manualMs=$manual")
                 }
                 val now = SystemClock.elapsedRealtime()
+                val loopGap = now - previousLoopAt
+                previousLoopAt = now
+                maxLoopGapMs = maxOf(maxLoopGapMs, loopGap)
+                if (loopGap >= 40 && fifo.bytes() > 0 && now - lastGapLogAt >= 1_000) {
+                    lastGapLogAt = now
+                    RuntimeDiagnostics.event("SOURCE_OUTPUT_LOOP_GAP",
+                        "source=$id gapMs=$loopGap queuedBytes=${fifo.bytes()} thread=${Thread.currentThread().name}")
+                }
                 var drained: PcmDrainPump.Result? = null
                 if (fifo.bytes() > 0) {
                     // Admission can be full while the output is stalled. Check
@@ -187,6 +220,7 @@ internal class ReceiverPlayout(
                     if (decision.rebuild) {
                         check(++rebuilds <= 3) { "PLAYBACK_RECOVERY_LIMIT" }
                         targetMs = governor.targetMs()
+                        retireProgress()
                         releaseOutput()
                         val (_, replacement) = buildOutput(targetMs)
                         governor = replacement; health = PlaybackHealth(adaptive)
@@ -199,11 +233,18 @@ internal class ReceiverPlayout(
                 }
                 targetMs = governor.targetMs()
                 bufferedMs = governor.bufferedMs() + fifo.bytes() * 1000 / (format.sampleRate * frame)
-                playedFrames = operation("HEAD") { (track?.playbackHeadPosition?.toLong() ?: 0L) and 0xffffffffL }
+                playedFrames = operation("HEAD") { retiredPlayedFrames + governor.totalPlayedFrames() }
+                val t = checkNotNull(track)
                 latestSnapshot = Snapshot(targetMs, bufferedMs, governor.bufferedMs(), fifo.bytes(),
-                    fifo.discardedBytes, playedFrames, rebuilds)
+                    fifo.discardedBytes, playedFrames, rebuilds,
+                    retiredNativeDiscardedFrames + governor.nativeDiscardedFrames(),
+                    retiredRecoveries + governor.localRecoveryCount(), outputEpoch,
+                    t.playbackHeadPosition.toLong() and 0xffffffffL, t.underrunCount,
+                    if (Build.VERSION.SDK_INT >= 31) t.startThresholdInFrames else t.bufferSizeInFrames,
+                    maxLoopGapMs, governor.playbackRateHz(), t.playbackRate,
+                    if (Build.VERSION.SDK_INT >= 26) t.performanceMode else -1)
                 if (now - lastLog >= 10_000) {
-                    RuntimeDiagnostics.event("SOURCE_PLAYOUT_STATS", "source=$id targetMs=$targetMs totalBufferedMs=$bufferedMs queueDiscardBytes=${fifo.discardedBytes} rate=${governor.playbackRateHz()}")
+                    RuntimeDiagnostics.event("SOURCE_PLAYOUT_STATS", "source=$id targetMs=$targetMs totalBufferedMs=$bufferedMs queueDiscardBytes=${fifo.discardedBytes} nativeDiscardedFrames=${latestSnapshot.nativeDiscardedFrames} totalPlayedFrames=$playedFrames localRecoveries=${latestSnapshot.localRecoveries} epoch=$outputEpoch rate=${latestSnapshot.rateHz} actualRate=${latestSnapshot.actualRateHz} maxLoopGapMs=$maxLoopGapMs")
                     lastLog = now
                 }
                 when {
@@ -217,9 +258,22 @@ internal class ReceiverPlayout(
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
-            RuntimeDiagnostics.event("SOURCE_OUTPUT_FAILED", "source=$id phase=$phase ${failure.message}", true)
-            onFailure("PLAYBACK_FAILURE ${failure.message}")
+            // stop() deliberately releases on another worker to interrupt a
+            // stuck native call. Its resulting exception is cancellation.
+            if (!stopped && currentCoroutineContext().isActive) {
+                RuntimeDiagnostics.event("SOURCE_OUTPUT_FAILED", "source=$id phase=$phase ${failure.message}", true)
+                onFailure("PLAYBACK_FAILURE ${failure.message}")
+            }
         } finally { releaseOutput() }
+    }
+
+    private fun retireProgress() {
+        // Freeze the old epoch before its final head sample. Its unplayed
+        // tail is loss on replacement, never successful playback progress.
+        operation("RETIRE") { checkNotNull(track).pause() }
+        retiredPlayedFrames += governor.totalPlayedFrames()
+        retiredNativeDiscardedFrames += governor.nativeDiscardedFrames() + governor.bufferedFrames()
+        retiredRecoveries += governor.localRecoveryCount()
     }
 
     private fun releaseOutput() {

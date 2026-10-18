@@ -25,6 +25,7 @@ class AudioSilenceRegressionTest {
         var rateResult = 0
         override var restartPrerollFrames = 0
         var rejectPreroll = false
+        var onPause: () -> Unit = {}
         override fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int): Int {
             writeMode = mode
             if (restartPrerollFrames > 0 && length == restartPrerollFrames * 4) {
@@ -32,7 +33,7 @@ class AudioSilenceRegressionTest {
             }
             return accepted
         }
-        override fun pause() {}
+        override fun pause() = onPause()
         override fun flush() { flushes++; playbackHeadPosition = 0 }
         override fun play() { plays++ }
         override fun setPlaybackRate(rate: Int) = rateResult
@@ -102,8 +103,103 @@ class AudioSilenceRegressionTest {
         repeat(9) { governor.noteWritten(Int.MAX_VALUE / 4 * 4) }
         track.playbackHeadPosition = -1
         val before = governor.bufferedFrames()
+        val playedBefore = governor.totalPlayedFrames()
         track.playbackHeadPosition = 0 // Unsigned 32-bit wrap, not a new track.
         assertEquals(before - 1, governor.bufferedFrames())
+        assertEquals(playedBefore + 1, governor.totalPlayedFrames())
+        assertEquals(0L, governor.resetCount())
+    }
+
+    @Test fun cumulativePlaybackSurvivesRepeatedFlushesWithoutCountingDiscardedPcm() {
+        var now = 0L
+        val track = FakeTrack().apply { accepted = 800 }
+        val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { now }, {})
+        governor.writePcm(ByteArray(800), 0, 800) //200 frames submitted.
+        track.playbackHeadPosition = 100
+        assertEquals(100L, governor.totalPlayedFrames())
+        assertFalse(governor.recoverStalledOutput())
+        // The device may advance between the stall decision and pause. The
+        // final pre-flush sample must retain that progress and only discard75.
+        track.onPause = { track.playbackHeadPosition = 125 }
+        now = 500
+        assertTrue(governor.recoverStalledOutput())
+        assertEquals(125L, governor.totalPlayedFrames())
+        assertEquals(75L, governor.nativeDiscardedFrames())
+        assertEquals(1L, governor.localRecoveryCount())
+        assertEquals(1L, governor.resetCount())
+        assertEquals(0L, governor.bufferedFrames())
+
+        track.onPause = {}
+        track.accepted = 400
+        governor.writePcm(ByteArray(400), 0, 400)
+        track.playbackHeadPosition = 50
+        assertEquals(175L, governor.totalPlayedFrames())
+        assertEquals(50L, governor.bufferedFrames())
+        assertFalse(governor.recoverStalledOutput())
+        now = 1_000
+        assertTrue(governor.recoverStalledOutput())
+        assertEquals(175L, governor.totalPlayedFrames())
+        assertEquals(125L, governor.nativeDiscardedFrames())
+        assertEquals(2L, governor.localRecoveryCount())
+        assertEquals(2L, governor.resetCount())
+
+        track.accepted = 200
+        governor.writePcm(ByteArray(200), 0, 200)
+        track.playbackHeadPosition = 25
+        assertEquals(200L, governor.totalPlayedFrames())
+        assertEquals(25L, governor.bufferedFrames())
+    }
+
+    @Test fun repeatedRecoveryWithoutHeadProgressCannotInventPlayback() {
+        var now = 0L
+        val track = FakeTrack().apply { accepted = 100 }
+        val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { now }, {})
+        governor.writePcm(ByteArray(100), 0, 100)
+        repeat(3) {
+            now += 500
+            assertTrue(governor.recoverStalledOutput())
+            assertEquals(0L, governor.totalPlayedFrames())
+            assertEquals(0L, governor.bufferedFrames())
+            governor.writePcm(ByteArray(100), 0, 100)
+        }
+        assertEquals(75L, governor.nativeDiscardedFrames())
+        assertEquals(3L, governor.localRecoveryCount())
+        assertEquals(3L, governor.resetCount())
+        assertEquals(3, governor.recoveryFailures())
+    }
+
+    @Test fun repeatedOrStaleHeadSamplesDoNotDoubleCountPlayback() {
+        val track = FakeTrack().apply { accepted = 800 }
+        val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { 0L }, {})
+        governor.writePcm(ByteArray(800), 0, 800)
+        track.playbackHeadPosition = 100
+        assertEquals(100L, governor.totalPlayedFrames())
+        track.playbackHeadPosition = 96
+        assertEquals(100L, governor.totalPlayedFrames())
+        track.playbackHeadPosition = 100
+        assertEquals(100L, governor.totalPlayedFrames())
+        track.playbackHeadPosition = 120
+        assertEquals(120L, governor.totalPlayedFrames())
+        assertEquals(0L, governor.nativeDiscardedFrames())
+        assertEquals(0L, governor.resetCount())
+    }
+
+    @Test fun hardResyncKeepsObservedPlaybackAndRecordsOnlyTheUnplayedNativeTail() {
+        var now = 0L
+        val track = FakeTrack().apply { accepted = 48_000 }
+        val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { now }, {})
+        governor.writePcm(ByteArray(48_000), 0, 48_000)
+        track.playbackHeadPosition = 100
+        assertEquals(100L, governor.totalPlayedFrames())
+        repeat(30) { governor.retune() } //A sustained native backlog crosses the resync threshold.
+        track.onPause = { track.playbackHeadPosition = 200 }
+        now = 6_000
+        assertTrue(governor.hardResyncIfNeeded())
+        assertEquals(200L, governor.totalPlayedFrames())
+        assertEquals(11_800L, governor.nativeDiscardedFrames())
+        assertEquals(1L, governor.resetCount())
+        assertEquals(0L, governor.localRecoveryCount())
+        assertEquals(0L, governor.bufferedFrames())
     }
 
     @Test fun deliberateIdleRestoresNominalRateWithoutFlushingAudio() {
@@ -114,6 +210,26 @@ class AudioSilenceRegressionTest {
         governor.retune(activeInput = false)
         assertEquals(48000, governor.playbackRateHz())
         assertEquals(0, track.flushes)
+    }
+
+    @Test fun bothClockCorrectionsStayWithinRateAndPerTuneLimits() {
+        for (high in listOf(false, true)) {
+            val track = FakeTrack().apply { accepted = 48_000 }
+            val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { 0L }, {})
+            if (high) governor.writePcm(ByteArray(48_000), 0, 48_000)
+            var previous = 48_000
+            repeat(100) {
+                governor.retune()
+                val rate = governor.playbackRateHz()
+                assertTrue("Unbounded drift correction: $rate", rate in 47_616..48_384)
+                assertTrue("Abrupt drift correction: $previous -> $rate", kotlin.math.abs(rate - previous) <= 12)
+                previous = rate
+            }
+            assertTrue(if (high) previous > 48_000 else previous < 48_000)
+            governor.retune(activeInput = false)
+            assertEquals(48_000, governor.playbackRateHz())
+            assertEquals(0, track.flushes)
+        }
     }
 
     @Test fun fullAdmissionCannotHideAStalledOutputFromLocalRecovery() {

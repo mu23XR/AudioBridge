@@ -79,7 +79,7 @@ class PlayoutGovernor internal constructor(
         val next = (currentTargetMs + deltaMs).coerceIn(targetFloorMs, targetCeilingMs)
         if (next == currentTargetMs) return false
         currentTargetMs = next
-        RuntimeDiagnostics.event("PLAYOUT_TARGET", "targetMs=$next adaptive=$adaptive")
+        RuntimeDiagnostics.event("PLAYOUT_TARGET", "output=$tag targetMs=$next adaptive=$adaptive")
         targetFrames = (currentTargetMs * framesPerMs).toLong()
         highFrames = targetFrames + (targetFrames / 2).coerceAtLeast((30 * framesPerMs).toLong())
         panicFrames = targetFrames + (180 * framesPerMs).toLong()
@@ -94,6 +94,11 @@ class PlayoutGovernor internal constructor(
     private var lastHeadRaw = 0
     private var headWraps = 0L
     private var baseHead = -1L
+    private var completedEpochPlayedFrames = 0L
+    private var maximumEpochPlayedFrames = 0L
+    private var discardedNativeFrames = 0L
+    private var localRecoveries = 0L
+    private var outputResets = 0L
 
     private var currentRate = sampleRate
     private var avgBufferedFrames = targetFrames.toDouble()
@@ -108,10 +113,23 @@ class PlayoutGovernor internal constructor(
     private var droppedPackets = 0L
     private var resyncs = 0L
     private var lastDiagnosticAt = nowMs()
+    private var lastRateDiagnosticAt: Long? = null
 
     @Synchronized fun recoveryFailures(): Int = failedLocalRecoveries
 
     @Synchronized fun playbackRateHz(): Int = currentRate
+
+    /** Observed playback progress across flushes; submitted or discarded PCM never counts. */
+    @Synchronized fun totalPlayedFrames(): Long {
+        playedFrames()
+        return completedEpochPlayedFrames + maximumEpochPlayedFrames
+    }
+
+    @Synchronized fun nativeDiscardedFrames(): Long = discardedNativeFrames
+
+    @Synchronized fun localRecoveryCount(): Long = localRecoveries
+
+    @Synchronized fun resetCount(): Long = outputResets
 
     /** Never let a paused/full AudioTrack block the UDP receive and PONG loop. */
     @Synchronized fun writePcm(pcm: ByteArray, offset: Int, length: Int,
@@ -149,15 +167,14 @@ class PlayoutGovernor internal constructor(
         } else if (now - lastProgressAt >= 500L) {
             // OEM power management may pause a media track without changing its
             // public playState. Recover only when new PCM needs to be played.
-            track.pause()
-            track.flush()
-            noteReset()
+            val discarded = pauseAndFlush()
+            localRecoveries++
             failedLocalRecoveries++
             primeForRestart()
             track.play()
             lastProgressAt = now
             warn("[PLAYOUT] stalled track recovered; stale PCM flushed")
-            RuntimeDiagnostics.event("PLAYOUT_LOCAL_RECOVERY", "failures=$failedLocalRecoveries")
+            RuntimeDiagnostics.event("PLAYOUT_LOCAL_RECOVERY", "output=$tag failures=$failedLocalRecoveries count=$localRecoveries discardedFrames=$discarded totalDiscardedFrames=$discardedNativeFrames totalPlayedFrames=${totalPlayedFrames()}")
             return true
         }
         return false
@@ -168,13 +185,13 @@ class PlayoutGovernor internal constructor(
         // capacity; modern tracks expose the actual (possibly restored) threshold.
         // This is exceptional restart work, never a recurring queue allowance.
         val count = Math.multiplyExact(track.restartPrerollFrames, frameSize)
+        playedFrames() //Establish the post-flush origin before play can advance it.
         if (count == 0) return
         check(count > 0) { "Invalid restart preroll: $count" }
-        playedFrames() //Establish the post-flush origin before play can advance it.
         val written = track.write(ByteArray(count), 0, count, AudioTrack.WRITE_NON_BLOCKING)
         check(written == count) { "AudioTrack restart priming failed: $written/$count" }
         noteWritten(written)
-        RuntimeDiagnostics.event("PLAYOUT_RESTART_PRIME", "frames=${count / frameSize}")
+        RuntimeDiagnostics.event("PLAYOUT_RESTART_PRIME", "output=$tag frames=${count / frameSize}")
     }
 
     private fun playedFrames(): Long {
@@ -185,7 +202,9 @@ class PlayoutGovernor internal constructor(
         lastHeadRaw = raw
         val abs = unsigned + (headWraps shl 32)
         if (baseHead < 0L) baseHead = abs
-        return abs - baseHead
+        val epochFrames = abs - baseHead
+        maximumEpochPlayedFrames = maxOf(maximumEpochPlayedFrames, epochFrames)
+        return epochFrames
     }
 
     @Synchronized fun bufferedFrames(): Long = (framesWritten - playedFrames()).coerceAtLeast(0L)
@@ -214,6 +233,11 @@ class PlayoutGovernor internal constructor(
 
     @Synchronized fun noteReset() {
         // flush() resets the playback head; establish a fresh accounting origin.
+        // The caller samples after pause and before flush so the final progress
+        // is preserved without pretending the remaining native buffer played.
+        completedEpochPlayedFrames += maximumEpochPlayedFrames
+        maximumEpochPlayedFrames = 0L
+        outputResets++
         lastHeadRaw = 0
         headWraps = 0L
         baseHead = -1L
@@ -222,6 +246,15 @@ class PlayoutGovernor internal constructor(
         lastProgressAt = nowMs()
         avgBufferedFrames = targetFrames.toDouble()
         onDiscontinuity()
+    }
+
+    private fun pauseAndFlush(): Long {
+        track.pause()
+        val discarded = bufferedFrames()
+        track.flush()
+        discardedNativeFrames += discarded
+        noteReset()
+        return discarded
     }
 
     @Synchronized fun shouldDrop(incomingBytes: Int): Boolean {
@@ -244,14 +277,12 @@ class PlayoutGovernor internal constructor(
         val now = nowMs()
         if (now - lastResyncAt < 5000L) return false
         lastResyncAt = now
-        track.pause()
-        track.flush()
-        noteReset()
+        val discarded = pauseAndFlush()
         primeForRestart()
         track.play()
         resyncs++
-        RuntimeDiagnostics.event("PLAYOUT_RESYNC", "bufferedMs=${(buffered / framesPerMs).toInt()} count=$resyncs")
-        Log.w(tag, "[PLAYOUT] resync: buffered ${(buffered / framesPerMs).toInt()}ms over budget, buffer flushed")
+        RuntimeDiagnostics.event("PLAYOUT_RESYNC", "output=$tag bufferedMs=${(buffered / framesPerMs).toInt()} count=$resyncs discardedFrames=$discarded totalDiscardedFrames=$discardedNativeFrames totalPlayedFrames=${totalPlayedFrames()}")
+        warn("[PLAYOUT] resync: buffered ${(buffered / framesPerMs).toInt()}ms over budget, buffer flushed")
         return true
     }
 
@@ -272,12 +303,17 @@ class PlayoutGovernor internal constructor(
                 lastLogAt = nowMs()
                 warn("[PLAYOUT] rate adjustment rejected: code=$result requested=$newRate actual=$currentRate")
             }
+            val now = nowMs()
+            if (lastRateDiagnosticAt?.let { now - it >= 10_000 } != false) {
+                lastRateDiagnosticAt = now
+                RuntimeDiagnostics.event("PLAYOUT_RATE", "output=$tag code=$result requested=$newRate acceptedRate=$currentRate")
+            }
         }
         val now = nowMs()
         val monotonicNow = nowMs()
         if (monotonicNow - lastDiagnosticAt >= 10_000L) {
             lastDiagnosticAt = monotonicNow
-            RuntimeDiagnostics.event("PLAYOUT_STATS", "bufferedMs=${(buffered / framesPerMs).toInt()} targetMs=$currentTargetMs rate=$currentRate underruns=${track.underruns} writtenFrames=$framesWritten head=${playedFrames()} shortWrites=$shortWrites droppedPackets=$droppedPackets resyncs=$resyncs recoveryFailures=$failedLocalRecoveries")
+            RuntimeDiagnostics.event("PLAYOUT_STATS", "output=$tag bufferedMs=${(buffered / framesPerMs).toInt()} targetMs=$currentTargetMs rate=$currentRate underruns=${track.underruns} writtenFrames=$framesWritten head=${playedFrames()} totalPlayedFrames=${totalPlayedFrames()} nativeDiscardedFrames=$discardedNativeFrames resets=$outputResets shortWrites=$shortWrites droppedPackets=$droppedPackets resyncs=$resyncs localRecoveries=$localRecoveries recoveryFailures=$failedLocalRecoveries")
         }
         if (now - lastLogAt > 10_000L) {
             lastLogAt = now

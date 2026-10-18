@@ -88,6 +88,8 @@ AudioSilenceRegressionTest covers a frozen full output independently of write
 admission, one-time startup-threshold priming after a flush, and explicit failure
 of incomplete priming. CuePlaybackLifetimeTest covers owned player lifetime,
 completion/error/timeout races and late creation using fake players/timers.
+The governor regressions also cover cumulative progress through repeated flushes,
+32-bit wrap/stale samples, native-tail loss, and bounded two-way clock correction.
 
 ReceiverPlayoutDeviceTest requires a guarded debug emulator and explicit
 allowPlayoutFixture=true. Preserve the existing immediate-resume90% progress and
@@ -97,6 +99,26 @@ configured target, without rebuild/adaptive inflation, then measures returning
 PCM immediately. Zero-filled output frames count in head/output-written counters;
 they are not evidence that source PCM arrived. Actual sounds/capture/overnight
 OEM behavior are separate acceptance work.
+
+Fixed manual20ms has matching sole-output silence/resume coverage. Native clock
+correction must be read back from AudioTrack.playbackRate, not inferred solely
+from the governor's requested value. Apply the unchanged100ms discard allowance
+to software drops plus flushed native frames. Playback head totals remain
+monotonic across output epochs, without counting dropped/submitted audio as
+played. Normal stop must release outputs without reporting a playback failure.
+Record whether each emulator run begins from a cold audio sink; a hot retry
+cannot silently replace a failing cold-start report. A normal rate-adjustable
+track may change system mixer latency compared with FAST, so application queue
+bounds do not establish equal acoustic latency.
+
+The reusable `android-native.yml` check builds clean committed debug sources and
+runs the same11-method contract on its own API35 x86_64 SDK emulator. It retains
+a clocked PulseAudio null sink (audio enabled), rejects pre-existing devices,
+validates emulator/package/source identity, counts starts/completions/skips and
+uploads failure diagnostics as well as successful ones. It uses no signing
+secrets, publishes no APK, and never substitutes a different emulator's pass for
+a recorded MuMu failure. `scripts/run_android_native.py` refuses local/non-CI
+execution so it cannot accidentally select a user's wireless-debugging device.
 
 Do not target physical devices or MuMu instance1. This task owns only the named
 MuMu instance2, AudioBridge-test21; never restart shared ADB servers. Missing

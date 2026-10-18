@@ -1,10 +1,11 @@
 # test21 review corrections — 2026-10-18
 
-Status: implementation complete; final135 JVM and15 Python tests pass, zero-error
-lint/debug/helper builds pass. Full native acceptance waits for a resource-isolated
-investigation of the remaining adaptive20ms failure; no11/11claim. Owner: Codex,
-branch fix/android-multisource-recovery, existing Draft PR40. Related Issues5,
-14,45,50,51; review: docs/handoffs/2026-10-18-test21-code-review.md.
+Status: continued repair/validation in progress; final local140 JVM and15 Python
+tests pass, zero-error lint/debug/helper builds pass. Latest MuMu native9/12 is
+not acceptance; standard SDK-emulator CI is being added without weakening the
+old bounds. Owner: Codex, branch fix/android-multisource-recovery, existing Draft
+PR40. Related Issues5,14,45,50,51,52,53; review:
+docs/handoffs/2026-10-18-test21-code-review.md.
 
 ## Authorization and boundaries
 
@@ -143,3 +144,76 @@ AudioTrack head/timestamp/start-threshold/operation-duration evidence around the
 initial adaptive stall, distinguishing counter resets from FIFO/native output
 loss. Repeat the unchanged focused test, then the full suite after any actual fix.
 Keep Issues5/14/50/51/52 open; CI success is not a native-quality acceptance.
+
+## Resumed adaptive investigation (2026-10-18)
+
+User explicitly asks to continue repair. Root claims the remaining adaptive20ms
+acceptance failure in this work item and Issues5/51. Static review confirms raw
+AudioTrack head subtraction is invalid across local flush/rebuild; cumulative
+observed progress and explicit reset/loss evidence must remain distinct. This
+cannot explain away the serial run's48128B software discard. Before tuning,
+retrieve existing private debug journals and correlate rate changes, recovery,
+startup/head and queue loss. Keep all acceptance thresholds and targets unchanged.
+Only dedicated emulator2 may be used after coordinating its resource window;
+physical devices, instance1 and the shared ADB server remain untouched. Preserve
+all pending VPN changes. No Release, promotion, merge or issue closure.
+
+Existing journal retrieval succeeded using debug run-as (private ignored journal-
+20261018-163800). Bad serial/focused phases have no local recovery or rebuild;
+raw-head resets are an independent real measurement defect, not the explanation
+for these losses. Fresh unchanged-source focused run163820 fails130048/144864
+frames and58880B discard, producer max lag17.889ms. Native FAST output creation
+succeeds; rate attempts return-3 (rejected), with no evidence of recreation.
+Implementation adds cumulative observed progress across flushes/replacements,
+separate native-loss/recovery/epoch counters, and rate-limited >40ms operation/
+loop-gap diagnostics plus actual start-threshold/head/underrun snapshots. Four
+new JVM regressions cover reset/wrap/stale readings and lost-tail accounting.
+Native/software discard assertions and configured targets remain independent.
+Compiling with own2 closed; dedicated2 journal access was the only device action.
+
+Diagnostic baseline164551 (new counters, same FAST playback policy) reproduces
+128512/144432frames and nativeDiscardedFrames=0/localRecoveries=0/epoch1. No
+post-build loop gap or output operation reached40ms while the head stalled;
+actual threshold stayed480 and native admission35ms. This excludes local reset
+and a >40ms application scheduling gap for this observed interval. FastMixer
+postdump reports512-frame period, measuredWarmup23.4ms/10cycles and57underruns/
+59overruns; these do not alone prove the host HAL's exact blocked duration.
+A separate confirmed issue is FAST rejecting every rate change with-3, so actual
+clock-drift correction never executes. A/B candidate uses a normal rate-adjustable
+track, retaining the same20ms target,10ms start threshold and35ms native admission.
+No producer/progress/discard threshold changes or startup warmup are allowed.
+
+Normal-track cold A/B165017 now accepts rate changes (48012..48156), fixing the
+FAST/control incompatibility tracked separately in Issue53. It still fails initial
+129795/144432frames and48744B discard; no local reset, post-build >40ms loop gap
+or threshold change. Adaptive legitimately moves20→30 after two shortage samples.
+Do not attribute the cold-output stall to FAST alone or call this a full fix.
+Final regressions now also cover fixed manual20, read back AudioTrack.playbackRate
+rather than internal success only, and count flushed native loss under the same
+100ms discard cap. Normal cancellation no longer reports the interrupted native
+operation as an active playback failure. Rate events carry output identity and
+are limited to one per10s; operation/loop warnings are limited to one per1s.
+
+Final local JVM140/25suites,15 tool tests and zero-error lint (231warnings,
+20hints) pass; debug/helper builds pass. Dedicated2 temporarily used4CPU instead
+of2, RAM unchanged, then was shut down and restored to2CPU. Cold focused170034
+still fails125404/144528frames; head/reset evidence excludes counter reset, and
+actualRateHz equals requested accepted values. Source-ready minBytes12312 on
+this emulator is about64ms, larger than35ms admission; this suggests platform
+quantum/minimum-output limitations but is not license to raise user targets.
+Full native run (12 methods including one separately pending VPN fixture) has
+9passes/3failures: adaptive initial loss;35s-resume21408B exceeds unchanged19200B;
+manual45 producer126ms stall invalidates that phase. Fixedmanual20 did pass with
+native rate readback; do not describe the entire suite as passing. A separate
+second-source assertion now also includes native flush loss under the old cap.
+The normal-output candidate remains under validation, not ready for promotion.
+
+To isolate the platform, add a reusable standard Android35 x86_64 GitHub-emulator
+native check in PR40 (debug/no secrets/no APK publication). It must retain the
+same input, silence, progress and loss assertions and reject skips; the clean
+committed suite has11methods, the local pending VPN fixture adds one. Compare
+cold/hot state honestly, save instrumentation and system output evidence, and
+keep the MuMu failures visible even if a different emulator succeeds. No instance1
+or physical-device action. Issue53 tracks the newly identified clock-control
+incompatibility separately from initial stalls. Next: verify source/workflow,
+push scoped commit, inspect actual native CI result before candidate claims.

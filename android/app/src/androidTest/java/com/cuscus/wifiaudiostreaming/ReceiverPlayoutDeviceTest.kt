@@ -57,10 +57,13 @@ class ReceiverPlayoutDeviceTest {
             val secondAtTwo = second.playedFrames
             val firstDiscardAtTwo = first.snapshot().discardedBytes
             val secondDiscardAtTwo = second.snapshot().discardedBytes
+            val secondNativeDiscardAtTwo = second.snapshot().nativeDiscardedFrames
             val both = observe(first, firstInput, 6_000, second, secondInput, "manual45-and73")
             assertSustained("first of two sources", both)
             assertProgress("second source", second.playedFrames - secondAtTwo, both.elapsedMs)
-            assertDiscardBound("second source", second.snapshot().discardedBytes - secondDiscardAtTwo)
+            val secondEnd = second.snapshot()
+            assertDiscardBound("second source", secondEnd.discardedBytes - secondDiscardAtTwo +
+                (secondEnd.nativeDiscardedFrames - secondNativeDiscardAtTwo) * FRAME_BYTES)
             assertTrue("first source stopped when another output was added", first.playedFrames > firstAtTwo)
             assertDiscardBound("first of two sources", first.snapshot().discardedBytes - firstDiscardAtTwo)
             assertEquals("adding a source changed the first target", 45, first.targetMs)
@@ -93,6 +96,11 @@ class ReceiverPlayoutDeviceTest {
         soleOutputSilenceAndResume(adaptive = false, targetMs = 45)
     }
 
+    @Test fun minimumManualTargetKeepsClockCorrectionAndSilenceResume() = runBlocking {
+        requireEmulatorWindow()
+        soleOutputSilenceAndResume(adaptive = false, targetMs = 20)
+    }
+
     private suspend fun soleOutputSilenceAndResume(adaptive: Boolean, targetMs: Int) {
         val mode = if (adaptive) "adaptive" else "manual$targetMs"
         val output = player("sole-$mode-silence", adaptive, targetMs)
@@ -101,8 +109,9 @@ class ReceiverPlayoutDeviceTest {
         try {
             input.resume()
             await("$mode output starts", input) { player.playedFrames > 2_400 }
-            assertSustained("$mode before silence",
-                observe(player, input, 3_000, label = "$mode-sole-before-silence"))
+            val initial = observe(player, input, 3_000, label = "$mode-sole-before-silence")
+            assertSustained("$mode before silence", initial)
+            assertTrue("$mode output never applied native clock correction: $initial", initial.rateCorrectionApplied)
             input.pauseAndAwait()
             player.noteSilence()
             val before = player.snapshot()
@@ -166,7 +175,8 @@ class ReceiverPlayoutDeviceTest {
         return Output(id, player)
     }
 
-    private data class Observation(val elapsedMs: Long, val frames: Long, val discardedBytes: Long)
+    private data class Observation(val elapsedMs: Long, val frames: Long, val discardedBytes: Long,
+                                   val nativeDiscardedFrames: Long, val rateCorrectionApplied: Boolean)
 
     private fun observe(player: ReceiverPlayout, input: PacedPcm, durationMs: Long,
                         other: ReceiverPlayout? = null, otherInput: PacedPcm? = null,
@@ -178,12 +188,15 @@ class ReceiverPlayoutDeviceTest {
         Log.i("PLAYOUT_FIXTURE", "phase=$label START wallMs=$beginWall elapsedMs=$begin durationMs=$durationMs player=$start producer=$inputStart otherPlayer=${other?.snapshot()} otherProducer=${otherInput?.snapshot()}")
         var maximumBufferedMs = 0
         var maximumQueuedBytes = 0
+        var rateCorrectionApplied = false
         var lastDiagnosticAt = begin
         while (SystemClock.elapsedRealtime() - begin < durationMs) {
             checkHealthy(input, otherInput)
             assertBufferBound(player)
             other?.let(::assertBufferBound)
             player.snapshot().let {
+                rateCorrectionApplied = rateCorrectionApplied ||
+                    (it.rateHz != RATE && it.actualRateHz == it.rateHz)
                 maximumBufferedMs = maxOf(maximumBufferedMs, it.totalBufferedMs)
                 maximumQueuedBytes = maxOf(maximumQueuedBytes, it.queuedBytes)
             }
@@ -197,7 +210,8 @@ class ReceiverPlayoutDeviceTest {
         checkHealthy(input, otherInput)
         val end = player.snapshot()
         val observed = Observation(SystemClock.elapsedRealtime() - begin,
-            end.playedFrames - start.playedFrames, end.discardedBytes - start.discardedBytes)
+            end.playedFrames - start.playedFrames, end.discardedBytes - start.discardedBytes,
+            end.nativeDiscardedFrames - start.nativeDiscardedFrames, rateCorrectionApplied)
         Log.i("PLAYOUT_FIXTURE", "phase=$label END wallMs=${System.currentTimeMillis()} $observed producedPackets=${input.snapshot().producedPackets - inputStart.producedPackets} maxBufferedMs=$maximumBufferedMs maxQueuedBytes=$maximumQueuedBytes end=$end producer=${input.snapshot()} otherPlayer=${other?.snapshot()} otherProducer=${otherInput?.snapshot()}")
         return observed
     }
@@ -214,7 +228,9 @@ class ReceiverPlayoutDeviceTest {
 
     private fun assertSustained(label: String, observation: Observation) {
         assertProgress(label, observation.frames, observation.elapsedMs)
-        assertDiscardBound(label, observation.discardedBytes)
+        // A local native flush must not hide audio loss behind monotonic head
+        // accounting. Apply the existing bound to software and native loss.
+        assertDiscardBound(label, observation.discardedBytes + observation.nativeDiscardedFrames * FRAME_BYTES)
     }
 
     private fun assertProgress(label: String, frames: Long, elapsedMs: Long) {
@@ -257,6 +273,7 @@ class ReceiverPlayoutDeviceTest {
         assertTrue("PCM producer cleanup timed out", producersStopped.all { it })
         assertTrue("AudioTrack cleanup timed out", outputsStopped.all { it })
         assertTrue("released source still registered", outputs.none { ReceiverMixer.hasOutput(it.id) })
+        assertTrue("Normal output cancellation reported a failure: $failures", failures.isEmpty())
     }
 
     /** Six 64-frame packets per 8 ms, paced against elapsed time rather than repeated sleeps. */

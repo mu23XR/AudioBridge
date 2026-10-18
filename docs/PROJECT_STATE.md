@@ -4,23 +4,23 @@ Last governance refresh: 2026-09-29
 
 ## Android multi-source receiver and runtime recovery
 
-2026-10-18 test21 review corrections: queue cleanup now samples after draining,
-triggers below the hard FIFO capacity and returns retained bytes; intentional
-silence refills at most10ms at a time inside the native target; full admission no
-longer suppresses local stall recovery, whose reset/restart is explicitly primed
-and counted. Connection cue instances are strongly owned through completion/error/
-timeout. Local135 JVM and15 artifact-tool tests pass, lint0errors and debug/helper
-builds pass; independent source review is clear. Exact e45a7f6 also passes Android,
-Windows, governance and signed artifact-only test21 CI (no publication). Native
-runs remain incomplete:9/11 and8/11 hit producer scheduling guards; a subsequent
-serial10/11 run instead fails actual adaptive20ms before-silence discard48128B,
-and a focused follow-up fails progress. This is not a producer-only invalidation;
-adaptive acceptance remains open pending journal/head/reset correlation with
-adequate host resources (0.01–0.53GiB available observed). Dedicated2 is closed;
-no1/global-ADB/physical-device action, Release publication or Issue closure.
-Old local test21 bundle is explicitly unverified; clean-source immutable bundle
-checks prevent repeating its source/version/hash mismatch. Separate pending VPN
-edits stay preserved. See docs/work-items/android-test21-review-repair.md.
+2026-10-18 test21 review corrections: queue/silence/recovery/cue/provenance
+corrections remain in Draft PR40. Follow-up fixes cumulative observed playback
+across flush/replacement, separates native tail loss from progress, records short
+output/loop stalls and actual native mode/rate, and prevents normal stop from
+reporting an interrupted call as playback failure. FAST rejects drift-rate changes
+(Issue53); a normal rate-adjustable output candidate is under validation with the
+same20ms adaptive target/admission policy. Local140 JVM (130 committed +10 pending
+VPN),15 tool tests, zero-error lint/debug/helper builds pass. MuMu acceptance still
+fails: latest9/12 includes adaptive initial loss,35s-resume21408B over the old cap,
+and one126ms producer gap; fixedmanual20 passes.4CPU did not remove the failure.
+Own2 is closed/restored2CPU; no1/global-ADB/physical-device action. A reusable
+standard Android35 SDK-emulator CI check retains all thresholds, zero-skip counts
+and diagnostics for cross-platform investigation. It is pending, not a pass.
+Prior exact e45a7f6 Android/Windows/governance/signed artifact-only CI passed; no
+Release was published. Old local test21 bundle remains unverified; clean-source
+bundle checks prevent relabeling. Keep runtime Issues5/14/51/53 open and preserve
+separate pending VPN changes. See docs/work-items/android-test21-review-repair.md.
 
 2026-10-15 repair execution: user authorized the focused test20 playback/cue repair and requires emulator-only validation, with no physical-device connections or changes. Bounded batch scheduling, total-backlog disposal separated from clock correction, explicit-silence continuity/health and generation-bound connection cues are implemented locally.106 JVM tests, debug/helper builds and zero-error lint pass; independent review is clear after correcting the empty-FIFO debounce edge. MuMu native fixtures/CI delivery are pending; an offline emulator stopped the first native attempt before installs/tests. See docs/work-items/android-test21-playout.md. No stable promotion or runtime issue closure.
 

@@ -1,0 +1,96 @@
+name: Validate Android Native Audio
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "android/**"
+      - "scripts/run_android_native.py"
+      - ".github/workflows/android-native.yml"
+  push:
+    branches: [ "main" ]
+    paths:
+      - "android/**"
+      - "scripts/run_android_native.py"
+      - ".github/workflows/android-native.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      # A clocked null sink retains the audio path without a physical speaker.
+      # Disabling emulator audio would invalidate AudioTrack progress checks.
+      QEMU_AUDIO_DRV: pa
+      PULSE_SINK: audiobridge_native
+    steps:
+      - name: Checkout exact tested source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install SDK and create isolated API 35 emulator
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "emulator" "system-images;android-35;google_apis;x86_64"
+          printf 'no\n' | avdmanager create avd --force --name AudioBridge-native --package "system-images;android-35;google_apis;x86_64"
+          test -c /dev/kvm
+          sudo chmod 0666 /dev/kvm
+          "$ANDROID_HOME/emulator/emulator" -accel-check
+
+      - name: Start clocked PulseAudio null output
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=audiobridge_native rate=48000 channels=2
+          pactl set-default-sink audiobridge_native
+          pactl set-default-source audiobridge_native.monitor
+          pactl info
+          pactl list short sinks
+
+      - name: Build debug application and instrumentation only
+        working-directory: android
+        run: |
+          set -euo pipefail
+          bash gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process --stacktrace
+
+      - name: Run strict native acceptance and retain failure evidence
+        run: |
+          python3 scripts/run_android_native.py \
+            --source-commit "$GITHUB_SHA" \
+            --emulator "$ANDROID_HOME/emulator/emulator" \
+            --adb "$ANDROID_HOME/platform-tools/adb" \
+            --aapt2 "$ANDROID_HOME/build-tools/36.0.0/aapt2"
+
+      - name: Upload native diagnostics (no APK publication)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-native-api35-${{ github.sha }}-${{ github.run_attempt }}
+          path: out/android-native/
+          if-no-files-found: warn
+          retention-days: 14
