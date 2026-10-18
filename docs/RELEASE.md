@@ -65,6 +65,25 @@ with `publish: false`.
 
 ## Rollback
 
+### Local preview consistency
+
+Local acceptance APKs are explicitly unpublished; they do not replace CI releases.
+Use `scripts/preview_bundle.py --help` for the record-build, bundle and verify
+commands. record-build requires a clean exact source SHA, a previously absent
+APK output and a real successful build; it checks the tree again afterwards and
+reads the actual APK package/version/public signer. Existing signing environment
+variables remain private and are never saved in the receipt. bundle creates a
+fresh directory atomically, including the APK, build receipt, SOURCE_COMMIT,
+verification manifest and checksums. verify cross-checks every file and actual
+APK identity. This is a local consistency record, not a CI attestation.
+
+Do not relabel an existing binary with the current HEAD. If its provenance is
+unknown, preserve it as historical/unverified and rebuild from an isolated clean
+source. In particular the old out/verified-test21-release directory has a newer
+APK alongside older verification/source metadata; its UNVERIFIED.txt invalidates
+use as a verified candidate. Its original files stay preserved. Pending unrelated
+working-tree edits must not be committed merely to make a build appear clean.
+
 Do not delete previous stable Releases merely because a new release is bad. Publish a corrected higher version instead, or clearly mark the affected release as withdrawn.
 
 ## Release checklist
