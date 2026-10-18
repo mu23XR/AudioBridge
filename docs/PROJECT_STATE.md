@@ -4,6 +4,20 @@ Last governance refresh: 2026-09-29
 
 ## Android multi-source receiver and runtime recovery
 
+2026-10-18 test21 review corrections: queue cleanup now samples after draining,
+triggers below the hard FIFO capacity and returns retained bytes; intentional
+silence refills at most10ms at a time inside the native target; full admission no
+longer suppresses local stall recovery, whose reset/restart is explicitly primed
+and counted. Connection cue instances are strongly owned through completion/error/
+timeout. Local135 JVM and15 artifact-tool tests pass, lint0errors and debug/helper
+builds pass; independent source review is clear. Native runs remain incomplete
+(9/11 then8/11, all failed methods hit the producer's >80ms scheduler guard under
+0.5–0.6GiB available host memory). Dedicated2 is closed for serial coordination;
+no1/global-ADB/physical-device action, Release publication or Issue closure.
+Old local test21 bundle is explicitly unverified; clean-source immutable bundle
+checks prevent repeating its source/version/hash mismatch. Separate pending VPN
+edits stay preserved. See docs/work-items/android-test21-review-repair.md.
+
 2026-10-15 repair execution: user authorized the focused test20 playback/cue repair and requires emulator-only validation, with no physical-device connections or changes. Bounded batch scheduling, total-backlog disposal separated from clock correction, explicit-silence continuity/health and generation-bound connection cues are implemented locally.106 JVM tests, debug/helper builds and zero-error lint pass; independent review is clear after correcting the empty-FIFO debounce edge. MuMu native fixtures/CI delivery are pending; an offline emulator stopped the first native attempt before installs/tests. See docs/work-items/android-test21-playout.md. No stable promotion or runtime issue closure.
 
 2026-10-15 acceptance follow-up: user confirms test20 and reports higher latency, more stutter/pops and absent connection sound. Treat playback acceptance as failed, not completed by CI/native fixtures. Read-only comparison finds a single-chunk-per-2ms consumer bottleneck and a separate software FIFO omitted from governor feedback, both introduced in test19 and retained in test20; these are confirmed implementation risks, not a proven explanation of this incident. All sources use the unified receiver, but the mixer adds no common buffer/wait barrier. A connected source's announcement flag is not reset on explicit reconnect, which can suppress its cue. No physical devices were reachable through available cached/discovered endpoints this turn, so active source count, settings and real buffer/underrun evidence remain unknown. User confirmation supersedes the earlier pre-installation checkpoint below; installation was not independently queried this turn. No product/device/external-state changes. See docs/handoffs/2026-10-15-test20-playout-regression.md and the active test20 work item; Draft PR #40 and runtime issues remain open.

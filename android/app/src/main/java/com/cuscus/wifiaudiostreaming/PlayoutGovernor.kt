@@ -12,6 +12,7 @@
 package com.cuscus.wifiaudiostreaming
 
 import android.media.AudioTrack
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
@@ -30,6 +31,7 @@ class PlayoutGovernor internal constructor(
     internal interface Output {
         val playbackHeadPosition: Int
         val underruns: Int get() = 0
+        val restartPrerollFrames: Int get() = 0
         fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int): Int
         fun pause()
         fun flush()
@@ -44,6 +46,8 @@ class PlayoutGovernor internal constructor(
         object : Output {
             override val playbackHeadPosition get() = track.playbackHeadPosition
             override val underruns get() = track.underrunCount
+            override val restartPrerollFrames get() =
+                if (Build.VERSION.SDK_INT >= 31) track.startThresholdInFrames else track.bufferSizeInFrames
             override fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int) =
                 track.write(pcm, offset, length, mode)
             override fun pause() = track.pause()
@@ -111,27 +115,12 @@ class PlayoutGovernor internal constructor(
 
     /** Never let a paused/full AudioTrack block the UDP receive and PONG loop. */
     @Synchronized fun writePcm(pcm: ByteArray, offset: Int, length: Int,
+                               recoverStall: Boolean = true,
                                beforeWrite: (() -> Unit)? = null): Int {
-        val head = playedFrames()
         val now = nowMs()
         if (now - lastWriteAt > 3000) failedLocalRecoveries = 0
         lastWriteAt = now
-        if (lastProgressHead >= 0 && head > lastProgressHead) failedLocalRecoveries = 0
-        if (head != lastProgressHead || bufferedFrames() == 0L) {
-            lastProgressHead = head
-            lastProgressAt = now
-        } else if (now - lastProgressAt >= 500L) {
-            // OEM power management may pause a media track without changing its
-            // public playState. Recover only when new PCM needs to be played.
-            track.pause()
-            track.flush()
-            noteReset()
-            failedLocalRecoveries++
-            track.play()
-            lastProgressAt = now
-            warn("[PLAYOUT] stalled track recovered; stale PCM flushed")
-            RuntimeDiagnostics.event("PLAYOUT_LOCAL_RECOVERY", "failures=$failedLocalRecoveries")
-        }
+        if (recoverStall) recoverStalledOutput()
         // A local flush can restart the caller's fade. Prepare PCM only after
         // that recovery so this very first write crosses the boundary softly.
         beforeWrite?.invoke()
@@ -147,6 +136,45 @@ class PlayoutGovernor internal constructor(
             warn("[PLAYOUT] buffer full: accepted=$written pending=${length - written}")
         }
         return written
+    }
+
+    /** May run even when normal write admission is full; call only for pending real PCM. */
+    @Synchronized fun recoverStalledOutput(): Boolean {
+        val head = playedFrames()
+        val now = nowMs()
+        if (lastProgressHead >= 0 && head > lastProgressHead) failedLocalRecoveries = 0
+        if (head != lastProgressHead || bufferedFrames() == 0L) {
+            lastProgressHead = head
+            lastProgressAt = now
+        } else if (now - lastProgressAt >= 500L) {
+            // OEM power management may pause a media track without changing its
+            // public playState. Recover only when new PCM needs to be played.
+            track.pause()
+            track.flush()
+            noteReset()
+            failedLocalRecoveries++
+            primeForRestart()
+            track.play()
+            lastProgressAt = now
+            warn("[PLAYOUT] stalled track recovered; stale PCM flushed")
+            RuntimeDiagnostics.event("PLAYOUT_LOCAL_RECOVERY", "failures=$failedLocalRecoveries")
+            return true
+        }
+        return false
+    }
+
+    private fun primeForRestart() {
+        // A flush erases startup priming. Legacy tracks can require their full
+        // capacity; modern tracks expose the actual (possibly restored) threshold.
+        // This is exceptional restart work, never a recurring queue allowance.
+        val count = Math.multiplyExact(track.restartPrerollFrames, frameSize)
+        if (count == 0) return
+        check(count > 0) { "Invalid restart preroll: $count" }
+        playedFrames() //Establish the post-flush origin before play can advance it.
+        val written = track.write(ByteArray(count), 0, count, AudioTrack.WRITE_NON_BLOCKING)
+        check(written == count) { "AudioTrack restart priming failed: $written/$count" }
+        noteWritten(written)
+        RuntimeDiagnostics.event("PLAYOUT_RESTART_PRIME", "frames=${count / frameSize}")
     }
 
     private fun playedFrames(): Long {
@@ -219,6 +247,7 @@ class PlayoutGovernor internal constructor(
         track.pause()
         track.flush()
         noteReset()
+        primeForRestart()
         track.play()
         resyncs++
         RuntimeDiagnostics.event("PLAYOUT_RESYNC", "bufferedMs=${(buffered / framesPerMs).toInt()} count=$resyncs")

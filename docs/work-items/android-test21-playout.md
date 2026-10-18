@@ -1,6 +1,11 @@
 # Android test21: low-latency playout and connection cues
 
-Status: local implementation and native emulator validation complete; 108 JVM tests, debug/helper builds and zero-error lint passed. The nine-method native suite passes on MuMu instance2 (`out/test21-emulator/20261016-041524`). CI preview delivery is pending. Branch fix/android-multisource-recovery, Draft PR #40; existing Issues #5/#14/#37/#45 and focused cue Issue #50 remain open.
+Status: original candidate passed108 JVM tests and nine native methods, but the
+2026-10-18 review invalidated its claimed queue-cleanup/continuous-idle mechanisms
+and found inconsistent local APK provenance. Authorized corrections and current
+validation: docs/work-items/android-test21-review-repair.md. CI preview delivery
+is still pending. Branch fix/android-multisource-recovery, Draft PR40; runtime
+Issues remain open. Historical implementation/results below are retained as such.
 
 ## Scope and authorization
 
@@ -33,5 +38,15 @@ Follow-up repair, first iteration (superseded, retained as history): worker-owne
 Third isolated run (owned instance2, same nine methods) is recorded at `out/test21-emulator/20261016-041524`: `OK (9 tests)` with `Time: 59.475` on `ro.product.cpu.abi=x86_64`, so all nine applicable methods pass and the two prior failures (`intentionalSilenceDoesNotRaiseAdaptiveTargetOrRebuildOutput`, `soleManualOutputResumesAfterIntentionalSilenceWithoutDiscardStorm`) now meet their unchanged discard bounds. A second full run against the final source, `out/test21-emulator/20261016-041916`, reproduces `OK (9 tests)`. The repaired idle path no longer pauses the drained track. Discard during the earlier failing runs was traced entirely to `PcmQueue.offer` capacity overflow, not to `SOURCE_BACKLOG_TRIM`, so the trim budget was not the cause. Two intermediate attempts were measured and rejected: widening the drain batch to the ceiling plus max target raised adaptive discard to39360B, and leaving the FIFO-trim discontinuity flag set let the fade limit drain admission and refill the queue. Evidence: `out/test21-emulator/fix-run1..fix-run5/`. Three landed changes are what actually turned the suite green: the drained idle path feeds zero PCM on the same track instead of pausing it, `PcmQueue.trimTo` no longer signals discontinuity, and the100ms excess debounce is gone (250ms cooldown retained) so an over-budget queue is trimmed before `offer` starts dropping its oldest audio.
 
 ## Delivery
+
+2026-10-18 read-only review checkpoint: local native9/9 evidence is genuine, but
+queue trimming is unreachable under the FIFO's actual hard bound, its hypothetical
+retention result is inverted, and the idle path feeds zeros only once despite the
+continuous-keepalive explanation. The current local APK also differs in versionCode
+and hash from verification.json/SOURCE_COMMIT provenance. GitHub still exposes
+test20 and PR40 remains at9ac88f0. Treat test21 as a local candidate requiring
+these corrections and delivery reconciliation, not a completed release. No source,
+device, emulator or external-state changes during review. Full findings, reproduction
+and recommended order: docs/handoffs/2026-10-18-test21-code-review.md.
 
 After local/native checks, request CI-generated1.3.1-test.21 preview with existing permanent signer/package io.github.mu23xr.audiobridge.test. Android, Windows and governance gates must pass before prerelease publication/latest=false. Verify assets, source/checksums/package/version/signer; disarm publish after successful creation. Do not install the published preview on physical devices. Keep scoped verified commits and this work item/handoff current through CI.

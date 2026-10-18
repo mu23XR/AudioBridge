@@ -76,6 +76,36 @@ capture, OEM key arbitration, encrypted multicast delivery or prolonged subjecti
 
 ## Silent-source durability
 
+### test21 review corrections (emulator only)
+
+ReceiverBufferPolicyTest must exercise the real PcmQueue→pump→policy→trim path:
+bounded bursts drain before trimming, a residual50–60ms queue reaches the soft
+trigger and retains40ms, cooldown never removes the60ms hard safety bound, and
+trim/overflow boundaries signal a frame-based ramp. Numeric queues above the
+hard capacity cannot serve as the sole acceptance test.
+
+AudioSilenceRegressionTest covers a frozen full output independently of write
+admission, one-time startup-threshold priming after a flush, and explicit failure
+of incomplete priming. CuePlaybackLifetimeTest covers owned player lifetime,
+completion/error/timeout races and late creation using fake players/timers.
+
+ReceiverPlayoutDeviceTest requires a guarded debug emulator and explicit
+allowPlayoutFixture=true. Preserve the existing immediate-resume90% progress and
+100ms discard limits. Silence phases must now also prove advancing native heads;
+the additional35s sole-source silence case checks native occupancy stays at the
+configured target, without rebuild/adaptive inflation, then measures returning
+PCM immediately. Zero-filled output frames count in head/output-written counters;
+they are not evidence that source PCM arrived. Actual sounds/capture/overnight
+OEM behavior are separate acceptance work.
+
+Do not target physical devices or MuMu instance1. This task owns only the named
+MuMu instance2, AudioBridge-test21; never restart shared ADB servers. Missing
+opt-in arguments or skipped methods are not successful regression evidence.
+
+The artifact tool uses only Python's standard library. Run its mismatch/clean-tree
+tests with `python -m unittest discover -s scripts/tests -v`. These tests do not
+sign/build APKs or establish acoustic quality.
+
 1. Start a Shizuku SEND/RECEIVE session.
 2. Stop all media playback on the sender without pressing OFF.
 3. Leave the source silent long enough to cross the old 30-second timeout.

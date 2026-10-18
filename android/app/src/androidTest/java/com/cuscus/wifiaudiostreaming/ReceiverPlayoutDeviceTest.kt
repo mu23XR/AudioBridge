@@ -108,6 +108,8 @@ class ReceiverPlayoutDeviceTest {
             val before = player.snapshot()
             observe(player, input, 4_500, label = "$mode-sole-intentional-silence")
             val silent = player.snapshot()
+            assertTrue("intentional silence did not keep the output consuming: before=$before after=$silent",
+                silent.playedFrames - before.playedFrames >= RATE * 3)
             assertEquals("intentional silence changed $mode target", before.targetMs, silent.targetMs)
             assertEquals("intentional silence rebuilt the output", before.rebuilds, silent.rebuilds)
             assertTrue("intentional silence lost its AudioTrack", ReceiverMixer.hasOutput(output.id))
@@ -123,6 +125,35 @@ class ReceiverPlayoutDeviceTest {
         } finally {
             cleanup(listOf(output), listOf(input))
         }
+    }
+
+    @Test fun prolongedSilenceKeepsAdvancingWithinTheNativeTargetBudget() = runBlocking {
+        requireEmulatorWindow()
+        val output = player("prolonged-silence", true, 20)
+        val input = PacedPcm { output.player.offer(it) }
+        try {
+            input.resume()
+            await("long-silence output starts", input) { output.player.playedFrames > 2_400 }
+            input.pauseAndAwait()
+            output.player.noteSilence()
+            SystemClock.sleep(500) //Initial real PCM/fade drains before the idle budget measurement.
+            val before = output.player.snapshot()
+            val begin = SystemClock.elapsedRealtime()
+            while (SystemClock.elapsedRealtime() - begin < 35_000) {
+                checkHealthy(input)
+                val current = output.player.snapshot()
+                assertTrue("silent output exceeded native target: $current",
+                    current.nativeBufferedMs <= current.targetMs + 1)
+                assertEquals("silent source grew a software backlog", 0, current.queuedBytes)
+                SystemClock.sleep(20)
+            }
+            val after = output.player.snapshot()
+            assertTrue("long silence let the sink stop", after.playedFrames - before.playedFrames >= RATE * 30)
+            assertEquals(before.targetMs, after.targetMs)
+            assertEquals(before.rebuilds, after.rebuilds)
+            input.resume()
+            assertSustained("after35s silence", observe(output.player, input, 3_000, label = "after-prolonged-silence"))
+        } finally { cleanup(listOf(output), listOf(input)) }
     }
 
     private data class Output(val id: String, val player: ReceiverPlayout)

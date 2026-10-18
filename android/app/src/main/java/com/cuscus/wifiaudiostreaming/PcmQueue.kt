@@ -49,10 +49,9 @@ internal class PcmQueue(private val frameSize: Int, private val capacityBytes: I
 
     /**
      * Player-only stale-backlog trimming; preserve the newest frame-aligned tail.
-     * The surviving audio is still contiguous, so this deliberately does not
-     * raise [discontinuity]: the player restarts its fade-in on a real
-     * discontinuity, and doing that here throttles the drain pump just enough to
-     * refill the queue and overflow it again.
+     * Removing a prefix changes the boundary from already submitted audio even
+     * though the surviving tail is internally contiguous. The player smooths
+     * that boundary; ramping changes amplitude, never write admission.
      */
     @Synchronized fun trimTo(maxBytes: Int): Int {
         require(maxBytes >= 0 && maxBytes % frameSize == 0)
@@ -67,6 +66,7 @@ internal class PcmQueue(private val frameSize: Int, private val capacityBytes: I
         }
         if (remove > 0) {
             size -= remove; discardedBytes += remove
+            discontinuity = true
         }
         return remove
     }

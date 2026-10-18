@@ -20,7 +20,7 @@ internal class ReceiverPlayout(
     private val frame = format.channels * 2
     private val ramp = PcmRamp(format.channels, maxOf(1, format.sampleRate / 200))
     private val silenceTail = PcmSilenceTail(format.channels, maxOf(1, format.sampleRate / 200))
-    private val silenceFeed = ByteArray(format.sampleRate / 20 * frame)
+    private val silenceFeed = ReceiverSilenceFeed(format.sampleRate, frame)
     private val input = ReceiverInputActivity()
     private val initialTarget = if (adaptive) 20 else latencyMs.coerceIn(20, 400)
     private val fifo = PcmQueue(frame, format.sampleRate * frame * QUEUE_CAPACITY_MS / 1000 / frame * frame)
@@ -100,7 +100,9 @@ internal class ReceiverPlayout(
             result.setStartThresholdInFrames(maxOf(1, format.sampleRate * (target / 2) / 1000))
         } else result.bufferSizeInFrames
         val preroll = startFrames * frame
-        if (preroll > 0) governor.writePcm(ByteArray(preroll), 0, preroll)
+        if (preroll > 0) check(governor.writePcm(ByteArray(preroll), 0, preroll) == preroll) {
+            "AudioTrack startup priming was incomplete"
+        }
         result.play()
         RuntimeDiagnostics.event("SOURCE_OUTPUT_READY", "source=$id ${format.describe()} targetMs=$target startFrames=$startFrames capacityFrames=${result.bufferCapacityInFrames}")
         result to governor
@@ -112,7 +114,7 @@ internal class ReceiverPlayout(
         var lastTune = lastSample
         var lastLog = lastSample
         var outputCopy = ByteArray(0)
-        var pausedForSilence = false
+        var feedingSilence = false
         try {
             val (_, initial) = buildOutput(targetMs)
             governor = initial
@@ -122,7 +124,7 @@ internal class ReceiverPlayout(
                     targetMs = if (automatic) 20 else manual
                     releaseOutput()
                     governor = buildOutput(targetMs).second
-                    pausedForSilence = false
+                    feedingSilence = false
                     health = PlaybackHealth(adaptive)
                     backlog.reset()
                     ramp.restart()
@@ -130,12 +132,10 @@ internal class ReceiverPlayout(
                 }
                 val now = SystemClock.elapsedRealtime()
                 var drained: PcmDrainPump.Result? = null
-                backlog.softwareLimit(now, governor.bufferedFrames(), fifo.bytes())?.let { limit ->
-                    val discarded = fifo.trimTo(limit)
-                    if (discarded > 0) RuntimeDiagnostics.event("SOURCE_BACKLOG_TRIM",
-                        "source=$id bytes=$discarded targetMs=${governor.targetMs()} nativeMs=${governor.bufferedMs()}")
-                }
                 if (fifo.bytes() > 0) {
+                    // Admission can be full while the output is stalled. Check
+                    // progress independently, before the pump's headroom gate.
+                    operation("RECOVER") { governor.recoverStalledOutput() }
                     if (fifo.takeDiscontinuity()) ramp.restart()
                     drained = operation("WRITE") {
                         pump.drain(governor.targetMs(), governor::bufferedFrames) { bytes, offset, length ->
@@ -152,24 +152,25 @@ internal class ReceiverPlayout(
                         }
                     }
                 }
-                // Keep the drained output consuming at the nameplate rate instead
-                // of pausing it. A paused track stops advancing its playback head,
-                // so the first packet after silence has no room in the device
-                // buffer: the sender's burst then overflows the software FIFO and
-                // the receiver drops roughly two tenths of a second of audio
-                // instead of resuming smoothly. Feeding zero PCM costs nothing
-                // audible and preserves the head.
-                if (Build.VERSION.SDK_INT >= 31 && !pausedForSilence && input.isSilent() &&
-                    fifo.bytes() == 0 && governor.bufferedFrames() == 0L) {
-                    val output = track ?: break // Concurrent stop transferred ownership.
-                    val written = operation("IDLE_SILENCE") { feedSilence() }
-                    pausedForSilence = true
-                    RuntimeDiagnostics.event("SOURCE_OUTPUT_IDLE", "source=$id silenceBytes=$written")
+                backlog.softwareLimit(now, fifo.bytes())?.let { limit ->
+                    val discarded = fifo.trimTo(limit)
+                    if (discarded > 0) RuntimeDiagnostics.event("SOURCE_BACKLOG_TRIM",
+                        "source=$id bytes=$discarded targetMs=${governor.targetMs()} nativeMs=${governor.bufferedMs()}")
                 }
-                // The bounded pump preloads while paused. Recheck input after
-                // pause too: a concurrent offer must not remain asleep.
-                if (Build.VERSION.SDK_INT >= 31 && pausedForSilence && !input.isSilent()) {
-                    pausedForSilence = false
+                // Preserve an active sink through intentional silence. Refill
+                // at most10ms per tick, only up to the current target. The same
+                // accounting includes zeros, so returning PCM finds no hidden
+                //50ms block outside its configured latency budget.
+                val idle = input.isSilent() && fifo.bytes() == 0
+                if (idle) {
+                    val count = silenceFeed.bytesToWrite(governor.targetMs(), governor.bufferedFrames())
+                    if (count > 0) operation("IDLE_SILENCE") {
+                        governor.writePcm(silenceFeed.pcm, 0, count, recoverStall = false)
+                    }
+                    if (!feedingSilence) RuntimeDiagnostics.event("SOURCE_OUTPUT_IDLE", "source=$id")
+                    feedingSilence = true
+                } else if (feedingSilence && !input.isSilent()) {
+                    feedingSilence = false
                     RuntimeDiagnostics.event("SOURCE_OUTPUT_RESUME", "source=$id")
                 }
                 if (now - lastTune >= 200) {
@@ -189,7 +190,7 @@ internal class ReceiverPlayout(
                         releaseOutput()
                         val (_, replacement) = buildOutput(targetMs)
                         governor = replacement; health = PlaybackHealth(adaptive)
-                        pausedForSilence = false
+                        feedingSilence = false
                         backlog.reset()
                         ramp.restart()
                         RuntimeDiagnostics.event("SOURCE_OUTPUT_REBUILD", "source=$id attempts=$rebuilds", true)
@@ -210,6 +211,7 @@ internal class ReceiverPlayout(
                     // work. No per-packet sleep limits small-packet throughput.
                     drained?.limited == true -> yield()
                     fifo.bytes() > 0 -> delay(2)
+                    idle -> withTimeoutOrNull(minOf(10, maxOf(2, targetMs / 4)).toLong()) { wake.receive() }
                     else -> withTimeoutOrNull(200) { wake.receive() }
                 }
             }
@@ -219,14 +221,6 @@ internal class ReceiverPlayout(
             onFailure("PLAYBACK_FAILURE ${failure.message}")
         } finally { releaseOutput() }
     }
-
-    /**
-     * Feed zero PCM into the same output while the source is silent. The track
-     * keeps consuming at its nameplate rate, so a returning sender finds room
-     * immediately instead of the receiver having to drop the audio that piled up
-     * in the software queue while the track was paused.
-     */
-    private fun feedSilence(): Int = governor.writePcm(silenceFeed, 0, silenceFeed.size)
 
     private fun releaseOutput() {
         val old = synchronized(this) { track.also { track = null } } ?: return
@@ -262,6 +256,7 @@ internal class ReceiverPlayout(
          * exactly to the hard capacity would land on the bound during the next
          * burst instead of staying under it.
          */
-        const val QUEUE_RETENTION_MS = 50
+        const val QUEUE_TRIM_TRIGGER_MS = 50
+        const val QUEUE_RETENTION_MS = 40
     }
 }

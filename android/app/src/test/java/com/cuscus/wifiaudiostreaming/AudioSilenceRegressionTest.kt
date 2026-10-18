@@ -23,8 +23,13 @@ class AudioSilenceRegressionTest {
         var plays = 0
         var writeMode = -1
         var rateResult = 0
+        override var restartPrerollFrames = 0
+        var rejectPreroll = false
         override fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int): Int {
             writeMode = mode
+            if (restartPrerollFrames > 0 && length == restartPrerollFrames * 4) {
+                return if (rejectPreroll) 0 else length
+            }
             return accepted
         }
         override fun pause() {}
@@ -109,5 +114,64 @@ class AudioSilenceRegressionTest {
         governor.retune(activeInput = false)
         assertEquals(48000, governor.playbackRateHz())
         assertEquals(0, track.flushes)
+    }
+
+    @Test fun fullAdmissionCannotHideAStalledOutputFromLocalRecovery() {
+        var now = 0L
+        val track = FakeTrack().apply { accepted = 6_720 }
+        val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { now }, {})
+        governor.writePcm(ByteArray(6_720), 0, 6_720)
+        val queue = PcmQueue(4, 11_520).apply { offer(ByteArray(256)) }
+        val pump = PcmDrainPump(queue, 48_000, 4) { 0L }
+        assertTrue(pump.drain(20, governor::bufferedFrames) { _, _, _ -> fail("Must not write over ceiling"); 0 }.blocked)
+        now = 499
+        assertFalse(governor.recoverStalledOutput())
+        now = 500
+        assertTrue(governor.recoverStalledOutput())
+        track.accepted = 256
+        assertEquals(256, pump.drain(20, governor::bufferedFrames) { pcm, offset, length ->
+            governor.writePcm(pcm, offset, length)
+        }.bytes)
+        assertEquals(1, track.flushes)
+        assertEquals(0, queue.bytes())
+    }
+
+    @Test fun intentionalSilentFeedDoesNotFlushASuspendedSinkRepeatedly() {
+        var now = 0L
+        val track = FakeTrack().apply { accepted = 100 }
+        val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { now }, {})
+        assertFalse(governor.recoverStalledOutput()) //Establish the initial head like normal output startup.
+        repeat(10) {
+            now += 1_000
+            governor.writePcm(ByteArray(100), 0, 100, recoverStall = false)
+        }
+        assertEquals(0, track.flushes)
+        assertTrue(governor.recoverStalledOutput()) //Real PCM may recover immediately.
+    }
+
+    @Test fun recoveryReprimesTheDeviceThresholdAndCountsItBeforeNewPcm() {
+        var now = 0L
+        val track = FakeTrack().apply { accepted = 100; restartPrerollFrames = 7_680 }
+        val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { now }, {})
+        governor.writePcm(ByteArray(100), 0, 100)
+        now = 500
+        assertTrue(governor.recoverStalledOutput())
+        assertEquals(7_680L, governor.bufferedFrames())
+        assertEquals(1, track.plays)
+        // The one-time startup capacity drains before normal bounded admission.
+        track.playbackHeadPosition = 7_680
+        assertEquals(0L, governor.bufferedFrames())
+        assertEquals(100, governor.writePcm(ByteArray(100), 0, 100))
+        assertEquals(25L, governor.bufferedFrames())
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun incompleteRestartPrimingIsReportedInsteadOfPretendingToResume() {
+        var now = 0L
+        val track = FakeTrack().apply { accepted = 100; restartPrerollFrames = 480; rejectPreroll = true }
+        val governor = PlayoutGovernor(track, 48_000, 4, 20, "test", { now }, {})
+        governor.writePcm(ByteArray(100), 0, 100)
+        now = 500
+        governor.recoverStalledOutput()
     }
 }
