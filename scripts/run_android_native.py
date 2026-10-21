@@ -27,10 +27,10 @@ AVD = "AudioBridge-native"
 SERIAL = "emulator-5554"
 PREFIX = "com.cuscus.wifiaudiostreaming."
 # A count change needs an explicit review; assumptions/skips never count as a pass.
-# The local uncommitted endpoint-rewrite fixture is not part of this CI contract.
+# Includes the receiver endpoint-rewrite fixture alongside the cue/peer fixture.
 CLASSES = {
     PREFIX + "ReceiverPlayoutDeviceTest": 5,
-    PREFIX + "ConnectionCueDeviceTest": 1,
+    PREFIX + "ConnectionCueDeviceTest": 2,
     PREFIX + "MultiSourceDeviceTest": 1,
     PREFIX + "RemoteVolumeDeviceTest": 1,
     PREFIX + "ReceiverRetryDeviceTest": 1,

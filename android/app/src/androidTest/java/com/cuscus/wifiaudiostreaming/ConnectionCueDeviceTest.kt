@@ -77,6 +77,12 @@ class ConnectionCueDeviceTest {
                 control("HELLO_ACK;v=2")
                 // All are processed before the selected socket's PING response.
                 // None is a valid source frame or may consume cue eligibility.
+                // The handshake above bound the endpoint, so nothing the foreign
+                // socket sends - not even a handshake shape or a BYE - may adopt its
+                // port or tear the session down.
+                send(foreign, "PING".toByteArray(Charsets.US_ASCII))
+                send(foreign, "HELLO_ACK;v=2".toByteArray(Charsets.US_ASCII))
+                send(foreign, "BYE".toByteArray(Charsets.US_ASCII))
                 send(foreign, silence(30_000))
                 send(peer, silence(99).copyOf(11).apply { this[3] = 0 }) // Partial stereo frame.
                 send(peer, silence(99).apply { this[3] = 0 }) // Empty non-silent payload.
@@ -101,6 +107,82 @@ class ConnectionCueDeviceTest {
             withContext(NonCancellable) { withTimeout(5_000) { job.cancelAndJoin() } }
             peer.close()
             foreign.close()
+        }
+    }
+
+    /**
+     * A userspace VPN on the sender can re-originate its replies from a different
+     * source port than the one it advertised. The handshake reply must still be
+     * able to bind the session to that port, and audio must then be accepted from
+     * it - while audio from a third, never-learned port stays rejected.
+     */
+    @Test fun aReplyFromARewrittenSourcePortBindsTheSessionUntilTheNextAttempt() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val loopback = InetAddress.getByName("127.0.0.1")
+        val path = requireNotNull(DestinationNetwork.select(context, loopback, "Auto"))
+        val settings = SettingsDataStore(context).settingsFlow.first().copy(
+            connectionSoundEnabled = true, sendClientMicrophone = false, networkInterface = "Auto")
+        // The announced endpoint receives the client's HELLO but never replies.
+        val announced = DatagramSocket(0, loopback).apply { soTimeout = 4_000 }
+        val rewritten = DatagramSocket(0, loopback)
+        val third = DatagramSocket(0, loopback)
+        val connected = AtomicBoolean()
+        val ended = AtomicReference<SourceFailure?>()
+        val cues = AtomicInteger()
+        val id = "cue-rewrite-${UUID.randomUUID()}"
+        val source = ReceiverTransport(context, id,
+            ServerInfo("127.0.0.1", false, announced.localPort, "rewritten-port-fixture",
+                audioFormat = StreamAudioFormat(48_000, 2, 16)),
+            settings, true, 40, "", false, null, path,
+            onStatus = { _, value -> if (value) connected.set(true) },
+            onKey = { throw AssertionError("OFF fixture must not request a key") },
+            onStats = { _, _, _, _ -> }, onFinished = { ended.set(it) },
+            onMicrophoneReady = { }, onRemoteVolume = { },
+            connectionCue = ConnectionCuePolicy().beginAttempt(true), onConnectionCue = { cues.incrementAndGet() })
+        val job = launch(Dispatchers.IO) { source.run() }
+        try {
+            withContext(Dispatchers.IO) {
+                val packet = DatagramPacket(ByteArray(2048), 2048)
+                announced.receive(packet)
+                assertTrue(String(packet.data, 0, packet.length).startsWith("HELLO_FROM_CLIENT"))
+                val endpoint = packet.socketAddress
+                fun send(socket: DatagramSocket, bytes: ByteArray) =
+                    socket.send(DatagramPacket(bytes, bytes.size, endpoint))
+                fun barrier() {
+                    send(announced, "PING".toByteArray(Charsets.US_ASCII))
+                    do {
+                        packet.length = packet.data.size
+                        announced.receive(packet)
+                    } while (String(packet.data, 0, packet.length, Charsets.US_ASCII) != "PONG")
+                    ended.get()?.let { throw AssertionError("Transport ended: ${it.reason}") }
+                    assertTrue(job.isActive)
+                }
+
+                // The handshake reply arrives from the rewritten port only.
+                send(rewritten, "HELLO_ACK;v=2".toByteArray(Charsets.US_ASCII))
+                barrier()
+                assertEquals("A handshake reply alone must not announce a connection", 0, cues.get())
+
+                // Check rejection before any valid audio: otherwise the connected
+                // flag and one-shot cue would hide accidental acceptance here.
+                send(third, silence(200))
+                barrier()
+                assertFalse("An unrelated port established the connection", connected.get())
+                assertEquals("An unrelated port consumed the connection cue", 0, cues.get())
+
+                // The learned port is the session's audio endpoint.
+                send(rewritten, silence(100))
+                barrier()
+                assertTrue("A rewritten reply port did not establish the connection", connected.get())
+                assertEquals("Rewritten reply port used the wrong cue count", 1, cues.get())
+
+            }
+        } finally {
+            source.stop()
+            withContext(NonCancellable) { withTimeout(5_000) { job.cancelAndJoin() } }
+            announced.close()
+            rewritten.close()
+            third.close()
         }
     }
 

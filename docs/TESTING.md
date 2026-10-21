@@ -120,7 +120,8 @@ track may change system mixer latency compared with FAST, so application queue
 bounds do not establish equal acoustic latency.
 
 The reusable `android-native.yml` check builds clean committed debug sources and
-runs the same11-method contract on its own API35 x86_64 SDK emulator. It retains
+runs the 12-method contract, including the receiver's rewritten-reply-port fixture,
+on its own API35 x86_64 SDK emulator. It retains
 a clocked PulseAudio null sink (audio enabled), rejects pre-existing devices,
 validates emulator/package/source identity, counts starts/completions/skips and
 uploads failure diagnostics as well as successful ones. It uses no signing

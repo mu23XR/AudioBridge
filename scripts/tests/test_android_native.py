@@ -16,10 +16,10 @@ class AndroidNativeResultTest(unittest.TestCase):
             for index in range(count):
                 for status in (1, 0):
                     self.events.append(self.event(class_name, f"fixture{index}", status))
-        self.summary = "OK (11 tests)\n\nINSTRUMENTATION_CODE: -1\n"
+        self.summary = "OK (12 tests)\n\nINSTRUMENTATION_CODE: -1\n"
 
     @staticmethod
-    def event(class_name, method, status, count=11):
+    def event(class_name, method, status, count=12):
         return (f"INSTRUMENTATION_STATUS: class={class_name}\n"
                 f"INSTRUMENTATION_STATUS: test={method}\n"
                 f"INSTRUMENTATION_STATUS: numtests={count}\n"
@@ -28,7 +28,7 @@ class AndroidNativeResultTest(unittest.TestCase):
     def output(self, events=None):
         return "\n".join(self.events if events is None else events) + "\n" + self.summary
 
-    def test_all_eleven_successful_events_and_junit_summary_are_required(self):
+    def test_all_twelve_successful_events_and_junit_summary_are_required(self):
         # Native ADB output can contain CRLF and blank lines between records.
         output = self.output().replace("\n", "\r\n")
         self.assertEqual(native.CLASSES, native.validate_instrumentation(output))
@@ -64,8 +64,8 @@ class AndroidNativeResultTest(unittest.TestCase):
             native.validate_instrumentation(self.output(events))
 
     def test_wrong_reported_count_or_wrong_summary_count_is_rejected(self):
-        wrong_reported = self.output().replace("numtests=11", "numtests=12", 1)
-        wrong_summary = self.output().replace("OK (11 tests)", "OK (10 tests)")
+        wrong_reported = self.output().replace("numtests=12", "numtests=13", 1)
+        wrong_summary = self.output().replace("OK (12 tests)", "OK (11 tests)")
         for output in (wrong_reported, wrong_summary):
             with self.subTest(output_tail=output[-100:]):
                 with self.assertRaises(RuntimeError):

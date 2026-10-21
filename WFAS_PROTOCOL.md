@@ -656,8 +656,15 @@ An authorized supporting sender adds `;rvol=1;rvsid=<hex>` to HELLO_ACK, with a
 fresh random 16-byte lowercase-hex session identifier. Repeated HELLO for that
 same receiver attempt repeats the same identifier, so a lost ACK does not
 invalidate controls. A new attempt/session retires its old identifier and
-request state. Controls are accepted only from the currently connected exact
-IP/UDP-port endpoint and only for the active `rvsid`.
+request state. The sender accepts control requests only from the currently
+connected receiver's exact IP/UDP-port endpoint and only for the active `rvsid`.
+The receiver normally accepts replies from the sender's advertised endpoint.
+Because a userspace VPN or NAT on the sending device can rewrite its reply port,
+the receiver may also adopt one source port from a recognized handshake reply
+at the expected sender address, before the endpoint is bound. That adoption
+happens at most once per attempt. Audio and control replies are accepted only
+from the advertised or adopted port at that address; after handshake completion,
+an unknown port cannot rebind the session. A later rewrite requires a reconnect.
 
 In Key mode the ACK additionally contains:
 

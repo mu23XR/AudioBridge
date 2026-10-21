@@ -32,6 +32,13 @@ internal class ReceiverTransport(
     @Volatile private var remoteVolume: RemoteVolumeProtocol.Client? = null
     private var lastRemoteState: RemoteVolumeState? = null
     private var rejectedEndpoints = 0L
+    private var reboundEndpoints = 0L
+    /** Source port the peer's replies actually arrive from when its device
+     *  rewrites them (userspace VPN/NAT); -1 until a handshake reply confirms it. */
+    private var learnedPeerPort = -1
+    /** True once the handshake completed. The endpoint is bound from then on, so
+     *  a rewritten source port can no longer re-point the session. */
+    private var endpointBound = false
     @Volatile private var stopped = false
     @Volatile private var failure: SourceFailure? = null
     private var player: ReceiverPlayout? = null
@@ -73,6 +80,10 @@ internal class ReceiverTransport(
                 context.getString(R.string.status_unsupported_format, format.describe()), false)
             val remote = InetAddress.getByName(peer.ip)
             remoteEndpoint = InetSocketAddress(remote, peer.port)
+            // One instance performs one run; keep the endpoint state explicit so a
+            // future reuse cannot inherit a learned port.
+            learnedPeerPort = -1
+            endpointBound = false
             if (peer.isMulticast) {
                 val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
                 multicastLock = wifi.createMulticastLock("wfas:source:$id").apply { setReferenceCounted(false); acquire() }
@@ -103,6 +114,10 @@ internal class ReceiverTransport(
                 groupEpoch = expectedEpoch?.minus(1) ?: SettingsDataStore(context).getMcastClientEpoch(peer.ip)
                 encrypted = encrypted || key.isNotEmpty() || fromInvite || expectedEpoch != null
             }
+            // The endpoint is bound from here on: only the advertised or the
+            // already-learned port is accepted for the rest of the session, so a
+            // late rewrite is handled by reconnecting through a new handshake.
+            endpointBound = true
             val metrics = PacketMetrics(format.sampleRate)
             lastMetrics = metrics
             player = ReceiverPlayout(id, format, adaptive, latencyMs) { detail ->
@@ -408,13 +423,40 @@ internal class ReceiverTransport(
     }
     private fun isPeer(packet: DatagramPacket): Boolean {
         val expected = remoteEndpoint ?: return false
-        if (packet.address == expected.address && (peer.isMulticast || packet.port == expected.port)) return true
+        val verdict = PeerEndpointPolicy.verdict(
+            sameAddress = packet.address == expected.address,
+            multicast = peer.isMulticast,
+            expectedPort = expected.port,
+            sourcePort = packet.port,
+            learnedPort = learnedPeerPort,
+            handshakeReply = !endpointBound && isPeerHandshakeReply(packet))
+        if (verdict == PeerEndpointPolicy.Verdict.LEARN) {
+            learnedPeerPort = packet.port
+            reboundEndpoints++
+            if (reboundEndpoints == 1L || reboundEndpoints % 1000L == 0L) {
+                RuntimeDiagnostics.event("SOURCE_ENDPOINT_REBOUND",
+                    "source=$id count=$reboundEndpoints from=${packet.socketAddress} expectedPort=${expected.port}", true)
+            }
+        }
+        if (verdict != PeerEndpointPolicy.Verdict.REJECT) return true
         rejectedEndpoints++
         if (rejectedEndpoints == 1L || rejectedEndpoints % 1000L == 0L) {
             RuntimeDiagnostics.event("SOURCE_ENDPOINT_REJECTED",
                 "source=$id count=$rejectedEndpoints from=${packet.socketAddress} differentAddress=${packet.address != expected.address} differentPort=${packet.port != expected.port}")
         }
         return false
+    }
+
+    /** Handshake replies that may re-point the session at a rewritten source port.
+     *  Only consulted before the endpoint is bound. Audio frames, PING/PONG/BYE and
+     *  the remote-volume traffic deliberately never widen the accepted set: three
+     *  arbitrary bytes would otherwise let an unrelated socket on the same host end
+     *  or starve a live session. */
+    private fun isPeerHandshakeReply(packet: DatagramPacket): Boolean {
+        val length = packet.length
+        if (length <= 0) return false
+        return PeerEndpointPolicy.isHandshakeReply(
+            String(packet.data, 0, length, Charsets.US_ASCII).trim())
     }
     private fun tickRemoteVolume(sock: DatagramSocket) {
         val control = remoteVolume ?: return
