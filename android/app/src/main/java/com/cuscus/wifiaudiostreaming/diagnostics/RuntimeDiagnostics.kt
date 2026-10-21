@@ -14,6 +14,8 @@ import kotlinx.coroutines.runBlocking
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.io.OutputStream
+import java.io.FilterOutputStream
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
@@ -91,11 +93,21 @@ object RuntimeDiagnostics {
 
     /** Called on an IO dispatcher after the user chooses a Storage Access Framework destination. */
     fun export(context: Context, destination: Uri) {
+        val output = checkNotNull(context.contentResolver.openOutputStream(destination, "wt")) {
+            "Cannot open diagnostic export destination"
+        }
+        output.use { exportToStream(context, it) }
+    }
+
+    /** Same redacted allowlist for SAF and shell exports; caller owns the stream. */
+    fun exportToStream(context: Context, output: OutputStream) {
         initialize(context)
         val store = checkNotNull(journal) { "Diagnostic storage unavailable: $lastError" }
         val barrier = executor.submit { }
         barrier.get(10, TimeUnit.SECONDS)
-        val settings = runBlocking { SettingsDataStore(context).settingsFlow.first() }
+        val settings = runBlocking { kotlinx.coroutines.withTimeout(5000) {
+            SettingsDataStore(context).settingsFlow.first()
+        } }
         // Explicit allowlist: never serialize settings objects containing authentication secrets.
         val metadata = """
             AudioBridge diagnostics
@@ -106,16 +118,20 @@ object RuntimeDiagnostics {
             adaptive=${settings.adaptiveLatency} latencyMs=${settings.latencyMs}
             sampleRate=${settings.sampleRate} channels=${settings.channelConfig} payload=${settings.maxPayloadBytes}
             internalBackend=${settings.internalAudioBackend} localMuted=${settings.muteRender}
+            senderPlaybackChoice=${settings.senderLocalPlayback}
+            senderGain=${com.cuscus.wifiaudiostreaming.NetworkManager.serverVolume.value}
+            receiverMasterGain=${com.cuscus.wifiaudiostreaming.NetworkManager.clientVolume.value}
             persistentSender=${settings.serverPersist} persistentReceiver=${settings.clientPersistentConnection}
             autoConnect=${settings.autoConnectEnabled} usb=${settings.usbModeEnabled}
             noiseReduction=${settings.noiseReductionEnabled} noiseStrength=${settings.noiseReductionStrength}
             securityMode=${settings.securityMode} encryption=${settings.encryptionEnabled}
             loggerError=$lastError queued=${executor.queue.size} queueDrops=${dropped.get()}
         """.trimIndent()
-        val output = checkNotNull(context.contentResolver.openOutputStream(destination, "wt")) {
-            "Cannot open diagnostic export destination"
-        }
-        ZipOutputStream(output).use { zip ->
+        // Closing the ZIP releases its native deflater without taking ownership
+        // of the SAF/provider stream managed by the caller.
+        ZipOutputStream(object : FilterOutputStream(output) {
+            override fun close() { flush() }
+        }).use { zip ->
             zip.putNextEntry(ZipEntry("report.txt"))
             zip.write(DiagnosticRedactor.clean(metadata).toByteArray())
             zip.closeEntry()

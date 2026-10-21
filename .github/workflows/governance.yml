@@ -104,3 +104,6 @@ jobs:
           grep -Fq "$EXPECTED" .github/workflows/release.yml
           ! grep -Fq 'stable-153-signer.yml' .github/workflows/release.yml
           ! grep -Fq 'wfas-audio-bridge-lab-debug-keystore' .github/workflows/release.yml
+
+      - name: Test local preview provenance checks
+        run: python3 -m unittest discover -s scripts/tests -v

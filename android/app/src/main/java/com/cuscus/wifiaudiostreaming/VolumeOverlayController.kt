@@ -18,8 +18,13 @@ import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
-import com.cuscus.wifiaudiostreaming.shizuku.ShizukuAudioBridgeManager
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 
 /**
  * Small volume panel shown directly above the currently foreground app.
@@ -37,6 +42,8 @@ object VolumeOverlayController {
     private val handler = Handler(Looper.getMainLooper())
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var volumeJob: Job? = null
 
     private val dismissRunnable = Runnable { dismiss() }
 
@@ -66,6 +73,7 @@ object VolumeOverlayController {
 
     fun dismiss() {
         handler.removeCallbacks(dismissRunnable)
+        volumeJob?.cancel(); volumeJob = null
         val manager = windowManager
         val view = overlayView
         overlayView = null
@@ -79,7 +87,8 @@ object VolumeOverlayController {
         dismiss()
 
         val isServer = mode == MODE_SERVER
-        val maxPercent = if (isServer) 200 else 100
+        val maxPercent = 100
+        val maxGain = if (isServer) 2f else 1f
         val current = if (isServer) {
             NetworkManager.serverVolume.value
         } else {
@@ -136,7 +145,7 @@ object VolumeOverlayController {
 
         val seekBar = SeekBar(context).apply {
             max = maxPercent
-            progress = (current * 100f).roundToInt().coerceIn(0, maxPercent)
+            progress = VolumeScale.percent(current, maxGain)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -153,25 +162,29 @@ object VolumeOverlayController {
         }
 
         updateLabel(seekBar.progress)
+        var tracking = false
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 updateLabel(progress)
                 if (!fromUser) return
                 keepOpen()
-                val value = progress / 100f
+                val value = VolumeScale.gain(progress, maxGain)
                 if (isServer) {
-                    NetworkManager.serverVolume.value = value.coerceIn(0f, 2f)
-                    ShizukuAudioBridgeManager.setVolume(value)
+                    NetworkManager.setServerVolume(value)
                 } else {
                     NetworkManager.setClientVolume(value.coerceIn(0f, 1f))
                 }
             }
 
             override fun onStartTrackingTouch(seekBar: SeekBar?) {
+                tracking = true
                 handler.removeCallbacks(dismissRunnable)
             }
 
             override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                tracking = false
+                val gain = if (isServer) NetworkManager.serverVolume.value else NetworkManager.clientVolume.value
+                seekBar?.progress = VolumeScale.percent(gain, maxGain)
                 keepOpen()
             }
         })
@@ -207,6 +220,12 @@ object VolumeOverlayController {
             manager.addView(root, params)
             windowManager = manager
             overlayView = root
+            volumeJob = scope.launch {
+                val volumes = if (isServer) NetworkManager.serverVolume else NetworkManager.clientVolume
+                volumes.collect { gain ->
+                    if (!tracking) seekBar.progress = VolumeScale.percent(gain, maxGain)
+                }
+            }
             keepOpen()
         }.onFailure {
             Toast.makeText(

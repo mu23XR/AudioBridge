@@ -156,7 +156,7 @@ object NotificationCenter {
     }
 
     fun volumePercent(volume: Float): Int =
-        (volume * VOLUME_SCALE).toInt().coerceIn(0, (MAX_VOLUME * VOLUME_SCALE).toInt())
+        VolumeScale.percent(volume, MAX_VOLUME)
 
     fun nudgeVolume(current: Float, delta: Float): Float {
         val stepped = Math.round((current + delta) / VOLUME_STEP) * VOLUME_STEP
@@ -179,7 +179,7 @@ object NotificationCenter {
             .setContentTitle(context.getString(R.string.notif_server_title))
             .setContentText(status)
             .setSubText(volumeLabel(context, percent))
-            .setStyle(volumeStyle(context, percent, 200))
+            .setStyle(volumeStyle(context, percent, 100))
             .setShortCriticalText(
                 if (muted) context.getString(R.string.notif_chip_muted) else "$percent%"
             )
@@ -236,7 +236,7 @@ object NotificationCenter {
             .setContentTitle("WFAS · Shizuku Audio Bridge")
             .setContentText(status)
             .setSubText(volumeLabel(context, percent))
-            .setStyle(volumeStyle(context, percent, 200))
+            .setStyle(volumeStyle(context, percent, 100))
             .setShortCriticalText(
                 if (muted) context.getString(R.string.notif_chip_muted) else "$percent%"
             )

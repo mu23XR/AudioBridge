@@ -138,21 +138,42 @@ object NetworkManager {
 
     // --- GESTIONE VOLUME ---
     /** Sender-side software gain for the stream sent over the network. */
-    val serverVolume = MutableStateFlow(1.0f)
+    private val senderGain = MutableStateFlow(1.0f)
+    val serverVolume: kotlinx.coroutines.flow.StateFlow<Float> = senderGain
 
     /** Receiver-side playback gain. */
-    val clientVolume = MutableStateFlow(1.0f)
+    private val receiverGain = MutableStateFlow(1.0f)
+    val clientVolume: kotlinx.coroutines.flow.StateFlow<Float> = receiverGain
+
+    internal fun restoreVolumes(sender: Float, receiver: Float) {
+        senderGain.value = sender
+        receiverGain.value = receiver
+    }
+
+    fun setServerVolume(value: Float, propagateToSender: Boolean = true) {
+        require(value.isFinite()) { "Sender gain must be finite" }
+        val safe = value.coerceIn(0f, 2f)
+        senderGain.value = safe
+        VolumeMemory.save()
+        // Remote-authoritative snapshots mirror here without echoing the same
+        // value back into the privileged sender and racing another receiver.
+        if (propagateToSender && com.cuscus.wifiaudiostreaming.shizuku.ShizukuAudioBridgeManager.isActive())
+            com.cuscus.wifiaudiostreaming.shizuku.ShizukuAudioBridgeManager.setVolume(safe)
+    }
     private val clientPlaybackTracks =
         java.util.Collections.newSetFromMap(
             java.util.concurrent.ConcurrentHashMap<AudioTrack, Boolean>()
         )
 
     fun setClientVolume(value: Float) {
+        if (!value.isFinite()) return
         val safe = value.coerceIn(0f, 1f)
-        clientVolume.value = safe
+        receiverGain.value = safe
+        VolumeMemory.save()
         clientPlaybackTracks.forEach { track ->
             runCatching { track.setVolume(safe) }
         }
+        ClientSessionController.updateMasterVolume()
     }
 
     private fun registerClientPlaybackTrack(track: AudioTrack) {
@@ -422,12 +443,19 @@ object NetworkManager {
     @Volatile var keyPromptEnabled: Boolean = false
     val pendingKeyRequest = MutableStateFlow<Boolean?>(null)
     private var keyDeferred: CompletableDeferred<String?>? = null
-    suspend fun requestKeyFromUi(wrong: Boolean): String? {
+    private val keyPromptMutex = kotlinx.coroutines.sync.Mutex()
+    val pendingKeySource = MutableStateFlow("")
+    suspend fun requestKeyFromUi(wrong: Boolean, source: String = ""): String? = keyPromptMutex.withLock {
         if (!keyPromptEnabled) return null
         val d = CompletableDeferred<String?>()
         keyDeferred = d
+        pendingKeySource.value = source
         pendingKeyRequest.value = wrong
-        return try { d.await() } finally { pendingKeyRequest.value = null }
+        try { d.await() } finally {
+            pendingKeyRequest.value = null
+            pendingKeySource.value = ""
+            if (keyDeferred === d) keyDeferred = null
+        }
     }
     fun submitKey(key: String?) { keyDeferred?.complete(key); keyDeferred = null }
 
@@ -477,6 +505,9 @@ object NetworkManager {
                 ProtocolMismatch(WFAS_PROTOCOL_VERSION, remoteVersion, remoteRole)
         }
     }
+
+    internal fun reportProtocolMismatch(remoteVersion: Int, remoteRole: PeerRole) =
+        signalProtocolMismatch(remoteVersion, remoteRole)
 
     private const val SILENT_PEER_TIMEOUT_MS = 6000L
 
@@ -633,10 +664,10 @@ object NetworkManager {
                 val changed = ip != localIpAddress.value
                 localIpAddress.value = ip
                 Log.d(TAG, "[NET] $reason ip=$ip changed=$changed")
-                if (changed) {
-                    networkRevision.value++
-                    restartBroadcastOnNetworkChange()
-                }
+                // Underlying Wi-Fi can disappear while a VPN/default IP stays
+                // unchanged. Receiver sessions compare their own route fingerprints.
+                networkRevision.value++
+                if (changed) restartBroadcastOnNetworkChange()
             }
             override fun onAvailable(network: android.net.Network) = refresh("available")
             override fun onLost(network: android.net.Network) = refresh("lost")
@@ -650,8 +681,18 @@ object NetworkManager {
             ) = refresh("link")
         }
         networkCallback = cb
-        runCatching { cm.registerDefaultNetworkCallback(cb) }
-            .onFailure { networkCallback = null }
+        try {
+            val request = android.net.NetworkRequest.Builder()
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_TRUSTED)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+                .build()
+            cm.registerNetworkCallback(request, cb)
+        } catch (failure: RuntimeException) {
+            networkCallback = null
+            RuntimeDiagnostics.event("NETWORK_WATCH_FAILED", failure.javaClass.simpleName, true)
+            throw failure
+        }
     }
 
     fun stopNetworkWatch(context: Context) {
@@ -669,6 +710,7 @@ object NetworkManager {
 
     /** Modificabile a caldo: il flusso in riproduzione non va riavviato. */
     fun setNoiseReduction(enabled: Boolean, strengthPercent: Int) {
+        ClientSessionController.setNoiseReduction(enabled, strengthPercent)
         noiseReducer.setStrength(strengthPercent.coerceIn(0, 100) / 100f)
         if (enabled && !nrEnabled) noiseReducer.reset()
         nrEnabled = enabled
@@ -725,9 +767,9 @@ object NetworkManager {
             try {
                 val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                 val transportPriority = listOf(
-                    NetworkCapabilities.TRANSPORT_VPN,
                     NetworkCapabilities.TRANSPORT_WIFI,
-                    NetworkCapabilities.TRANSPORT_ETHERNET
+                    NetworkCapabilities.TRANSPORT_ETHERNET,
+                    NetworkCapabilities.TRANSPORT_VPN
                 )
                 for (transport in transportPriority) {
                     for (network in cm.allNetworks) {
@@ -798,26 +840,61 @@ object NetworkManager {
         } catch (e: Exception) { null }
     }
 
-    suspend fun probeIsMulticast(ip: String, port: Int): Boolean {
-        return try {
-            var isUnicast = false
-            withTimeout(1000) { // Aspetta massimo 1 secondo
-                aSocket(SelectorManager(Dispatchers.IO)).udp()
-                    .bind(InetSocketAddress(NetAddr.wildcardFor(ip), 0)).use { sock ->
-                    val remoteAddress = InetSocketAddress(ip, port)
-                    sock.send(Datagram(buildPacket { writeText("MODE_PROBE") }, remoteAddress))
-                    val ack = sock.receive()
-                    if (ack.packet.readText().trim() == "UNICAST") {
-                        isUnicast = true
-                    }
+    suspend fun probeIsMulticast(ip: String, port: Int, context: Context? = null,
+                                 networkInterfaceName: String = "Auto"): Boolean? = withContext(Dispatchers.IO) {
+        val remote = try { InetAddress.getByName(ip) } catch (failure: Exception) {
+            RuntimeDiagnostics.event("MODE_PROBE_ADDRESS_ERROR", failure.javaClass.simpleName, true)
+            return@withContext null
+        }
+        val path = try { context?.let { DestinationNetwork.select(it, remote, networkInterfaceName) } }
+        catch (failure: Exception) {
+            RuntimeDiagnostics.event("MODE_PROBE_ROUTE_ERROR", failure.javaClass.simpleName, true)
+            return@withContext null
+        }
+        if (context != null && path == null) return@withContext null
+        try {
+            DatagramSocket(null).use { socket ->
+                path?.bind(socket)
+                socket.bind(java.net.InetSocketAddress(path?.localAddress, 0))
+                socket.connect(remote, port); socket.soTimeout = 1000
+                val probe = "MODE_PROBE".toByteArray(Charsets.US_ASCII)
+                socket.send(DatagramPacket(probe, probe.size))
+                val buffer = ByteArray(256); val reply = DatagramPacket(buffer, buffer.size)
+                socket.receive(reply)
+                when (String(buffer, 0, reply.length, Charsets.US_ASCII).trim()) {
+                    "UNICAST", "WFAS_BUSY" -> return@withContext false
+                    "MULTICAST" -> return@withContext true
                 }
             }
-            !isUnicast
-        } catch (e: Exception) {
-            true // Se va in timeout, assumiamo Multicast
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) {
+            RuntimeDiagnostics.event("MODE_PROBE_NO_REPLY", failure.javaClass.simpleName)
         }
+        // Multicast has no handshake. Require a matching sender's real WFAS
+        // packet instead of interpreting every timeout as multicast.
+        if (context == null) return@withContext null
+        val owner = "mode-probe-${System.nanoTime()}"
+        WfasMulticastLock.acquire(context, owner)
+        try {
+            val iface = path?.name?.let { NetworkInterface.getByName(it) }
+                ?: getWifiNetworkInterface(networkInterfaceName) ?: return@withContext null
+            MulticastSocket(null).use { socket ->
+                socket.reuseAddress = true; path?.bind(socket)
+                socket.bind(java.net.InetSocketAddress(port)); socket.soTimeout = 200
+                socket.joinGroup(java.net.InetSocketAddress(MULTICAST_GROUP, port), iface)
+                val deadline = android.os.SystemClock.elapsedRealtime() + 1200
+                val bytes = ByteArray(65536); val packet = DatagramPacket(bytes, bytes.size)
+                while (android.os.SystemClock.elapsedRealtime() < deadline && currentCoroutineContext().isActive) {
+                    try { packet.length = bytes.size; socket.receive(packet) } catch (_: SocketTimeoutException) { continue }
+                    if (packet.address == remote && packet.length >= 10 && bytes[0] == 0x57.toByte() && bytes[1] == 0x46.toByte())
+                        return@withContext true
+                }
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) { RuntimeDiagnostics.event("MODE_PROBE_FAILED", failure.javaClass.simpleName, true) }
+        finally { WfasMulticastLock.release(owner) }
+        null
     }
-
     private fun CoroutineScope.launchRtpSidecar(
         sampleRate: Int,
         channels: Int,
@@ -1483,6 +1560,15 @@ object NetworkManager {
                     var producerLoopCount = 0L
                     var producerTotalBytes = 0L
                     var producerDropped = 0L
+                    var zeroReads = 0L
+                    var silentBuffers = 0L
+                    var limitedSamples = 0L
+                    var wouldClipSamples = 0L
+                    var lastCaptureReport = android.os.SystemClock.elapsedRealtime()
+                    var lastCaptureRead = lastCaptureReport
+                    var maxCaptureReadGap = 0L
+                    var lastPositiveRead = lastCaptureReport
+                    var mixClippedSamples = 0L
 
                     Log.d(TAG, "[PRODUCER] avviato: streamInternal=$streamInternal projNull=${projection == null} internalRecordState=${activeInternalRecord?.state} micRecordState=${activeMicRecord?.state} safeBufferSize=$safeBufferSize bufMs=$bufMs")
 
@@ -1490,8 +1576,23 @@ object NetworkManager {
                         val iBytes = activeInternalRecord?.read(internalBuf!!, 0, internalBuf.size, AudioRecord.READ_NON_BLOCKING) ?: 0
                         val mBytes = activeMicRecord?.read(micBuf!!, 0, micBuf.size, AudioRecord.READ_NON_BLOCKING) ?: 0
 
-                        if (iBytes < 0) Log.e(TAG, "[PRODUCER] iBytes ERROR=$iBytes (AudioRecord error code)")
-                        if (mBytes < 0) Log.e(TAG, "[PRODUCER] mBytes ERROR=$mBytes (AudioRecord error code)")
+                        if (iBytes < 0 || mBytes < 0) {
+                            RuntimeDiagnostics.event("CAPTURE_READ_ERROR", "internal=$iBytes microphone=$mBytes", true)
+                            throw IllegalStateException("AudioRecord read failed: internal=$iBytes microphone=$mBytes")
+                        }
+
+                        val readAt = android.os.SystemClock.elapsedRealtime()
+                        maxCaptureReadGap = maxOf(maxCaptureReadGap, readAt - lastCaptureRead)
+                        lastCaptureRead = readAt
+                        if (iBytes > 0 || mBytes > 0) lastPositiveRead = readAt
+                        if (iBytes == 0 && mBytes == 0) zeroReads++
+                        if (readAt - lastCaptureReport >= 10_000) {
+                            RuntimeDiagnostics.event("CAPTURE_STATS", "bytes=$producerTotalBytes zeroReads=$zeroReads silentBuffers=$silentBuffers " +
+                                "limitedSamples=$limitedSamples wouldClipSamples=$wouldClipSamples mixClippedSamples=$mixClippedSamples " +
+                                "maxReadGapMs=$maxCaptureReadGap lastPositiveReadAgeMs=${readAt - lastPositiveRead} queueDropped=$producerDropped gain=${serverVolume.value}")
+                            maxCaptureReadGap = 0L
+                            lastCaptureReport = readAt
+                        }
 
                         val ei = iBytes.coerceAtLeast(0)
                         val em = mBytes.coerceAtLeast(0)
@@ -1515,8 +1616,9 @@ object NetworkManager {
                             val iShorts = ByteBuffer.wrap(internalBuf!!, 0, aligned).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
                             val mShorts = ByteBuffer.wrap(micBuf!!,      0, aligned).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
                             for (i in 0 until aligned / 2) {
-                                val s = (iShorts[i].toInt() + mShorts[i].toInt())
-                                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                                val mixed = iShorts[i].toInt() + mShorts[i].toInt()
+                                if (mixed !in Short.MIN_VALUE.toInt()..Short.MAX_VALUE.toInt()) mixClippedSamples++
+                                val s = mixed.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
                                 mixedBuf[2 * i]     = (s.toInt() and 0xff).toByte()
                                 mixedBuf[2 * i + 1] = (s.toInt() shr 8 and 0xff).toByte()
                             }
@@ -1524,15 +1626,11 @@ object NetworkManager {
                         } else if (streamInternal && ei > 0) internalBuf!! else micBuf!!
 
                         val vol = serverVolume.value
-                        if (vol != 1.0f) {
-                            val sb = ByteBuffer.wrap(raw, 0, aligned).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                            for (i in 0 until aligned / 2) {
-                                val s = (sb[i].toInt() * vol).toInt()
-                                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                                raw[2 * i]     = (s and 0xff).toByte()
-                                raw[2 * i + 1] = ((s shr 8) and 0xff).toByte()
-                            }
-                        }
+                        // Count actual silent PCM independently from a nonblocking
+                        // read with no data, before gain=0 can turn sound into zero.
+                        if (PcmSilence.isZero(raw, 0, aligned)) silentBuffers++
+                        wouldClipSamples += PcmGainLimiter.countWouldClip(raw, 0, aligned, vol)
+                        limitedSamples += PcmGainLimiter.applyInPlace(raw, 0, aligned, vol)
 
                         val chunk = raw.copyOf(aligned)
                         httpPcmQueue?.let { if (it.remainingCapacity() > 0) it.offer(chunk) }
@@ -1893,7 +1991,7 @@ object NetworkManager {
                         val rxAt = System.currentTimeMillis()
                         val clientAddress = clientDatagram.address
                         val message = clientDatagram.packet.readText().trim()
-                        Log.d(TAG, "[SERVER][UNICAST] datagram ricevuto da $clientAddress: '$message'")
+                        Log.d(TAG, "[SERVER][UNICAST] datagram from $clientAddress kind=${message.substringBefore(';')}")
 
                         if (message == "MODE_PROBE") {
                             Log.d(TAG, "[SERVER][UNICAST] rispondo UNICAST a MODE_PROBE da $clientAddress")
@@ -1902,7 +2000,7 @@ object NetworkManager {
                         }
 
                         if (!message.startsWith(NetworkSettings.CLIENT_HELLO_MESSAGE)) {
-                            Log.w(TAG, "[SERVER][UNICAST] messaggio ignorato (non HELLO): '$message'")
+                            Log.w(TAG, "[SERVER][UNICAST] ignored non-HELLO kind=${message.substringBefore(';')}")
                             continue
                         }
 
@@ -1996,7 +2094,14 @@ object NetworkManager {
                         // Svuota la coda: il client riceve solo audio fresco
                         udpAudioQueue.clear()
 
-                        val ackText = helloAckMessage() + if (encrypting) ";enc=1" else ""
+                        val volumeControl = RemoteVolumeProtocol.offer(message,
+                            if (SecurityMode.requiresKey(securityMode)) authKey else "", pendCnonce, pendSnonce,
+                            object : RemoteVolumeProtocol.Volume {
+                                override fun getPercent() = VolumeScale.percent(serverVolume.value, 2f)
+                                override fun setPercent(value: Int) { setServerVolume(VolumeScale.gain(value, 2f)) }
+                            })
+                        val ackText = helloAckMessage() + (if (encrypting) ";enc=1" else "") +
+                            (volumeControl?.ackSuffix() ?: "")
                         val ackPacket = buildPacket { writeText(ackText) }
                         sendSocket.send(Datagram(ackPacket, clientAddress))
                         Log.d(TAG, "[SERVER][TIMING] HELLO_ACK inviato a $clientAddress a +${System.currentTimeMillis() - rxAt}ms dalla ricezione")
@@ -2037,6 +2142,9 @@ object NetworkManager {
                                 delay(1000)
                                 try {
                                     sendSocket.send(Datagram(buildPacket { writeText("PING") }, clientAddress))
+                                    volumeControl?.snapshot()?.let { update ->
+                                        sendSocket.send(Datagram(buildPacket { writeText(update) }, clientAddress))
+                                    }
                                     pingCount++
                                     if (pingCount == 1L || pingCount % 10L == 0L) {
                                         Log.d(
@@ -2082,7 +2190,7 @@ object NetworkManager {
                                 while (isActive && clientAlive.get()) {
                                     val datagram = sendSocket.receive()
                                     val msg = datagram.packet.readText().trim()
-                                    Log.d(TAG, "[SERVER][UNICAST] byeJob ricevuto: '$msg' da ${datagram.address}")
+                                    Log.d(TAG, "[SERVER][UNICAST] control kind=${msg.substringBefore(';')} from ${datagram.address}")
                                     // Solo il client collegato puo' pilotare questa sessione:
                                     // senza questo controllo un CLIENT_BYE di un terzo
                                     // dispositivo chiuderebbe la connessione altrui.
@@ -2098,6 +2206,20 @@ object NetworkManager {
                                         } else {
                                             Log.w(TAG, "[SERVER][UNICAST] datagram da ${datagram.address} ignorato: sessione occupata")
                                         }
+                                        continue
+                                    }
+                                    if (msg.startsWith(RemoteVolumeProtocol.GET) || msg.startsWith(RemoteVolumeProtocol.SET)) {
+                                        volumeControl?.receive(msg)?.let { reply ->
+                                            sendSocket.send(Datagram(buildPacket { writeText(reply) }, clientAddress))
+                                            lastClientHeartbeatAt.set(System.currentTimeMillis())
+                                        }
+                                        continue
+                                    }
+                                    // An ACK can be lost while audio is already flowing. Only
+                                    // repeat it for this exact endpoint and negotiated session.
+                                    if (msg.startsWith(NetworkSettings.CLIENT_HELLO_MESSAGE) &&
+                                        (volumeControl == null || volumeControl.acceptsHello(msg))) {
+                                        sendSocket.send(Datagram(buildPacket { writeText(ackText) }, clientAddress))
                                         continue
                                     }
                                     when (msg) {
@@ -2205,1200 +2327,8 @@ object NetworkManager {
         }
     }
 
-    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    fun startClient(
-        context: Context,
-        serverInfo: ServerInfo,
-        sampleRate: Int,
-        channelConfig: String,
-        bufferSize: Int,
-        sendMicrophone: Boolean,
-        micPort: Int,
-        networkInterfaceName: String = "Auto",
-        connectionSoundEnabled: Boolean = true,
-        disconnectionSoundEnabled: Boolean = true,
-        adaptiveLatency: Boolean = false,
-        // Reconnects of an already-announced logical session must not replay
-        // the full chime: rapid drop-reconnect cycles used to ring twice.
-        announceConnectSound: Boolean = true,
-        onServerDisconnected: (() -> Unit)? = null
-    ) {
-        // ── Formato di riproduzione ───────────────────────────────────────────
-        // I byte li manda il server, quindi e' il suo formato a comandare: le
-        // impostazioni locali valgono solo come fallback se il beacon non lo
-        // annuncia. Un formato che non sappiamo riprodurre va rifiutato, perche'
-        // reinterpretarlo a caso produce solo rumore.
-        val advertised = serverInfo.audioFormat
-        if (advertised != null && !advertised.isPlayable) {
-            Log.w(TAG, "[CLIENT] Formato non riproducibile: ${advertised.describe()} - connessione rifiutata")
-            connectionStatus.value =
-                context.getString(R.string.status_unsupported_format, advertised.describe())
-            isStreamingCurrent.value = false
-            scope.launch(Dispatchers.Main) { onServerDisconnected?.invoke() }
-            return
-        }
-
-        prepareClientTransportAttempt(context)
-        val generation = openStreamGeneration()
-        isServerStreaming = false
-        activePeerIp = serverInfo.ip
-        isStreamingCurrent.value = true
-        startDonationTimer(context)
-
-        micSendDir = null
-
-        // Il microfono e' un flusso nostro in salita: resta sulle impostazioni locali.
-        if (sendMicrophone) {
-            if (serverInfo.acceptsClientMic) {
-                micStreamingJob = scope.launchMicSenderJob(context, serverInfo, sampleRate, channelConfig, bufferSize, micPort)
-            } else {
-                Log.i(TAG, "[CLIENT] mic richiesto ma ${serverInfo.ip} annuncia mic senza rx, non lo invio")
-                connectionStatus.value = context.getString(R.string.status_mic_not_accepted)
-            }
-        }
-
-        // Da qui in poi 'sampleRate' e 'channelConfig' sono quelli del flusso in arrivo.
-        @Suppress("NAME_SHADOWING")
-        val sampleRate = advertised?.sampleRate ?: sampleRate
-        @Suppress("NAME_SHADOWING")
-        val channelConfig = advertised?.let { if (it.channels == 2) "STEREO" else "MONO" } ?: channelConfig
-        if (advertised != null) {
-            Log.i(TAG, "[CLIENT] Riproduzione col formato annunciato dal server: ${advertised.describe()}")
-        }
-
-        streamingJob = scope.launch {
-            val transportJob = coroutineContext[Job]!!
-            var connectedSuccessfully = false
-            var disconnectionSoundPlayed = false
-            val disconnectReason = java.util.concurrent.atomic.AtomicReference("LOCAL_OR_SERVICE_STOP")
-            val lastPingAt = java.util.concurrent.atomic.AtomicLong(0L)
-            val lastAudioAt = java.util.concurrent.atomic.AtomicLong(0L)
-            val lastServerActivityAt = java.util.concurrent.atomic.AtomicLong(0L)
-            val audioSupply = AudioSupplyWindow()
-            RuntimeDiagnostics.event("RECEIVER_SESSION_START", "peer=${serverInfo.ip}:${serverInfo.port} multicast=${serverInfo.isMulticast} generation=$generation", true)
-
-            fun markDisconnect(reason: String, detail: String = "") {
-                RuntimeDiagnostics.event("RECEIVER_DISCONNECT", "reason=$reason detail=$detail peer=${serverInfo.ip}:${serverInfo.port} metrics=${LinkMetrics.snapshot.value.format()}", true)
-                disconnectReason.set(reason)
-                val now = System.currentTimeMillis()
-                val pingAt = lastPingAt.get()
-                val audioAt = lastAudioAt.get()
-                val activityAt = lastServerActivityAt.get()
-                val pingAge = if (pingAt > 0L) now - pingAt else -1L
-                val audioAge = if (audioAt > 0L) now - audioAt else -1L
-                val activityAge = if (activityAt > 0L) now - activityAt else -1L
-                Log.w(
-                    TAG,
-                    "[CLIENT][DISCONNECT] reason=${reason} " +
-                            "mode=${if (serverInfo.isMulticast) "MULTICAST" else "UNICAST"} " +
-                            "peer=${serverInfo.ip}:${serverInfo.port} " +
-                            "pingAgeMs=${pingAge} audioAgeMs=${audioAge} activityAgeMs=${activityAge} " +
-                            "netRev=${networkRevision.value} metrics=${LinkMetrics.snapshot.value.format()}" +
-                            if (detail.isBlank()) "" else " detail=${detail}"
-                )
-            }
-
-            try {
-                if (!serverInfo.isMulticast) {
-                    var audioTrack: AudioTrack? = null
-                    var socket: BoundDatagramSocket? = null
-                    try {
-                        val selectorManager = SelectorManager(Dispatchers.IO)
-                        val advSettings = SettingsDataStore(context).settingsFlow.first()
-                        val channelConfigOut = if (channelConfig == "STEREO") AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-                        val frameSize = if (channelConfig == "STEREO") 4 else 2
-                        val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelConfigOut, AudioFormat.ENCODING_PCM_16BIT)
-                        prepareNoiseReducer(context, sampleRate, if (channelConfig == "STEREO") 2 else 1)
-                        // Ultima rete: il dispositivo puo' rifiutare una combinazione
-                        // che sulla carta e' valida. Meglio non riprodurre nulla.
-                        if (minBuffer == AudioTrack.ERROR || minBuffer == AudioTrack.ERROR_BAD_VALUE) {
-                            Log.e(TAG, "[CLIENT] AudioTrack non supporta ${sampleRate}Hz/$channelConfig")
-                            connectionStatus.value = context.getString(
-                                R.string.status_unsupported_format,
-                                "$sampleRate Hz, " + (if (channelConfig == "STEREO") "stereo" else "mono") + ", 16 bit"
-                            )
-                            isStreamingCurrent.value = false
-                            withContext(Dispatchers.Main) { onServerDisconnected?.invoke() }
-                            return@launch
-                        }
-                        // Adaptive mode starts at the 20 ms floor and lets the
-                        // watchdog lift the target on underrun evidence; fixed
-                        // mode plays the configured target as-is.
-                        val effectiveLatencyMs = if (adaptiveLatency) 20 else UsbLink.effectiveLatencyMs(advSettings.latencyMs)
-                        val targetLatencyFrames = effectiveLatencyMs * sampleRate / 1000
-                        // Headroom: la coda di AudioTrack deve poter assorbire un burst senza
-                        // bloccare la write, altrimenti l'arretrato migra nel socket dove non e'
-                        // misurabile. Il livello reale lo tiene PlayoutGovernor scartando pacchetti.
-                        // In adaptive mode the governor may lift the target up to 80 ms,
-                        // so the track buffer is planned for that ceiling.
-                        val headroomMs = if (adaptiveLatency) 140 else 80
-                        val headroomFrames = sampleRate * headroomMs / 1000
-                        var playbackBufferSize = minBuffer.coerceAtLeast((targetLatencyFrames + headroomFrames) * frameSize)
-                        if (playbackBufferSize % frameSize != 0) {
-                            playbackBufferSize += frameSize - (playbackBufferSize % frameSize)
-                        }
-
-                        val trackBuilder = AudioTrack.Builder()
-                            .setAudioAttributes(
-                                AudioAttributes.Builder()
-                                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                    .build()
-                            )
-                            .setAudioFormat(
-                                AudioFormat.Builder()
-                                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                                    .setSampleRate(sampleRate)
-                                    .setChannelMask(channelConfigOut)
-                                    .build()
-                            )
-                            .setBufferSizeInBytes(playbackBufferSize)
-                            .setTransferMode(AudioTrack.MODE_STREAM)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                        }
-                        audioTrack = trackBuilder.build()
-                        registerClientPlaybackTrack(audioTrack!!)
-                        // Mutable so the playback watchdog can rebuild the track
-                        // in place without tearing down the whole session.
-                        var playout = PlayoutGovernor(
-                            audioTrack!!, sampleRate, frameSize, effectiveLatencyMs, TAG, adaptiveLatency
-                        )
-
-                        // Startup preroll: half of the playout target. 20 ms
-                        // keeps the historical 10 ms; higher targets get
-                        // proportionally more protection so the first seconds
-                        // do not burn underruns while the buffer fills.
-                        val prerollMs = effectiveLatencyMs / 2
-                        val prerollLen = (sampleRate * frameSize * prerollMs / 1000)
-                            .coerceIn(0, playbackBufferSize - frameSize)
-                            .let { it - (it % frameSize) }
-                        if (prerollLen > 0) {
-                            playout.writePcm(ByteArray(prerollLen), 0, prerollLen)
-                        }
-                        audioTrack!!.play()
-                        LinkMetrics.start(
-                            if (sessionUsesUsb()) "USB" else "WIFI",
-                            sampleRate
-                        )
-
-                        connectionStatus.value = context.getString(R.string.status_contacting_server, serverInfo.ip)
-                        socket = aSocket(selectorManager).udp().bind(InetSocketAddress(NetAddr.wildcardFor(serverInfo.ip), 0)) { receiveBufferSize = 1 shl 20 }
-                        val sock = socket!!
-                        val remoteAddress = InetSocketAddress(serverInfo.ip, serverInfo.port)
-
-                        val cnonce = WfasAuth.nonceHex()
-                        var helloMsg = "${clientHelloMessage()};cnonce=$cnonce"
-                        var proved = false
-                        var clientSnonce = ""
-                        var clientKey = clientPresharedKey
-                        var sessionEncrypted = false
-                        sock.send(Datagram(buildPacket { writeText(helloMsg) }, remoteAddress))
-                        connectionStatus.value = context.getString(R.string.status_waiting_for_ack)
-
-                        var handshakeDeadline = System.currentTimeMillis() + 30000
-                        var handshakeOk = false
-
-                        suspend fun promptKeyAndRestart(wrong: Boolean): Boolean {
-                            val k = requestKeyFromUi(wrong) ?: return false
-                            if (k.isBlank()) return false
-                            clientKey = k
-                            // Keep the accepted key in process memory so a transient
-                            // reconnect does not ask the user for the same key again.
-                            clientPresharedKey = k
-                            proved = false
-                            helloMsg = "${clientHelloMessage()};cnonce=$cnonce"
-                            sock.send(Datagram(buildPacket { writeText(helloMsg) }, remoteAddress))
-                            handshakeDeadline = System.currentTimeMillis() + 30000
-                            return true
-                        }
-
-                        var helloWaitMs = 150L
-                        var helloAttempts = 0
-                        var anyReplyReceived = false
-                        val handshakeStartedAt = System.currentTimeMillis()
-                        while (System.currentTimeMillis() < handshakeDeadline) {
-                            if (!anyReplyReceived &&
-                                System.currentTimeMillis() - handshakeStartedAt >= SILENT_PEER_TIMEOUT_MS
-                            ) {
-                                Log.w(TAG, "[CLIENT] nessuna risposta dopo ${SILENT_PEER_TIMEOUT_MS}ms, rinuncio")
-                                connectionStatus.value = context.getString(R.string.status_server_silent_maybe_outdated)
-                                isStreamingCurrent.value = false
-                                withContext(Dispatchers.Main) { onServerDisconnected?.invoke() }
-                                return@launch
-                            }
-                            val ackMsg = try {
-                                withTimeout(helloWaitMs) { socket.receive() }.packet.readText().trim()
-                            } catch (e: TimeoutCancellationException) {
-                                helloAttempts++
-                                helloWaitMs = (helloWaitMs * 2).coerceAtMost(2000L)
-                                socket.send(Datagram(buildPacket { writeText(helloMsg) }, remoteAddress))
-                                Log.d(TAG, "[CLIENT] nessuna risposta, reinvio #$helloAttempts, prossima attesa ${helloWaitMs}ms")
-                                continue
-                            }
-                            anyReplyReceived = true
-                            when {
-                                ackMsg.startsWith(NetworkSettings.INCOMPATIBLE_PREFIX) -> {
-                                    signalProtocolMismatch(parseProtocolVersion(ackMsg), PeerRole.SENDER)
-                                    connectionStatus.value = context.getString(R.string.status_protocol_incompatible)
-                                    return@launch
-                                }
-                                ackMsg == NetworkSettings.BUSY_MESSAGE -> {
-                                    Log.w(TAG, "[CLIENT] server occupato con un altro dispositivo")
-                                    connectionStatus.value = context.getString(R.string.status_server_busy)
-                                    isStreamingCurrent.value = false
-                                    withContext(Dispatchers.Main) { onServerDisconnected?.invoke() }
-                                    return@launch
-                                }
-                                ackMsg == NetworkSettings.UNAUTHORIZED_MESSAGE -> {
-                                    if (clientKeyFromInvite) {
-                                        pendingInviteRejected.value = true
-                                        connectionStatus.value = context.getString(R.string.status_unauthorized)
-                                        isStreamingCurrent.value = false
-                                        return@launch
-                                    }
-                                    if (!promptKeyAndRestart(true)) {
-                                        connectionStatus.value = context.getString(R.string.status_unauthorized)
-                                        return@launch
-                                    }
-                                }
-                                ackMsg == NetworkSettings.PENDING_MESSAGE -> {
-                                    connectionStatus.value = context.getString(R.string.status_awaiting_approval)
-                                }
-                                ackMsg.startsWith(NetworkSettings.AUTH_REQUIRED_PREFIX) -> {
-                                    if (clientKey.isEmpty()) {
-                                        val k = requestKeyFromUi(false)
-                                        if (k.isNullOrBlank()) {
-                                            connectionStatus.value = context.getString(R.string.status_key_required)
-                                            return@launch
-                                        }
-                                        clientKey = k
-                                        // Reuse it for automatic reconnects in this app process.
-                                        clientPresharedKey = k
-                                        handshakeDeadline = System.currentTimeMillis() + 30000
-                                    }
-                                    val snonce = WfasAuth.getToken(ackMsg, "snonce") ?: ""
-                                    clientSnonce = snonce
-                                    val sproof = WfasAuth.getToken(ackMsg, "sproof") ?: ""
-                                    if (!WfasAuth.constantTimeEquals(sproof, WfasAuth.proof(clientKey, 'S', cnonce, snonce))) {
-                                        if (!promptKeyAndRestart(true)) {
-                                            connectionStatus.value = context.getString(R.string.status_unauthorized)
-                                            return@launch
-                                        }
-                                    } else {
-                                        val cproof = WfasAuth.proof(clientKey, 'C', cnonce, snonce)
-                                        helloMsg = "${clientHelloMessage()};cnonce=$cnonce;cproof=$cproof"
-                                        proved = true
-                                        sock.send(Datagram(buildPacket { writeText(helloMsg) }, remoteAddress))
-                                    }
-                                }
-                                ackMsg.startsWith(NetworkSettings.HELLO_ACK_PREFIX) -> {
-                                    val serverVersion = parseProtocolVersion(ackMsg)
-                                    if (serverVersion != WFAS_PROTOCOL_VERSION) {
-                                        signalProtocolMismatch(serverVersion, PeerRole.SENDER)
-                                        connectionStatus.value = context.getString(R.string.status_protocol_incompatible)
-                                        return@launch
-                                    }
-                                    if (clientKey.isNotEmpty() && !proved) {
-                                        connectionStatus.value = context.getString(R.string.status_unauthorized)
-                                        return@launch
-                                    }
-                                    if (WfasAuth.getToken(ackMsg, "enc") == "1") sessionEncrypted = true
-                                    handshakeOk = true
-                                }
-                            }
-                            if (handshakeOk) break
-                        }
-                        if (!handshakeOk) {
-                            throw Exception(context.getString(R.string.status_handshake_failed_unexpected_response, "timeout"))
-                        }
-
-                        val sessionKeys = if (clientKey.isNotEmpty() && proved)
-                            WfasCrypto.deriveUnicast(clientKey, cnonce, clientSnonce) else null
-                        val recvDir: WfasCrypto.Dir? = sessionKeys?.second
-                        micSendDir = if (sessionEncrypted) sessionKeys?.first else null
-                        sessionEncryptedLive.value = sessionEncrypted && recvDir != null
-                        val recvWin = WfasCrypto.ReplayWindow()
-                        var serverEncrypts = sessionEncrypted
-
-                        connectionStatus.value = context.getString(R.string.status_streaming)
-                        if (connectionSoundEnabled && announceConnectSound) playConnectionSound(context)
-                        connectedSuccessfully = true
-
-                        val connectedAt = System.currentTimeMillis()
-                        lastPingAt.set(connectedAt)
-                        lastAudioAt.set(connectedAt)
-                        lastServerActivityAt.set(connectedAt)
-                        // Three seconds was too aggressive on mobile Wi-Fi:
-                        // a short scheduler/network stall could tear down an otherwise
-                        // healthy session. PING is sent every second, so 8 seconds still
-                        // detects a real loss quickly while tolerating transient jitter.
-                        val serverActivityTimeoutMs = 30_000L
-
-                        val MAGIC_0: Byte = 0x57
-                        val MAGIC_1: Byte = 0x46
-                        val HEADER_SIZE = 10
-
-                        var expectedSeq = -1
-                        var lastGoodPcm: ByteArray? = null
-                        var concealTail: ByteArray? = null
-                        var inSilenceRun = false
-                        var versionChecked = false
-
-                        // ── Playback watchdog state ───────────────────────
-                        // The receive loop owns the track and performs rebuilds;
-                        // the watchdog coroutine below only requests them and
-                        // escalates when the loop cannot even consume a request.
-                        val rebuildRequestedAt = java.util.concurrent.atomic.AtomicLong(0L)
-                        val playbackHealth = PlaybackHealth(adaptiveLatency)
-                        val targetAdjustment = java.util.concurrent.atomic.AtomicInteger(0)
-                        data class PlaybackSnapshot(val sampledAt: Long, val underruns: Int,
-                            val stalledMs: Long, val failedRecoveries: Int)
-                        val playbackSnapshot = java.util.concurrent.atomic.AtomicReference(
-                            PlaybackSnapshot(android.os.SystemClock.elapsedRealtime(), 0, 0, 0)
-                        )
-                        fun publishPlaybackHealth() {
-                            val track = audioTrack ?: return
-                            playbackSnapshot.set(PlaybackSnapshot(android.os.SystemClock.elapsedRealtime(),
-                                track.underrunCount, playout.stalledForMs(), playout.recoveryFailures()))
-                        }
-
-                        fun rebuildPlaybackTrack(reason: String): Boolean {
-                            var candidate: AudioTrack? = null
-                            return try {
-                                val restoredTargetMs = playout.targetMs()
-                                Log.w(TAG, "[PLAYOUT][WATCHDOG] rebuilding playback track: $reason")
-                                RuntimeDiagnostics.event("PLAYBACK_REBUILD_START", reason, true)
-                                unregisterClientPlaybackTrack(audioTrack)
-                                runCatching { audioTrack?.pause() }
-                                runCatching { audioTrack?.flush() }
-                                runCatching { audioTrack?.stop() }
-                                runCatching { audioTrack?.release() }
-                                audioTrack = null
-                                val newTrack = trackBuilder.build()
-                                candidate = newTrack
-                                registerClientPlaybackTrack(newTrack)
-                                val newGovernor = PlayoutGovernor(
-                                    newTrack, sampleRate, frameSize, restoredTargetMs, TAG, adaptiveLatency
-                                )
-                                val rebornPrerollMs = restoredTargetMs / 2
-                                val rebornPrerollLen = (sampleRate * frameSize * rebornPrerollMs / 1000)
-                                    .coerceIn(0, playbackBufferSize - frameSize)
-                                    .let { it - (it % frameSize) }
-                                if (rebornPrerollLen > 0) {
-                                    newGovernor.writePcm(ByteArray(rebornPrerollLen), 0, rebornPrerollLen)
-                                }
-                                newTrack.play()
-                                audioTrack = newTrack
-                                playout = newGovernor
-                                publishPlaybackHealth()
-                                Log.i(TAG, "[PLAYOUT][WATCHDOG] playback track rebuilt")
-                                RuntimeDiagnostics.event("PLAYBACK_REBUILT", "targetMs=$restoredTargetMs", true)
-                                true
-                            } catch (t: Throwable) {
-                                unregisterClientPlaybackTrack(candidate)
-                                runCatching { candidate?.release() }
-                                Log.e(TAG, "[PLAYOUT][WATCHDOG] track rebuild failed", t)
-                                RuntimeDiagnostics.event("PLAYBACK_REBUILD_FAILED", "${t.javaClass.simpleName}: ${t.message}", true)
-                                false
-                            }
-                        }
-
-                        val watchdogJob = launch {
-                            while (isActive) {
-                                delay(1000)
-                                val now = System.currentTimeMillis()
-                                if (now - lastServerActivityAt.get() > serverActivityTimeoutMs) {
-                                    markDisconnect("SERVER_ACTIVITY_TIMEOUT")
-                                    if (disconnectionSoundEnabled && !ClientSessionController.wantsConnection()) { playDisconnectionSound(context); disconnectionSoundPlayed = true }
-                                    transportJob.cancel()
-                                    break
-                                }
-                                if (!connectedSuccessfully) continue
-                                val monotonicNow = android.os.SystemClock.elapsedRealtime()
-                                // The watchdog never touches AudioTrack or mutable governor
-                                // state: a stuck vendor write must not block this observer.
-                                val snapshot = playbackSnapshot.get()
-                                val decision = playbackHealth.sample(monotonicNow, snapshot.underruns,
-                                    audioSupply.flowing(monotonicNow),
-                                    snapshot.stalledMs, snapshot.failedRecoveries)
-                                if (decision.targetDeltaMs != 0) targetAdjustment.set(decision.targetDeltaMs)
-                                val loopStalled = monotonicNow - snapshot.sampledAt > 5000
-                                if ((decision.rebuild || loopStalled) && rebuildRequestedAt.compareAndSet(0L, monotonicNow)) {
-                                    Log.w(TAG, "[PLAYOUT][WATCHDOG] requesting track rebuild")
-                                }
-                                val requestedAt = rebuildRequestedAt.get()
-                                if (requestedAt != 0L && monotonicNow - requestedAt > 5000) {
-                                    markDisconnect("PLAYBACK_WATCHDOG_UNACKNOWLEDGED")
-                                    transportJob.cancel()
-                                    break
-                                }
-                            }
-                        }
-
-                        var packetMs = 0
-                        var pendingSmooth = false
-                        var silenceRunMs = 0
-                        var silenceRunLogged = false
-
-                        suspend fun playPacket(bytes: ByteArray, smooth: Boolean = false) {
-                            if (bytes.size < HEADER_SIZE) return
-
-                            if (!versionChecked) {
-                                versionChecked = true
-                                val packetVersion = bytes[2].toInt() and 0xFF
-                                if (packetVersion != WFAS_PROTOCOL_VERSION) {
-                                    signalProtocolMismatch(packetVersion, PeerRole.SENDER)
-                                    connectionStatus.value = context.getString(R.string.status_protocol_incompatible)
-                                    markDisconnect("PROTOCOL_MISMATCH", "senderProtocol=${packetVersion} localProtocol=${WFAS_PROTOCOL_VERSION}")
-                                    transportJob.cancel()
-                                    return
-                                }
-                            }
-
-                            val encFlag = (bytes[3].toInt() and WfasCrypto.FLAG_ENCRYPTED) != 0
-                            val data: ByteArray
-                            if (encFlag) {
-                                if (recvDir == null) return
-                                val r = WfasCrypto.decryptPacket(recvDir, recvWin, bytes, bytes.size)
-                                if (r !is WfasCrypto.Decrypted.Ok) return
-                                serverEncrypts = true
-                                data = ByteArray(HEADER_SIZE + r.pcm.size)
-                                System.arraycopy(bytes, 0, data, 0, HEADER_SIZE)
-                                System.arraycopy(r.pcm, 0, data, HEADER_SIZE, r.pcm.size)
-                            } else {
-                                if (serverEncrypts) return
-                                data = bytes
-                            }
-
-                            // Only a packet that has passed protocol/encryption validation
-                            // counts as server liveness. This prevents a few lost PING datagrams
-                            // from tearing down a healthy audio stream.
-                            val acceptedAt = System.currentTimeMillis()
-                            lastAudioAt.set(acceptedAt)
-                            lastServerActivityAt.set(acceptedAt)
-
-                            val flags     = data[3].toInt() and 0xFF
-                            val seq       = ((data[4].toInt() and 0xFF) shl 8) or (data[5].toInt() and 0xFF)
-                            val isSilence = (flags and 0x01) != 0
-                            audioSupply.observe(android.os.SystemClock.elapsedRealtime(), data, HEADER_SIZE,
-                                data.size - HEADER_SIZE, isSilence)
-
-                            // Header-only silence packets are sender keepalives.
-                            // They prove liveness without manufacturing PCM or increasing
-                            // the AudioTrack queue while the source device is silent.
-                            if (isSilence || PcmSilence.isZero(data, HEADER_SIZE, data.size - HEADER_SIZE)) {
-                                expectedSeq = (seq + 1) and 0xFFFF
-                                inSilenceRun = true
-                                concealTail = null
-                                lastGoodPcm = null
-                                pendingSmooth = true
-                                return
-                            }
-
-                            LinkMetrics.onPacket(
-                                seq,
-                                ((data[6].toLong() and 0xFF) shl 24) or
-                                        ((data[7].toLong() and 0xFF) shl 16) or
-                                        ((data[8].toLong() and 0xFF) shl 8) or
-                                        (data[9].toLong() and 0xFF)
-                            )
-
-                            if (expectedSeq == -1) {
-                                expectedSeq = seq
-                            } else {
-                                val gap = (seq - expectedSeq) and 0xFFFF
-                                if (gap in 1..8 && !playout.shouldDrop(lastGoodPcm?.size ?: 0)) {
-                                    val ref = lastGoodPcm
-                                    if (ref != null && frameSize > 0) {
-                                        val wanted = gap.coerceAtMost(3) * ref.size
-                                        val filled = rampedConceal(ref, wanted, frameSize)
-                                        if (filled != null) {
-                                            val body = wanted - (wanted % frameSize)
-                                            playout.writePcm(filled, 0, body)
-                                            concealTail = filled.copyOfRange(body, filled.size)
-                                        }
-                                    }
-                                }
-                            }
-
-                            expectedSeq = (seq + 1) and 0xFFFF
-
-                            if (isSilence || data.size <= HEADER_SIZE) {
-                                val silenceLen = lastGoodPcm?.size ?: 3840
-                                silenceRunMs += packetMs
-                                if (silenceRunMs > 10_000 && !silenceRunLogged) {
-                                    silenceRunLogged = true
-                                    Log.w(TAG, "[CLIENT] the server has been sending silence-flagged packets for over 10s: " +
-                                            "the stream is alive but the capture side has nothing to send")
-                                }
-                                if (playout.shouldDrop(silenceLen)) {
-                                    pendingSmooth = true
-                                } else {
-                                    val ref = lastGoodPcm
-                                    val fadeOut = if (!inSilenceRun && ref != null && frameSize > 0)
-                                        rampedConceal(ref, silenceLen, frameSize) else null
-                                    if (fadeOut != null) {
-                                        val body = silenceLen - (silenceLen % frameSize)
-                                        playout.writePcm(fadeOut, 0, body)
-                                        concealTail = fadeOut.copyOfRange(body, fadeOut.size)
-                                    } else {
-                                        concealTail = null
-                                        val silenceBuffer = ByteArray(silenceLen)
-                                        playout.writePcm(silenceBuffer, 0, silenceLen)
-                                    }
-                                }
-                                inSilenceRun = true
-                            } else {
-                                inSilenceRun = false
-                                silenceRunMs = 0
-                                silenceRunLogged = false
-                                val pcmLen = data.size - HEADER_SIZE
-                                if (frameSize > 0 && sampleRate > 0) {
-                                    packetMs = (pcmLen * 1000) / (sampleRate * frameSize)
-                                }
-                                if (playout.shouldDrop(pcmLen)) {
-                                    pendingSmooth = true
-                                    if (lastGoodPcm == null || lastGoodPcm!!.size != pcmLen) {
-                                        lastGoodPcm = ByteArray(pcmLen)
-                                    }
-                                    data.copyInto(lastGoodPcm!!, 0, HEADER_SIZE, HEADER_SIZE + pcmLen)
-                                    return
-                                }
-                                val plcTail = concealTail
-                                concealTail = null
-                                if (plcTail != null && frameSize > 0 && pcmLen >= frameSize) {
-                                    pendingSmooth = false
-                                    val merged = crossfadeIntoReal(data, HEADER_SIZE, pcmLen, plcTail, frameSize)
-                                    denoiseInPlace(merged, 0, pcmLen)
-                                    playout.writePcm(merged, 0, pcmLen)
-                                    com.cuscus.wifiaudiostreaming.dsp.AmbientSpectrumAnalyzer
-                                        .feedFrame(merged, 0, pcmLen, frameSize / 2, sampleRate)
-                                    if (lastGoodPcm == null || lastGoodPcm!!.size != pcmLen) {
-                                        lastGoodPcm = ByteArray(pcmLen)
-                                    }
-                                    data.copyInto(lastGoodPcm!!, 0, HEADER_SIZE, HEADER_SIZE + pcmLen)
-                                    return
-                                }
-                                val fadeIn = smooth || pendingSmooth
-                                pendingSmooth = false
-                                val ref = lastGoodPcm
-                                if (fadeIn && ref != null && ref.size >= 2 && pcmLen >= 2) {
-                                    val outBuf = ByteArray(pcmLen)
-                                    System.arraycopy(data, HEADER_SIZE, outBuf, 0, pcmLen)
-                                    val fadeSamples = (minOf(ref.size, pcmLen) / 2).coerceAtMost(256)
-                                    val refBuf = ByteBuffer.wrap(ref).order(ByteOrder.LITTLE_ENDIAN)
-                                    val outB   = ByteBuffer.wrap(outBuf).order(ByteOrder.LITTLE_ENDIAN)
-                                    for (s in 0 until fadeSamples) {
-                                        val t = (s + 1).toFloat() / (fadeSamples + 1)
-                                        val refS = refBuf.getShort(s * 2).toInt()
-                                        val newS = outB.getShort(s * 2).toInt()
-                                        val mixed = (refS * (1f - t) + newS * t).toInt()
-                                            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                                        outB.putShort(s * 2, mixed.toShort())
-                                    }
-                                    denoiseInPlace(outBuf, 0, pcmLen)
-                                    playout.writePcm(outBuf, 0, pcmLen)
-                                    // Feed ambient spectrum visualizer (client side – crossfade branch)
-                                    com.cuscus.wifiaudiostreaming.dsp.AmbientSpectrumAnalyzer
-                                        .feedFrame(outBuf, 0, pcmLen, frameSize / 2, sampleRate)
-                                } else {
-                                    denoiseInPlace(data, HEADER_SIZE, pcmLen)
-                                    playout.writePcm(data, HEADER_SIZE, pcmLen)
-                                    // Feed ambient spectrum visualizer (client side – normal branch)
-                                    com.cuscus.wifiaudiostreaming.dsp.AmbientSpectrumAnalyzer
-                                        .feedFrame(data, HEADER_SIZE, pcmLen, frameSize / 2, sampleRate)
-                                }
-                                if (lastGoodPcm == null || lastGoodPcm!!.size != pcmLen) {
-                                    lastGoodPcm = ByteArray(pcmLen)
-                                }
-                                data.copyInto(lastGoodPcm!!, 0, HEADER_SIZE, HEADER_SIZE + pcmLen)
-                            }
-                        }
-
-                        try {
-                            while (isActive) {
-                                if (rebuildRequestedAt.get() != 0L) {
-                                    if (!rebuildPlaybackTrack("watchdog request")) {
-                                        markDisconnect("PLAYBACK_REBUILD_FAILED")
-                                        throw java.io.IOException("Playback track rebuild failed")
-                                    }
-                                    rebuildRequestedAt.set(0L)
-                                }
-                                val adjustment = targetAdjustment.getAndSet(0)
-                                if (adjustment != 0 && playout.retargetMs(adjustment)) {
-                                    Log.i(TAG, "[PLAYOUT][ADAPTIVE] target -> ${playout.targetMs()} ms")
-                                }
-                                publishPlaybackHealth()
-                                val audio = ArrayList<ByteArray>()
-                                var byeReceived = false
-                                var dg: Datagram? = socket.receive()
-                                while (dg != null) {
-                                    val pk = dg.packet
-                                    val pb = ByteArray(pk.remaining.toInt())
-                                    pk.readFully(pb)
-                                    if (pb.size >= 2 && pb[0] == MAGIC_0 && pb[1] == MAGIC_1) {
-                                        audio.add(pb)
-                                    } else {
-                                        val ctrl = pb.toString(Charsets.UTF_8).trim()
-                                        when (ctrl) {
-                                            "PING" -> {
-                                                val pingAt = System.currentTimeMillis()
-                                                lastPingAt.set(pingAt)
-                                                lastServerActivityAt.set(pingAt)
-                                                // New senders use this as a real liveness signal.
-                                                // Older senders simply ignore the extra control packet.
-                                                sock.send(
-                                                    Datagram(
-                                                        buildPacket { writeText("PONG") },
-                                                        remoteAddress
-                                                    )
-                                                )
-                                            }
-                                            "BYE" -> {
-                                                markDisconnect("SERVER_BYE")
-                                                if (disconnectionSoundEnabled) { playDisconnectionSound(context); disconnectionSoundPlayed = true }
-                                                byeReceived = true
-                                            }
-                                        }
-                                    }
-                                    dg = socket.incoming.tryReceive().getOrNull()
-                                }
-                                if (byeReceived) { transportJob.cancel(); break }
-                                if (audio.isEmpty()) continue
-
-                                // Un burst grosso non significa latenza alta: quanto scartare
-                                // lo decide PlayoutGovernor sulla coda reale di AudioTrack.
-                                for (a in audio) {
-                                    if (!isActive) break
-                                    playPacket(a)
-                                }
-                                if (playout.hardResyncIfNeeded()) {
-                                    expectedSeq = -1
-                                    pendingSmooth = true
-                                }
-                                playout.retune()
-                            }
-                        } finally {
-                            watchdogJob.cancel()
-                        }
-                    } finally {
-                        if (generation == streamGeneration) LinkMetrics.stop()
-                        unregisterClientPlaybackTrack(audioTrack)
-                        audioTrack?.stop()
-                        audioTrack?.release()
-                        // Reset ambient visualizer so the background fades cleanly
-                        if (generation == streamGeneration) {
-                            com.cuscus.wifiaudiostreaming.dsp.AmbientSpectrumAnalyzer.reset()
-                        }
-                        if (connectedSuccessfully && generation == streamGeneration) {
-                            withContext(NonCancellable) {
-                                try {
-                                    socket?.send(Datagram(buildPacket { writeText("CLIENT_BYE") }, InetSocketAddress(serverInfo.ip, serverInfo.port)))
-                                } catch (_: Exception) {}
-                            }
-                        }
-                        socket?.close()
-                    }
-                } else {
-                    var audioTrack: AudioTrack? = null
-                    var multicastSocket: MulticastSocket? = null
-                    val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                    val multicastLock = wifiManager.createMulticastLock("wifi_audio_streaming_multicast_lock")
-                    try {
-                        multicastLock.acquire()
-                        connectionStatus.value = context.getString(R.string.status_joining_multicast)
-                        val groupAddress = InetAddress.getByName(NetworkSettings.MULTICAST_GROUP_IP)
-                        multicastSocket = MulticastSocket(serverInfo.port).apply {
-                            reuseAddress = true
-                            runCatching { receiveBufferSize = 128 * 1024 }
-                            getWifiNetworkInterface(networkInterfaceName)?.let { networkInterface = it }
-                            MulticastNet.joinAllGroups(this)
-                        }
-
-                        val channelConfigOut = if (channelConfig == "STEREO") AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-                        val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelConfigOut, AudioFormat.ENCODING_PCM_16BIT)
-                        prepareNoiseReducer(context, sampleRate, if (channelConfig == "STEREO") 2 else 1)
-                        // Ultima rete: il dispositivo puo' rifiutare una combinazione
-                        // che sulla carta e' valida. Meglio non riprodurre nulla.
-                        if (minBuffer == AudioTrack.ERROR || minBuffer == AudioTrack.ERROR_BAD_VALUE) {
-                            Log.e(TAG, "[CLIENT] AudioTrack non supporta ${sampleRate}Hz/$channelConfig")
-                            connectionStatus.value = context.getString(
-                                R.string.status_unsupported_format,
-                                "$sampleRate Hz, " + (if (channelConfig == "STEREO") "stereo" else "mono") + ", 16 bit"
-                            )
-                            isStreamingCurrent.value = false
-                            withContext(Dispatchers.Main) { onServerDisconnected?.invoke() }
-                            return@launch
-                        }
-                        val mcSettings = SettingsDataStore(context).settingsFlow.first()
-                        val mcAdaptive = mcSettings.adaptiveLatency
-                        val mcLatencyMs = if (mcAdaptive) 20 else UsbLink.effectiveLatencyMs(mcSettings.latencyMs)
-                        val frameSize = if (channelConfig == "STEREO") 4 else 2
-                        val mcHeadroomMs = if (mcAdaptive) 140 else 80
-                        var playbackBufferSize = minBuffer.coerceAtLeast(
-                            (mcLatencyMs + mcHeadroomMs) * sampleRate / 1000 * frameSize
-                        )
-
-                        if (playbackBufferSize % frameSize != 0) {
-                            playbackBufferSize += frameSize - (playbackBufferSize % frameSize)
-                        }
-
-                        audioTrack = AudioTrack.Builder()
-                            .setAudioAttributes(
-                                AudioAttributes.Builder()
-                                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                    .build()
-                            )
-                            .setAudioFormat(
-                                AudioFormat.Builder()
-                                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                                    .setSampleRate(sampleRate)
-                                    .setChannelMask(channelConfigOut)
-                                    .build()
-                            )
-                            .setBufferSizeInBytes(playbackBufferSize)
-                            .setTransferMode(AudioTrack.MODE_STREAM)
-                            .build()
-                        registerClientPlaybackTrack(audioTrack!!)
-
-                        val mcPlayout = PlayoutGovernor(
-                            audioTrack, sampleRate, frameSize, mcLatencyMs, TAG, mcAdaptive
-                        )
-                        val mcHealth = PlaybackHealth(mcAdaptive)
-                        var mcHealthSampleAt = android.os.SystemClock.elapsedRealtime()
-                        // Same preroll policy as the unicast path: half of the
-                        // playout target, so higher buffers start protected.
-                        val mcPrerollLen = (sampleRate * frameSize * (mcLatencyMs / 2) / 1000)
-                            .coerceIn(0, playbackBufferSize - frameSize)
-                            .let { it - (it % frameSize) }
-                        if (mcPrerollLen > 0) {
-                            mcPlayout.writePcm(ByteArray(mcPrerollLen), 0, mcPrerollLen)
-                        }
-                        audioTrack.play()
-                        LinkMetrics.start(if (sessionUsesUsb()) "USB" else "WIFI", sampleRate)
-                        connectionStatus.value = context.getString(R.string.status_streaming)
-                        if (connectionSoundEnabled && announceConnectSound) playConnectionSound(context)
-                        connectedSuccessfully = true
-
-                        multicastSocket.soTimeout = 2000
-
-                        val buffer = ByteArray(65536)
-                        val packet = DatagramPacket(buffer, buffer.size)
-
-                        val MC_MAGIC_0: Byte = 0x57
-                        val MC_MAGIC_1: Byte = 0x46
-                        val MC_HEADER_SIZE = 10
-                        var mcVersionChecked = false
-                        var mcDir: WfasCrypto.Dir? = null
-                        var mcWin = WfasCrypto.ReplayWindow()
-                        var mcExpectedSeq = -1
-                        var mcLastGoodPcm: ByteArray? = null
-                        var mcConcealTail: ByteArray? = null
-                        var mcInSilence = false
-                        val mcFrameSize = if (channelConfig == "STEREO") 4 else 2
-                        var mcKey = clientPresharedKey
-                        var mcKeyAsked = false
-                        val mcExpectedEpoch = expectedMcastEpoch
-                        val mcFromInvite = clientKeyFromInvite
-                        // Whether the group is encrypted is settled here, from our
-                        // own configuration (key set, invite, expected epoch) or
-                        // from a beacon whose MAC verified - neither of which can be
-                        // forged. Once settled, audio without FLAG_ENCRYPTED is not
-                        // from the server and is dropped: the flag rides in the
-                        // cleartext header, so it is never evidence on its own, and
-                        // the sender does not get a per-packet vote on whether the
-                        // AEAD applies.
-                        var mcEncRequired = mcKey.isNotEmpty() || mcFromInvite || mcExpectedEpoch != null
-                        var mcLastEpoch = when {
-                            mcExpectedEpoch != null -> mcExpectedEpoch - 1
-                            mcFromInvite -> 0L
-                            else -> SettingsDataStore(context).getMcastClientEpoch(serverInfo.ip)
-                        }
-                        var mcEpochVerified = mcExpectedEpoch == null
-                        var mcEpochRejected = false
-                        var mcKeyRejected = false
-                        var mcBeaconSeenAt = 0L
-                        var mcMacFailStreak = 0
-                        val beaconPrefixLen = WfasCrypto.MSG_MCAST_ENC.length
-                        var mcLastRxAt = System.currentTimeMillis()
-                        var mcAnyRx = false
-
-                        while (isActive) {
-                            try {
-                                packet.length = buffer.size
-                                multicastSocket.receive(packet)
-                                mcLastRxAt = System.currentTimeMillis()
-                                mcAnyRx = true
-                            } catch (_: java.net.SocketTimeoutException) {
-                                val beaconExpected = mcDir != null || (mcKey.isNotEmpty() && !mcAnyRx)
-                                if (beaconExpected &&
-                                    System.currentTimeMillis() - mcLastRxAt >= MULTICAST_SILENCE_TIMEOUT_MS) {
-                                    markDisconnect("MULTICAST_SILENCE_TIMEOUT", "lastRxAgeMs=${System.currentTimeMillis() - mcLastRxAt}")
-                                    connectionStatus.value =
-                                        context.getString(R.string.status_server_disconnected)
-                                    if (disconnectionSoundEnabled && !ClientSessionController.wantsConnection()) {
-                                        playDisconnectionSound(context)
-                                        disconnectionSoundPlayed = true
-                                    }
-                                    break
-                                }
-                                continue
-                            }
-
-                            val audioPackets = ArrayList<ByteArray>()
-                            var stopLoop = false
-                            var mcAbort = false
-
-                            suspend fun classify(src: ByteArray, plen: Int) {
-                                if (plen <= 0) return
-                                if (plen >= beaconPrefixLen &&
-                                    String(src, 0, beaconPrefixLen, Charsets.US_ASCII) == WfasCrypto.MSG_MCAST_ENC) {
-                                    if (mcBeaconSeenAt == 0L) mcBeaconSeenAt = System.currentTimeMillis()
-                                    if (mcKey.isEmpty() && !mcKeyAsked) {
-                                        mcKeyAsked = true
-                                        mcKey = requestKeyFromUi(false) ?: ""
-                                        if (mcKey.isBlank()) connectionStatus.value = context.getString(R.string.status_key_required)
-                                        else mcEncRequired = true
-                                    }
-                                    if (mcKey.isNotEmpty()) {
-                                        val info = WfasCrypto.parseMcastBeacon(mcKey, String(src, 0, plen, Charsets.US_ASCII), -1L)
-                                        if (info != null && !mcEpochVerified) {
-                                            mcEpochVerified = true
-                                            if (mcExpectedEpoch != null && info.epoch != mcExpectedEpoch) {
-                                                pendingEpochMismatch.value = true
-                                            }
-                                        }
-                                        if (info == null) {
-                                            mcMacFailStreak++
-                                            if (mcDir != null && mcMacFailStreak >= 6) {
-                                                pendingEpochMismatch.value = true
-                                                connectionStatus.value =
-                                                    context.getString(R.string.status_group_rekeyed)
-                                                stopLoop = true
-                                                return
-                                            }
-                                            if (mcDir == null && mcMacFailStreak >= 6 && !mcKeyRejected) {
-                                                mcKeyRejected = true
-                                                connectionStatus.value =
-                                                    context.getString(R.string.key_dialog_wrong)
-                                                if (mcFromInvite) {
-                                                    pendingInviteRejected.value = true
-                                                } else {
-                                                    mcKey = ""
-                                                    mcKeyAsked = false
-                                                    mcMacFailStreak = 0
-                                                    mcKeyRejected = false
-                                                }
-                                            }
-                                        } else {
-                                            mcMacFailStreak = 0
-                                        }
-                                        if (info != null && (info.epoch > mcLastEpoch || (mcDir == null && info.epoch == mcLastEpoch))) {
-                                            mcDir = WfasCrypto.deriveMulticast(mcKey, info.salt)
-                                            sessionEncryptedLive.value = true
-                                            mcEncRequired = true
-                                            mcWin = WfasCrypto.ReplayWindow()
-                                            if (info.epoch > mcLastEpoch) {
-                                                mcLastEpoch = info.epoch
-                                                if (!mcFromInvite) {
-                                                    SettingsDataStore(context).setMcastClientEpoch(serverInfo.ip, info.epoch)
-                                                }
-                                            }
-                                        } else if (info != null && mcDir == null && !mcEpochRejected) {
-                                            mcEpochRejected = true
-                                            pendingEpochMismatch.value = true
-                                            connectionStatus.value =
-                                                context.getString(R.string.status_group_rekeyed)
-                                        }
-                                        if (info == null && !mcEpochVerified && mcExpectedEpoch != null &&
-                                            System.currentTimeMillis() - mcBeaconSeenAt > 6000L
-                                        ) {
-                                            mcEpochVerified = true
-                                            pendingEpochMismatch.value = true
-                                        }
-                                    }
-                                    return
-                                }
-                                if (plen == 3 && String(src, 0, 3, Charsets.UTF_8) == "BYE") {
-                                    markDisconnect("SERVER_BYE_MULTICAST")
-                                    connectionStatus.value =
-                                        context.getString(R.string.status_server_disconnected)
-                                    if (disconnectionSoundEnabled) { playDisconnectionSound(context); disconnectionSoundPlayed = true }
-                                    stopLoop = true
-                                    return
-                                }
-                                // Only WFAS packets are queued. Our sender always
-                                // writes the header, encrypted or not, so a datagram
-                                // without the magic is foreign traffic and never
-                                // something to play: the desktop and the C reference
-                                // (WFAS_PKT_OTHER) have always dropped it.
-                                if (plen < MC_HEADER_SIZE || src[0] != MC_MAGIC_0 || src[1] != MC_MAGIC_1) return
-                                lastAudioAt.set(System.currentTimeMillis())
-                                audioPackets.add(src.copyOf(plen))
-                            }
-
-                            fun mcConcealBeforeSeq(seq: Int) {
-                                if (mcExpectedSeq >= 0) {
-                                    val gap = (seq - mcExpectedSeq) and 0xFFFF
-                                    val ref = mcLastGoodPcm
-                                    if (gap in 1..8 && ref != null) {
-                                        val wanted = gap.coerceAtMost(3) * ref.size
-                                        val filled = rampedConceal(ref, wanted, mcFrameSize)
-                                        if (filled != null && !mcPlayout.shouldDrop(wanted)) {
-                                            val body = wanted - (wanted % mcFrameSize)
-                                            mcPlayout.writePcm(filled, 0, body)
-                                            mcConcealTail = filled.copyOfRange(body, filled.size)
-                                        }
-                                    }
-                                }
-                                mcExpectedSeq = (seq + 1) and 0xFFFF
-                            }
-
-                            fun mcRemember(src: ByteArray, off: Int, lenBytes: Int) {
-                                if (lenBytes <= 0) return
-                                var keep = mcLastGoodPcm
-                                if (keep == null || keep.size != lenBytes) {
-                                    keep = ByteArray(lenBytes)
-                                    mcLastGoodPcm = keep
-                                }
-                                System.arraycopy(src, off, keep, 0, lenBytes)
-                                mcInSilence = false
-                            }
-
-                            fun mcFadeOutOnce() {
-                                if (mcInSilence) return
-                                mcInSilence = true
-                                val ref = mcLastGoodPcm ?: return
-                                val faded = rampedConceal(ref, ref.size, mcFrameSize) ?: return
-                                if (mcPlayout.shouldDrop(ref.size)) return
-                                val body = ref.size - (ref.size % mcFrameSize)
-                                mcPlayout.writePcm(faded, 0, body)
-                                mcConcealTail = faded.copyOfRange(body, faded.size)
-                            }
-
-                            suspend fun playMc(audio: ByteArray) {
-                                val len = audio.size
-                                if (len >= MC_HEADER_SIZE && audio[0] == MC_MAGIC_0 && audio[1] == MC_MAGIC_1) {
-                                    val mcSeq = ((audio[4].toInt() and 0xFF) shl 8) or (audio[5].toInt() and 0xFF)
-                                    if (len == MC_HEADER_SIZE) {
-                                        mcConcealBeforeSeq(mcSeq)
-                                        mcFadeOutOnce()
-                                        return
-                                    }
-                                    mcConcealBeforeSeq(mcSeq)
-                                    LinkMetrics.onPacket(
-                                        ((audio[4].toInt() and 0xFF) shl 8) or (audio[5].toInt() and 0xFF),
-                                        ((audio[6].toLong() and 0xFF) shl 24) or
-                                                ((audio[7].toLong() and 0xFF) shl 16) or
-                                                ((audio[8].toLong() and 0xFF) shl 8) or
-                                                (audio[9].toLong() and 0xFF)
-                                    )
-                                    if (!mcVersionChecked) {
-                                        mcVersionChecked = true
-                                        val packetVersion = audio[2].toInt() and 0xFF
-                                        if (packetVersion != WFAS_PROTOCOL_VERSION) {
-                                            signalProtocolMismatch(packetVersion, PeerRole.SENDER)
-                                            connectionStatus.value = context.getString(R.string.status_protocol_incompatible)
-                                            markDisconnect("PROTOCOL_MISMATCH", "senderProtocol=${packetVersion} localProtocol=${WFAS_PROTOCOL_VERSION}")
-                                            mcAbort = true
-                                            return
-                                        }
-                                    }
-                                    if ((audio[3].toInt() and WfasCrypto.FLAG_ENCRYPTED) != 0) {
-                                        val dir = mcDir
-                                        if (dir != null) {
-                                            val r = WfasCrypto.decryptPacket(dir, mcWin, audio, len)
-                                            if (r is WfasCrypto.Decrypted.Ok && r.pcm.isNotEmpty()) {
-                                                audioSupply.observe(android.os.SystemClock.elapsedRealtime(), r.pcm, 0, r.pcm.size)
-                                                if (mcPlayout.shouldDrop(r.pcm.size)) return
-                                                val t = mcConcealTail
-                                                mcConcealTail = null
-                                                val outPcm = if (t != null && r.pcm.size >= mcFrameSize)
-                                                    crossfadeIntoReal(r.pcm, 0, r.pcm.size, t, mcFrameSize) else r.pcm
-                                                denoiseInPlace(outPcm, 0, outPcm.size)
-                                                mcPlayout.writePcm(outPcm, 0, outPcm.size)
-                                                mcRemember(r.pcm, 0, r.pcm.size)
-                                                // Feed ambient spectrum visualizer (multicast encrypted)
-                                                com.cuscus.wifiaudiostreaming.dsp.AmbientSpectrumAnalyzer
-                                                    .feedFrame(r.pcm, 0, r.pcm.size, if (channelConfig == "STEREO") 2 else 1, sampleRate)
-                                            }
-                                        }
-                                    } else if (!mcEncRequired) {
-                                        val pcmLen = len - MC_HEADER_SIZE
-                                        if (pcmLen > 0) {
-                                            audioSupply.observe(android.os.SystemClock.elapsedRealtime(), audio, MC_HEADER_SIZE, pcmLen,
-                                                (audio[3].toInt() and 0x01) != 0)
-                                            if (mcPlayout.shouldDrop(pcmLen)) return
-                                            mcRemember(audio, MC_HEADER_SIZE, pcmLen)
-                                            val t = mcConcealTail
-                                            mcConcealTail = null
-                                            val outPcm = if (t != null && pcmLen >= mcFrameSize)
-                                                crossfadeIntoReal(audio, MC_HEADER_SIZE, pcmLen, t, mcFrameSize)
-                                            else audio.copyOfRange(MC_HEADER_SIZE, MC_HEADER_SIZE + pcmLen)
-                                            denoiseInPlace(outPcm, 0, pcmLen)
-                                            mcPlayout.writePcm(outPcm, 0, pcmLen)
-                                            // Feed ambient spectrum visualizer (multicast plain header)
-                                            com.cuscus.wifiaudiostreaming.dsp.AmbientSpectrumAnalyzer
-                                                .feedFrame(outPcm, 0, pcmLen, if (channelConfig == "STEREO") 2 else 1, sampleRate)
-                                        }
-                                    }
-                                }
-                                // No branch for datagrams without the magic:
-                                // classify does not even queue them.
-                            }
-
-                            classify(packet.data, packet.length)
-
-                            if (stopLoop) break
-                            if (audioPackets.isEmpty()) continue
-
-                            mcPlayout.hardResyncIfNeeded()
-                            for (a in audioPackets) {
-                                if (!isActive) break
-                                playMc(a)
-                            }
-                            mcPlayout.retune()
-                            val healthNow = android.os.SystemClock.elapsedRealtime()
-                            if (healthNow - mcHealthSampleAt >= 1000) {
-                                mcHealthSampleAt = healthNow
-                                val decision = mcHealth.sample(healthNow, audioTrack.underrunCount,
-                                    audioSupply.flowing(healthNow), mcPlayout.stalledForMs(), mcPlayout.recoveryFailures())
-                                if (decision.targetDeltaMs != 0 && mcPlayout.retargetMs(decision.targetDeltaMs)) {
-                                    Log.i(TAG, "[PLAYOUT][ADAPTIVE][MC] target -> ${mcPlayout.targetMs()} ms")
-                                }
-                                if (decision.rebuild) {
-                                    markDisconnect("MULTICAST_PLAYBACK_UNHEALTHY")
-                                    throw java.io.IOException("Multicast playback recovery failed; reconnecting")
-                                }
-                            }
-                            if (mcAbort) break
-                        }
-                    } finally {
-                        if (generation == streamGeneration) LinkMetrics.stop()
-                        unregisterClientPlaybackTrack(audioTrack)
-                        audioTrack?.stop()
-                        audioTrack?.release()
-                        // Reset ambient visualizer so the background fades cleanly
-                        if (generation == streamGeneration) {
-                            com.cuscus.wifiaudiostreaming.dsp.AmbientSpectrumAnalyzer.reset()
-                        }
-                        try {
-                            val groupAddress = InetAddress.getByName(NetworkSettings.MULTICAST_GROUP_IP)
-                            multicastSocket?.let { MulticastNet.leaveAllGroups(it) }
-                        } catch (_: Exception) {}
-                        multicastSocket?.close()
-                        if (multicastLock.isHeld) multicastLock.release()
-                    }
-                }
-            } catch (e: BindException) {
-                if (generation != streamGeneration) return@launch
-                markDisconnect("BIND_ERROR", e.message.orEmpty())
-                connectionStatus.value = context.getString(R.string.status_port_in_use)
-            } catch (e: Exception) {
-                if (generation != streamGeneration) return@launch
-                if (e is TimeoutCancellationException) {
-                    markDisconnect("CONNECTION_TIMEOUT", e.message.orEmpty())
-                    connectionStatus.value = "Timeout connessione al server"
-                } else if (e !is CancellationException) {
-                    markDisconnect("CLIENT_EXCEPTION_${e::class.java.simpleName}", e.message.orEmpty())
-                    connectionStatus.value = context.getString(R.string.status_client_error, e.message)
-                }
-            } finally {
-                val finalNow = System.currentTimeMillis()
-                RuntimeDiagnostics.event("RECEIVER_SESSION_END", "reason=${disconnectReason.get()} peer=${serverInfo.ip}:${serverInfo.port} connected=$connectedSuccessfully status=${connectionStatus.value} metrics=${LinkMetrics.snapshot.value.format()}", true)
-                val finalPingAt = lastPingAt.get()
-                val finalAudioAt = lastAudioAt.get()
-                val finalActivityAt = lastServerActivityAt.get()
-                Log.i(
-                    TAG,
-                    "[CLIENT][SESSION-END] reason=${disconnectReason.get()} " +
-                            "mode=${if (serverInfo.isMulticast) "MULTICAST" else "UNICAST"} " +
-                            "peer=${serverInfo.ip}:${serverInfo.port} connected=${connectedSuccessfully} " +
-                            "pingAgeMs=${if (finalPingAt > 0L) finalNow - finalPingAt else -1L} " +
-                            "audioAgeMs=${if (finalAudioAt > 0L) finalNow - finalAudioAt else -1L} " +
-                            "activityAgeMs=${if (finalActivityAt > 0L) finalNow - finalActivityAt else -1L} " +
-                            "status='${connectionStatus.value}' netRev=${networkRevision.value} " +
-                            "metrics=${LinkMetrics.snapshot.value.format()}"
-                )
-                if (generation == streamGeneration) {
-                    micStreamingJob?.cancel()
-                    micStreamingJob = null
-                    isMicMuted.value = false
-                }
-                if (connectedSuccessfully &&
-                    !disconnectionSoundPlayed &&
-                    disconnectionSoundEnabled &&
-                    !ClientSessionController.wantsConnection()
-                ) {
-                    playDisconnectionSound(context)
-                }
-                val shouldNotifySessionOwner =
-                    isStreamingCurrent.value || ClientSessionController.wantsConnection()
-                if (shouldNotifySessionOwner && generation == streamGeneration) {
-                    scope.launch(Dispatchers.Main) {
-                        if (generation != streamGeneration) return@launch
-                        val currentStatus = connectionStatus.value
-                        finishClientTransportAttempt(generation)
-
-                        val contactingPrefix = context.getString(R.string.status_contacting_server, "").substringBefore("%")
-                        val waitingClientPrefix = context.getString(R.string.status_waiting_for_client, 0).substringBefore("%")
-                        val joiningPrefix = context.getString(R.string.status_joining_multicast)
-                        val waitingAckPrefix = context.getString(R.string.status_waiting_for_ack)
-
-                        if (currentStatus != context.getString(R.string.status_idle) &&
-                            currentStatus != context.getString(R.string.status_streaming) &&
-                            !currentStatus.startsWith(contactingPrefix) &&
-                            !currentStatus.startsWith(waitingClientPrefix) &&
-                            !currentStatus.startsWith(joiningPrefix) &&
-                            !currentStatus.startsWith(waitingAckPrefix)
-                        ) {
-                            connectionStatus.value = currentStatus
-                        }
-                        onServerDisconnected?.invoke()
-                    }
-                }
-            }
-        }
-    }
-
-    private fun prepareClientTransportAttempt(context: Context) {
-        // Starting/retrying a receiver session must not run the full global stop
-        // path: that path also tears down sender-side/global state and used to
-        // make a recoverable UDP timeout look like the receiver itself stopped.
-        if (isServerStreaming) {
-            stopStreaming(context)
-            return
-        }
-
-        streamingJob?.takeIf { it.isActive }?.cancel()
-        micStreamingJob?.cancel()
-        micStreamingJob = null
-        micSendDir = null
-        activePeerIp = null
-        unicastPeerConnected.value = false
-        sessionEncryptedLive.value = false
-        isMicMuted.value = false
-        isStreamingCurrent.value = false
-    }
-
-    private fun finishClientTransportAttempt(generation: Long) {
-        if (generation != streamGeneration) return
-        // End only this transport attempt. The logical RECEIVE mode and its
-        // remembered target belong to ClientSessionController and stay alive.
-        activePeerIp = null
-        unicastPeerConnected.value = false
-        sessionEncryptedLive.value = false
-        micStreamingJob?.cancel()
-        micStreamingJob = null
-        micSendDir = null
-        isMicMuted.value = false
-        streamingJob = null
-        isStreamingCurrent.value = false
-    }
-
     fun stopStreaming(context: Context) {
+        ClientSessionController.stopTransports()
         openStreamGeneration() // Invalidate pending old receiver finalizers immediately.
         activePeerIp = null
         unicastPeerConnected.value = false
@@ -3446,12 +2376,27 @@ object NetworkManager {
         isStreamingCurrent.value = false
     }
 
+    private var receiverMicOwner: String? = null
+    internal fun startReceiverMicrophone(context: Context, sourceId: String, peer: ServerInfo,
+                                        settings: com.cuscus.wifiaudiostreaming.data.AppSettings,
+                                        direction: WfasCrypto.Dir?) {
+        if (receiverMicOwner != null) return
+        receiverMicOwner = sourceId
+        micSendDir = direction
+        micStreamingJob = scope.launchMicSenderJob(context, peer, settings.sampleRate,
+            settings.channelConfig, settings.bufferSize, settings.micPort)
+    }
+
+    internal fun stopReceiverMicrophone(sourceId: String) {
+        if (receiverMicOwner != sourceId) return
+        micStreamingJob?.cancel(); micStreamingJob = null
+        micSendDir = null; receiverMicOwner = null
+    }
+
     fun playConnectionSound(context: Context) {
-        try {
-            val player = android.media.MediaPlayer.create(context, R.raw.connection_sound)
-            player?.setOnCompletionListener { it.release() }
-            player?.start()
-        } catch (_: Exception) {}
+        // Resource/player initialization must not stall the source's UDP loop.
+        val app = context.applicationContext
+        scope.launch { ConnectionSoundPlayback.play(app) }
     }
 
     fun playDisconnectionSound(context: Context) {

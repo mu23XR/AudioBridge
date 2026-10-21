@@ -1,6 +1,64 @@
 # Project State
 
+## Current Android checkpoint — 2026-10-21
+
+Issue [#61](https://github.com/mu23XR/AudioBridge/issues/61) tracks the separately
+pending VPN-rewritten UDP reply-port repair. The user has now authorized committing
+it on `fix/android-multisource-recovery` / Draft PR #40, based on `18575c8`.
+Pre-commit review narrowed learning to at most one port per attempt and corrected
+the native fixture's foreign-audio rejection assertion. Final local validation
+passes: 158 JVM methods in 26 suites, 22 Python checks, lint with zero errors and
+debug/helper compilation. The strict native runner now requires 12 methods,
+zero skips; a fresh native run and real-device VPN acceptance remain pending.
+The previously verified APK is still source `9ecbbc4`, `1.3.1-test.21`, code
+`610181030`; it does not include this patch. Version/build-request configuration is
+unchanged, publication is disabled, and there is no new Release or device install.
+Debug/helper outputs are development checks, not a newly delivered signed preview.
+See `docs/work-items/android-receiver-endpoint-identity.md` and
+`docs/handoffs/2026-10-21-android-endpoint-commit.md`. The dated entries below retain
+their original evidence and do not supersede this checkpoint.
+
 Last governance refresh: 2026-09-29
+
+## Android multi-source receiver and runtime recovery
+
+2026-10-18 test21 review corrections: Draft PR40/implementation9ecbbc4 fixes observed
+playback accounting across flush/replacement, native tail-loss reporting,
+normal-stop false errors, actual clock-rate control, same-tick bounded silence
+refill and first-PCM fade after silence. Existing queue/cue/provenance corrections
+remain included.20ms adaptive target/admission and all acceptance bounds remain
+unchanged; normal rate-adjustable output can differ from FAST in mixer latency.
+Local157 JVM (147 committed-source +10 pending VPN),22 Python checks and zero-error
+lint/debug/helper builds pass after two further confirmed corrections: let a
+writable time/batch-limited pump continue before soft trim, and count in-flight
+queue eviction only after actual accepted bytes are known. Twelve new scheduling/
+concurrency regressions pass; all audio bounds remain unchanged. Exact9ecbbc4
+Android/Windows/governance/permanent-signed artifact-only and strict standard
+API35 native CI all pass. Native39119476807 executes11/11,0skips on tested merge
+7e60dbbdd47ea27d446868a0d84a187b3b871c3a. Fresh signed artifact12133678144/source
+9ecbbc4/package.test/version1.3.1-test.21/code610181030 has downloaded checksum and
+permanent signer verified under ignored out/test21-ci-9ecbbc4. Publish is skipped;
+latest Release remains test20. Earlier ce353f6 failures, a4dd84611/11 and MuMu9/12
+remain separate evidence, with no post-fix MuMu rerun. Acoustic latency, API<31/
+OEM/overnight and separate RTP/Snapcast output remain unverified/outside scope.
+No Release/publication/installation; old mismatched bundle stays unverified.
+Own2 is closed/restored2CPU; no1/global-ADB/physical-device action. Keep runtime
+Issues5/14/45/51/53/54 open and preserve separate pending VPN changes. See
+docs/work-items/android-test21-review-repair.md and the2026-10-18 adaptive handoff.
+
+2026-10-16 endpoint-identity diagnosis: user reports that with a userspace VPN active on one device the two test21 devices cannot connect at all ("以前随便开 VPN 都可以使用"), after an earlier phase where the stream connected but played with heavy stutter and clipping. Read-only diagnosis used the app's own shell-exportable diagnostics (no device installs, no VPN or setting changes): every handshake reply did reach the client, but the client discarded it because its source port differed from the advertised one (`SOURCE_ENDPOINT_REJECTED ... differentAddress=false differentPort=true`, six rejects per attempt, one stable rewritten port across 342 rejections), so each attempt ended after six seconds with `NO_ACK` and was retried. Root cause is ours, not the VPN: the strict address-and-port peer check was introduced by test20 `819eefc`; test19 `f1662f9` compared the address only, which is why a VPN used to be harmless. Local fix on `fix/android-multisource-recovery`, narrowed after independent review: new `PeerEndpointPolicy` plus `ReceiverTransport.isPeer` adopt a rewritten source port only from a handshake reply (`HELLO_ACK*`/`WFAS_*` handshake shapes) observed before the endpoint is bound; `PING`/`PONG`/`BYE` and audio frames never widen the accepted set, `SOURCE_ENDPOINT_REBOUND` is rate-limited, and the learned port lives on the per-attempt transport. A rewrite that starts mid-session is not adopted in place; the client recovers by reconnecting through a new handshake. Validation: 118 JVM tests in 24 suites pass, and ten native methods pass on the isolated emulator, including the strengthened fixture that sends foreign `PING`/`HELLO_ACK`/`BYE` after the handshake (must not re-point or end the session) and a new fixture that pins handshake-reply adoption of a rewritten port. Real-device acceptance with the VPN on is still pending, and emulator results do not substitute for it. Review also flagged follow-ups that stay open: the Desktop receiver performs no endpoint check at all (`desktop/src/main/kotlin/Main.kt` receive loop) and the sender's IP+port acceptance of CLIENT_BYE/PONG is the mirror face of this defect. No device install, no stable promotion, no merge, no runtime issue closure. See docs/work-items/android-receiver-endpoint-identity.md.
+
+2026-10-15 repair execution: user authorized the focused test20 playback/cue repair and requires emulator-only validation, with no physical-device connections or changes. Bounded batch scheduling, total-backlog disposal separated from clock correction, explicit-silence continuity/health and generation-bound connection cues are implemented locally.106 JVM tests, debug/helper builds and zero-error lint pass; independent review is clear after correcting the empty-FIFO debounce edge. MuMu native fixtures/CI delivery are pending; an offline emulator stopped the first native attempt before installs/tests. See docs/work-items/android-test21-playout.md. No stable promotion or runtime issue closure.
+
+2026-10-15 acceptance follow-up: user confirms test20 and reports higher latency, more stutter/pops and absent connection sound. Treat playback acceptance as failed, not completed by CI/native fixtures. Read-only comparison finds a single-chunk-per-2ms consumer bottleneck and a separate software FIFO omitted from governor feedback, both introduced in test19 and retained in test20; these are confirmed implementation risks, not a proven explanation of this incident. All sources use the unified receiver, but the mixer adds no common buffer/wait barrier. A connected source's announcement flag is not reset on explicit reconnect, which can suppress its cue. No physical devices were reachable through available cached/discovered endpoints this turn, so active source count, settings and real buffer/underrun evidence remain unknown. User confirmation supersedes the earlier pre-installation checkpoint below; installation was not independently queried this turn. No product/device/external-state changes. See docs/handoffs/2026-10-15-test20-playout-regression.md and the active test20 work item; Draft PR #40 and runtime issues remain open.
+
+2026-10-14 test20 checkpoint: user reports test19 reception waiting for ACK where test16 works; the historical return-path cause remains open. Test20 implements corrected route selection/retry/cancellation, preserved background intent, remembered selectable sender playback, unified 0–100 gain with real optional remote synchronization, PCM continuity/peak protection and authorized private shell export. Emulator integration exposed and corrected notification-denied foreground startup (#47) and a textual multicast beacon/audio-magic collision (#48). Final 90 JVM tests, zero-error lint/debug builds and nine applicable silent native regression methods passed, including a managed-network legacy ACK/foreign-port fixture and gain persistence across separate processes. All four CI workflows for065cb01 succeeded after the Windows upload correction #49; run38588977969 published v1.3.1-test.20 as prerelease/latest=false. Downloaded APK/Windows/source checksums and permanent APK signer/package/version verified (preview code610141524). Physical devices retain test16 and test19; no test20 is installed there. The completed release request is disarmed for subsequent documentation-only commits. Physical communication-sharing, foreground/other-app/lock-screen keys, active capture, encrypted multicast and overnight quality acceptance remain open in docs/work-items/android-test20-reception-volume.md. No stable promotion, merge or runtime issue closure; real-device work stays background/read-only until a separate agreed window.
+
+Implementation authorized on `fix/android-multisource-recovery`, based on the published test18 diagnostics branch. Correct direction is multiple simultaneous senders into one Android receiver with mixed playback; the prior one-sender/multiple-receiver suggestion is withdrawn. Work covers independent receive sessions, bounded partial-write continuity, silence/health telemetry, capture Binder identity/route safety and destination-specific network/offline recovery. Issues #36/#37/#38/#39 and existing #5/#14/#4/#6 remain open. One foreground host, existing WFAS v2 framing, permanent-signed independent preview, original test16 and unrelated Desktop work are preserved. See docs/work-items/android-multisource-recovery.md. Private device evidence is not published.
+
+Independent signed test19 is installed on both devices. Final 58 unit tests and zero-error Android lint/build checks passed; muted multi-source native regression passed on emulator and physical receiver. Explicit recorder attribution corrected the capture startup failure, with both quiet physical capture/start-stop/volume restoration tests passing. Local Desktop checks remain incomplete (existing MinGW native link failure and Maven dependency/TLS limits); Windows CI subsequently passed for implementation f1662f9; prolonged real-audio/OEM/VPN acceptance remains open before merge/release. No stable publication or issue closure.
+
+Implementation commit `f1662f9` is pushed in Draft PR #40, stacked on diagnostics PR #35. All four implementation CI workflows succeeded: Android, Windows checks/build, governance and signed preview run38414923086. Release publication was correctly skipped; the following checkpoint only updates documentation. Remaining acceptance is tracked in the work item rather than closed by short regression fixtures.
 
 ## Android runtime diagnostics and recovery (2026-10-12)
 
@@ -176,3 +234,5 @@ Open Issue #7 tracks remaining repository-governance work, including main-branch
 WFAS 的 `latencyMs` 是每台设备本地保存的播放目标，不会在两端自动同步，也不是发送端到接收端的端到端测量。`NetworkManager` 只在本机作为 WFAS 客户端/接收端创建 `AudioTrack` 时读取它；当前平板→手机方向实际起作用的是手机的值，平板发送端的同名设置不会改变这条发送链路。
 
 代理/VPN 现场结论（2026-10-02）：WFAS 是原始 UDP，不会经 HTTP/SOCKS 代理转发；如果“代理”启用了 TUN/VPN，全局 UDP 和多播可能被隧道路由或拦截。当前 Android 单播接收路径创建普通 UDP socket，没有把选定的 `networkInterface` 绑定到 Wi-Fi `Network`；因此“网络接口”设置不能单独保证代理开启时仍走本地 Wi-Fi。临时验证应开启代理的“允许局域网/绕过私有网段/UDP”并使用单播手动 IP；若仍失败，应把 AudioBridge 加入 VPN 分流直连。该现场尚未在真机上复测，当前 ADB 只有离线模拟器。
+
+更正（2026-10-16）：上面这段 2026-10-02 的代理/VPN 判断在本次真机复现中被证据推翻。平板开着 TUN 类 VPN 时，客户端确实一直收不到可用回包，但原因是**客户端自己的对端校验**：test20 `819eefc` 把"只比地址"改成了"地址+端口"，而发送端设备的用户态 VPN 会改写回包源端口，于是每一包都被判 `differentPort=true` 丢弃，六秒后报 `NO_ACK`。这不是"UDP 被代理转发/拦截"，也不是 VPN 行为变了；test19 `f1662f9` 时代只比地址，所以随便开 VPN 都能用。修复与验证见本文件顶部的 2026-10-16 条目和 docs/work-items/android-receiver-endpoint-identity.md。"把应用加入 VPN 分流直连"不再需要，也不再是本问题的缓解手段。上面关于 TUN 会接管全局 UDP 的通用说明对其它路径仍然成立，但不再是本次连接失败的根因。

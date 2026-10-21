@@ -592,14 +592,15 @@ fun ExpressiveAuthRequestDialog(
 @Composable
 fun ExpressiveKeyRequestDialog(
     wrong: Boolean,
+    source: String = "",
     onSubmit: (String) -> Unit,
     onCancel: () -> Unit
 ) {
     val haptics = rememberAppHaptics()
     val accent =
         if (wrong) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-    var keyText by remember { mutableStateOf("") }
-    var keyVisible by remember { mutableStateOf(false) }
+    var keyText by remember(source) { mutableStateOf("") }
+    var keyVisible by remember(source) { mutableStateOf(false) }
 
     val shake = remember { Animatable(0f) }
     LaunchedEffect(wrong) {
@@ -643,7 +644,9 @@ fun ExpressiveKeyRequestDialog(
                 Spacer(Modifier.height(10.dp))
 
                 Text(
-                    text = if (wrong) stringResource(R.string.key_dialog_wrong)
+                    text = if (source.isNotBlank()) source + "\n" +
+                        (if (wrong) stringResource(R.string.key_dialog_wrong) else stringResource(R.string.key_dialog_body))
+                    else if (wrong) stringResource(R.string.key_dialog_wrong)
                     else stringResource(R.string.key_dialog_body),
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,

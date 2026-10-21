@@ -579,11 +579,12 @@ fun ExpressiveHomeScreen(
             }
 
             AnimatedVisibility(
-                visible = !isServer && !live,
+                visible = !isServer,
                 enter = expandVertically(tween(320, easing = FastOutSlowInEasing)) + fadeIn(tween(280, delayMillis = 60)),
                 exit = shrinkVertically(tween(240, easing = FastOutSlowInEasing)) + fadeOut(tween(140))
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(28.dp)) {
+                    ReceiverSourcesSection()
                     ExpressiveClientOptionsSection(
                         sendMicrophone = appSettings.sendClientMicrophone,
                         accent = accent,
@@ -628,7 +629,7 @@ fun ExpressiveHomeScreen(
                             OutlinedTextField(
                                 value = manualIp,
                                 onValueChange = { manualIp = it },
-                                placeholder = { Text("192.168.1.10  /  [fd00::1]") },
+                                placeholder = { Text("192.168.1.10:9090 / [fd00::1]:9090") },
                                 textStyle = MaterialTheme.typography.bodyLarge.copy(
                                     fontFamily = FontFamily.Monospace
                                 ),
@@ -666,12 +667,12 @@ fun ExpressiveHomeScreen(
                     // famiglia e provarci con la chiave sbagliata fa perdere
                     // tempo. Si porta tutto da solo: stato, ricerca e sessione
                     // vivono piu' a lungo di questa schermata.
-                    SnapcastClientSection(appSettings = appSettings)
+                    if (!live) SnapcastClientSection(appSettings = appSettings)
 
                     // RTP non si annuncia in rete: non c'e' niente da scoprire,
                     // solo un indirizzo che qualcuno ti ha dato. Sta sotto
                     // Snapcast per questo — e' il modo piu' manuale dei tre.
-                    RtpClientSection(appSettings = appSettings)
+                    if (!live) RtpClientSection(appSettings = appSettings)
                 }
             }
 
@@ -1563,7 +1564,7 @@ private fun LiveControls(
             val volume by NetworkManager.serverVolume.collectAsState()
             ExpressiveVolumeSlider(
                 volume = volume,
-                onVolumeChange = { NetworkManager.serverVolume.value = it },
+                onVolumeChange = { NetworkManager.setServerVolume(it) },
                 accent = accent,
                 modifier = Modifier.fillMaxWidth()
             )

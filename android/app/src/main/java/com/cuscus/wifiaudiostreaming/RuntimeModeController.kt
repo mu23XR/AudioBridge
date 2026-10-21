@@ -249,7 +249,10 @@ object RuntimeModeController {
                     sampleRate = settings.sampleRate,
                     channels = if (settings.channelConfig.equals("STEREO", ignoreCase = true)) 2 else 1,
                     packetBytes = settings.maxPayloadBytes,
-                    keepPlayingOnDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                    keepPlayingOnDevice = SenderPlaybackPolicy.keepPlayingOnDevice(
+                        settings.senderLocalPlayback, Build.VERSION.SDK_INT
+                    ),
+                    requireLocalPlayback = settings.senderLocalPlayback == true,
                     networkInterfaceName = settings.networkInterface,
                     persistAfterClient = true
                 )

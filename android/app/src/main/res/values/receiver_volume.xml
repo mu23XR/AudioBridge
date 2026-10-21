@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="source_sender_volume">Sender volume: %1$s%%</string>
+    <string name="source_sender_volume_pending">Waiting for sender confirmation…</string>
+    <string name="source_sender_volume_failed">Volume was not confirmed. Try again when connected.</string>
+    <string name="source_sender_volume_unsupported">This sender does not support remote volume control.</string>
+    <string name="source_sender_volume_loading">Reading sender volume…</string>
+    <string name="source_mix_volume">Local mix volume</string>
+</resources>
