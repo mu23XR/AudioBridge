@@ -4,4 +4,6 @@
 
 The source of this PC candidate is the independent Desktop module tree35b82e9fb798a977f93b8d20fdddb6ab42ba1903, reference productc8c0cb6. Publication adds only portable CI/test helpers and project records around that module. Android must remain tree-identical to the chosen main baseline.
 
-Preview1.3.1-test.21-vpn.2 repairs receiving buffer/clock/startup implementation and automatic update notification behavior, preserving the existing test21 PC features. Cold-start audio cropping and phone/tablet listening/long wireless acceptance remain open. Remote source, Draft PR, CI and assets are still being prepared; do not describe a local reference ZIP as a CI release.
+Preview1.3.1-test.21-vpn.3 repairs receiving buffer/clock/startup implementation and automatic update notification behavior, preserving the existing test21 PC features. Cold-start audio cropping and phone/tablet listening/long wireless acceptance remain open. Remote source, Draft PR, CI and assets are still being prepared; do not describe a local reference ZIP as a CI release.
+
+Draft PR#71 contains the source. Initial run40073998118 passed Windows checks/package identity but publication failed because the REST tag lookup cannot find a draft. The vpn.2 tag remains fixed to b4d1d1b with an empty draft; vpn.3 repairs draft lookup without changing receive behavior or Android. CI and public asset verification remain pending.

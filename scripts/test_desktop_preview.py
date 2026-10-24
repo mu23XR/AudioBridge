@@ -112,6 +112,77 @@ class PreviewChecks(unittest.TestCase):
                 preview.publish(self.root, self.root / "missing", self.source)
             network.assert_not_called()
 
+    def test_draft_lookup_distinguishes_absence_from_graphql_failure(self):
+        draft = {"tag_name": "v" + self.version, "draft": True}
+        with patch.object(preview, "api", side_effect=[None,
+                {"data": {"repository": {"release": {"databaseId": 123}}}}, draft]) as api:
+            self.assertEqual(preview.find_release("mu23XR/AudioBridge", "v" + self.version), draft)
+            self.assertTrue(api.call_args_list[-1].args[0].endswith("/releases/123"))
+        for response in ({"errors": [{"message": "denied"}]}, {"data": {"repository": None}}):
+            with patch.object(preview, "api", side_effect=[None, response]):
+                with self.assertRaises(ValueError):
+                    preview.find_release("mu23XR/AudioBridge", "v" + self.version)
+        with patch.object(preview, "api", side_effect=[None, {"data": {"repository": {"release": None}}}]):
+            self.assertIsNone(preview.find_release("mu23XR/AudioBridge", "v" + self.version))
+
+    def test_draft_create_resume_and_download_must_succeed_before_publication(self):
+        event = self.root / "event.json"
+        event.write_text(json.dumps({"pull_request": {"head": {"repo": {"full_name": "mu23XR/AudioBridge"},
+            "sha": self.source}}}), encoding="utf-8")
+        environment = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "mu23XR/AudioBridge",
+            "GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": str(event), "GH_TOKEN": "fixture-not-a-credential"}
+        for resume, tamper in ((False, False), (True, False), (True, True)):
+            with self.subTest(resume=resume, tamper=tamper):
+                output = self.root / ("output-" + str(resume) + str(tamper))
+                output.mkdir()
+                (output / "release-notes.md").write_text("fixture", encoding="utf-8")
+                (output / "package.zip").write_bytes(b"verified bytes")
+                state = {"created": resume, "draft": True}
+                uploaded = {}
+                operations = []
+
+                def fake_api(endpoint, **kwargs):
+                    if "/git/ref/" in endpoint:
+                        return {"object": {"type": "commit", "sha": self.source}}
+                    release = {"tag_name": "v" + self.version, "draft": state["draft"], "prerelease": True,
+                        "target_commitish": self.source, "assets": [], "html_url": "https://github.com/fixture"}
+                    if "/releases/tags/" in endpoint:
+                        return release if state["created"] and not state["draft"] else None
+                    if endpoint == "graphql":
+                        return {"data": {"repository": {"release": {"databaseId": 123} if state["created"] else None}}}
+                    if endpoint.endswith("/releases/123"):
+                        return release
+                    self.fail("Unexpected endpoint: " + endpoint)
+
+                def fake_gh(*args):
+                    operation = args[1]
+                    operations.append(operation)
+                    if operation == "create":
+                        state["created"] = True
+                    elif operation == "upload":
+                        uploaded.update({p.name: p.read_bytes() for p in output.iterdir()})
+                    elif operation == "download":
+                        directory = Path(args[args.index("--dir") + 1])
+                        for name, content in uploaded.items():
+                            (directory / name).write_bytes(content + (b"corrupt" if tamper else b""))
+                    elif operation == "edit":
+                        state["draft"] = False
+                    else:
+                        self.fail("Unexpected gh operation: " + operation)
+                    return subprocess.CompletedProcess(args, 0, "", "")
+
+                with patch.dict(os.environ, environment), patch.object(preview, "check_source"), \
+                        patch.object(preview, "verify"), patch.object(preview, "api", side_effect=fake_api), \
+                        patch.object(preview, "gh", side_effect=fake_gh):
+                    if tamper:
+                        with self.assertRaisesRegex(ValueError, "Uploaded asset differs"):
+                            preview.publish(self.root, output, self.source)
+                        self.assertNotIn("edit", operations)
+                    else:
+                        preview.publish(self.root, output, self.source)
+                        self.assertLess(operations.index("download"), operations.index("edit"))
+                        self.assertEqual(operations.count("create"), 0 if resume else 1)
+
     def test_existing_tag_cannot_be_retargeted(self):
         event = self.root / "event.json"
         event.write_text(json.dumps({"pull_request": {"head": {"repo": {"full_name": "mu23XR/AudioBridge"},

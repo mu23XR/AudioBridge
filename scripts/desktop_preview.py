@@ -181,6 +181,29 @@ def api(endpoint, optional=False, fields=None):
     return data
 
 
+def find_release(repository, tag):
+    prefix = "repos/" + repository
+    release = api(prefix + "/releases/tags/" + tag, optional=True)
+    if release is None:
+        # REST's tag endpoint only returns published releases. Resolve a draft's
+        # database ID with GraphQL, as gh itself does, then fetch full REST data.
+        owner, name = repository.split("/")
+        result = api("graphql", fields={
+            "query": "query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){databaseId}}}",
+            "owner": owner, "name": name, "tag": tag})
+        require(not result.get("errors"), "GitHub draft lookup failed: " + str(result.get("errors")))
+        repo = result.get("data", {}).get("repository")
+        require(isinstance(repo, dict), "GitHub draft lookup did not return the repository")
+        draft = repo.get("release")
+        if draft is None:
+            return None
+        release_id = draft.get("databaseId")
+        require(type(release_id) is int and release_id > 0, "Invalid GitHub release ID")
+        release = api(prefix + "/releases/" + str(release_id))
+    require(release["tag_name"] == tag, "GitHub returned a different release tag")
+    return release
+
+
 def publish(root, output, source):
     data = request(root)
     version = data["version"]
@@ -204,12 +227,13 @@ def publish(root, output, source):
     else:
         require(reference["object"]["type"] == "commit" and reference["object"]["sha"] == source,
                 "Existing tag points to another source; refusing replacement")
-    release = api(prefix + "/releases/tags/" + tag, optional=True)
+    release = find_release(repository, tag)
     if release is None:
         gh_ok("release", "create", tag, "--repo", repository, "--verify-tag", "--target", source,
               "--title", "AudioBridge PC " + version, "--notes-file", str(output / "release-notes.md"),
               "--draft", "--prerelease", "--latest=false")
-        release = api(prefix + "/releases/tags/" + tag)
+        release = find_release(repository, tag)
+        require(release is not None, "Created GitHub draft is unavailable")
     require(release["prerelease"] and release["target_commitish"] == source, "Existing release identity differs")
     files = {p.name: p for p in output.iterdir()}
     assets = {asset["name"]: asset for asset in release["assets"]}
@@ -225,8 +249,8 @@ def publish(root, output, source):
             require(checksum(Path(directory) / name) == checksum(path), "Uploaded asset differs: " + name)
     if release["draft"]:
         gh_ok("release", "edit", tag, "--repo", repository, "--draft=false", "--prerelease", "--latest=false")
-    final = api(prefix + "/releases/tags/" + tag)
-    require(not final["draft"] and final["prerelease"], "Release was not published as a preview")
+    final = find_release(repository, tag)
+    require(final is not None and not final["draft"] and final["prerelease"], "Release was not published as a preview")
     print(final["html_url"])
 
 

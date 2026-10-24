@@ -19,4 +19,12 @@
 
 本地实现/验证节点：177个Desktop文件的Git blob均与导入参考相同，保留main上gradlew的可执行位；Android树8bae6c11aebf0c2cb9a1e53a27c36ca4380fa91d、稳定发布和Android工作流未改。本地完整Desktop检查通过；PC请求/版本、包路径/元数据、SHA篡改、fork和手动发布边界、标签不可改写的保护测试通过。发布流程保留main现有Gradle缓存，先检查/构建/校验，再上传并下载复核Draft附件，最后公开预发布。
 
-状态：本地接入及发布保护验证完成，准备通过连接器上传分支并开Draft PR；远端CI和Release仍待实际执行。
+源码已上传为b4d1d1b564e02f7c8dd4d6c9f99aa16bc8260d0d；Draft PR#71已创建。run40073998118完整Windows检查、打包、包身份及Artifact上传成功，发布Job失败。具体原因：脚本创建Draft后调用仅查询已发布版本的REST按tag接口，返回404；GitHub官方CLI也区分Draft查找和公开版查找。
+
+诊断节点：v1.3.1-test.21-vpn.2标签已固定到b4d1d1b，Release422584634为Draft/prerelease且无附件。保持它的标签/来源，修正Draft查找和恢复保护后用新PC版本1.3.1-test.21-vpn.3重新构建发布；不改Android、不改接收音频逻辑、不覆盖本地vpn.2。补充真实Draft查找路径和上传/校验/公开顺序回归测试，再运行CI。
+
+状态：源码/PR完成；发布流程修复与新版本CI待验证，尚无已公开PC预发布。
+
+实现节点：使用GraphQL精确查找tag对应的Draft数据库ID，再按ID读取完整Release；公开版仍走REST tag接口。GraphQL权限/错误不得当作不存在。新增创建/恢复Draft、下载篡改阻止公开的回归场景。仅Desktop版本属性从vpn.2递增vpn.3；其余产品blob与导入参考保持。
+
+验证节点：9项本地无网络发布回归测试通过，覆盖公开查询404后的Draft路径、GraphQL错误、创建/恢复、下载字节篡改禁止公开及已有安全边界；本次未再改音频实现。完整Windows门禁和新版本CI重新构建/发布待远端执行。
