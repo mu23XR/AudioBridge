@@ -1,0 +1,13 @@
+# Live PC stutter diagnosis — 2026-10-24
+
+Owner reported severe ongoing stutter in deployed PC1.3.1-test.21-vpn.3, then asked to capture promptly so they can return to test17. Live evidence was preserved at19:40:42+08:00; do not require them to keep vpn.3 running. The agent did not restart/close the app, alter settings, install on devices, patch product code or publish anything.
+
+Worktree desktop-publish now uses diagnose/desktop-stutter-20261024, branched from clean publication head0c7394e. Published binary source remains3fc718a, Draft PR#71 unmodified. Related acceptance issue#55 remains open; no external issue/PR edit was made in this diagnostic-only task.
+
+Confirmed: launcher35724 owns JVM child31172, both same deployed vpn.3 path; this pair is not evidence of duplicate receivers. App journal shows48kHz16bit stereo, low recorded network loss but severe local queue loss. At63ms,179.975s added9657136 discarded bytes =50.2976s of PCM,105 underrun observations and0 rebuilds. At191ms,720.435s added24650248 discarded bytes =128.3867s of PCM,118 underrun observations and0 rebuilds. Increasing the manual native target did not stop the loss. Three thread snapshots show normal UDP/semaphore waits, not proof of permanent native write blockage.
+
+Relevant implementation: DesktopJitterAudioPlayer's WFAS software queue stays60ms independently of manual target; ReceiverBacklogPolicy trims above50ms to40ms. Overflow/trim therefore removes admitted real PCM under sufficiently large bursts or scheduling/output stalls. Existing continuity fixture has1ms ticks,0–2ms delivery variation and immediate draining, so passing it does not establish this live scenario. The actual live triggering arrival pattern remains unmeasured: PktMon read-only queries failed with driver access denied; no capture/filter was started. Do not claim network batching is conclusively measured or packet loss is always zero.
+
+Evidence is only in ignored out/live-stutter-20261024-31172: runtime-redacted.log, numeric summary.json and threads-1/2/3.txt. Do not publish raw diagnostic files or real PCM. No credential values were output. The app's settings file was read only through a numeric/boolean allowlist.
+
+Next implementation direction: coordinate software/native budgets and stale policy, add realistic burst/scheduling/output-quantization continuity cases, then test the actual same source/output with counters and a test17 comparison. Obtain implementation direction if the next user request remains diagnostic-only. No source change or verified repair exists yet. See docs/work-items/desktop-live-stutter-diagnosis.md.

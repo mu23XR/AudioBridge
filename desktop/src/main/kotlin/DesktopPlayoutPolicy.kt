@@ -38,29 +38,61 @@ internal class PcmDrainPump(
 
 }
 
-/** Network bursts govern stale queue disposal, never instantaneous playback pitch. */
+/** Discard persistent excess latency, not a fresh receive-thread burst. */
 internal class ReceiverBacklogPolicy(private val sampleRate: Int, private val frameSize: Int) {
-    // Sample after draining: a burst that fits in native headroom needs no cut.
-    // The soft trigger must be below PcmQueue's hard ceiling, which offer()
-    // enforces before the player can observe it. Return bytes to KEEP, not drop.
-    private val triggerBytes = framesForMs(DesktopPlayoutLimits.QUEUE_TRIM_TRIGGER_MS) * frameSize
-    private val retainedBytes = framesForMs(DesktopPlayoutLimits.QUEUE_RETENTION_MS) * frameSize
-    private var lastTrimAt: Long? = null
+    private var overBudgetSince: Long? = null
+    private var lastObservedAt: Long? = null
 
-    fun softwareLimit(nowMs: Long, queuedBytes: Int, hasWritableContinuation: Boolean = false): Int? {
-        // A bounded batch may yield while native admission still has room.
-        // Continue that work before treating its remaining FIFO as stale;
-        // the hard queue ceiling remains enforced independently by offer().
-        if (hasWritableContinuation) return null
-        if (queuedBytes <= triggerBytes) return null
-        if (lastTrimAt?.let { nowMs - it < 250 } == true) return null
-        lastTrimAt = nowMs
-        return retainedBytes.toInt()
+    fun softwareLimit(nowMs: Long, queuedBytes: Int, nativeFrames: Long, targetMs: Int,
+                      hasWritableContinuation: Boolean = false): Int? {
+        require(queuedBytes >= 0 && queuedBytes % frameSize == 0 && nativeFrames >= 0 && targetMs > 0)
+        if (lastObservedAt?.let { nowMs < it } == true) reset()
+        lastObservedAt = nowMs
+        val totalFrames = queuedBytes.toLong() / frameSize + nativeFrames
+        if (queuedBytes == 0 || totalFrames <= framesForMs(targetMs + DesktopPlayoutLimits.BURST_HEADROOM_MS)) {
+            overBudgetSince = null
+            return null
+        }
+        val since = overBudgetSince ?: nowMs.also { overBudgetSince = it }
+        // A full native line can leave new PCM in software for a while. Only
+        // sustained excess is stale; bounded writable continuations run first.
+        if (hasWritableContinuation || nowMs - since < DesktopPlayoutLimits.BACKLOG_GRACE_MS) return null
+        overBudgetSince = null
+        val keepFrames = (framesForMs(targetMs + DesktopPlayoutLimits.NATIVE_HEADROOM_MS) - nativeFrames)
+            .coerceAtLeast(0)
+        return (keepFrames * frameSize).coerceAtMost(Int.MAX_VALUE.toLong()).toInt().let { it - it % frameSize }
     }
 
-    fun reset() { lastTrimAt = null }
+    fun reset() { overBudgetSince = null; lastObservedAt = null }
     private fun framesForMs(ms: Int): Long = sampleRate.toLong() * ms / 1000
 
+}
+
+/** Time-weight the whole backlog so a periodic burst cannot alias the clock-control tick. */
+internal class DesktopPlayoutLevel {
+    private var lastAt: Long? = null
+    private var lastFrames = 0L
+    private var weightedFrames = 0.0
+    private var elapsedMs = 0L
+
+    fun observe(nowMs: Long, bufferedFrames: Long) {
+        require(bufferedFrames >= 0)
+        lastAt?.let { previous ->
+            val elapsed = nowMs - previous
+            if (elapsed !in 0..2500) reset()
+            else { weightedFrames += lastFrames * elapsed.toDouble(); elapsedMs += elapsed }
+        }
+        lastAt = nowMs
+        lastFrames = bufferedFrames
+    }
+
+    fun averageFrames(): Long {
+        val average = if (elapsedMs == 0L) lastFrames else (weightedFrames / elapsedMs).toLong()
+        weightedFrames = 0.0; elapsedMs = 0
+        return average
+    }
+
+    fun reset() { lastAt = null; lastFrames = 0; weightedFrames = 0.0; elapsedMs = 0 }
 }
 
 /** Keep an intentionally silent track active without inserting an unbudgeted zero block. */
@@ -131,17 +163,18 @@ internal class PcmSilenceTail(private val channels: Int, private val frames: Int
 
 internal object DesktopPlayoutLimits {
     const val NATIVE_HEADROOM_MS = 15
-    const val QUEUE_CAPACITY_MS = 60
-    const val QUEUE_TRIM_TRIGGER_MS = 50
-    const val QUEUE_RETENTION_MS = 40
+    // Allocation absorbs receive/worker scheduling bursts, without waiting to
+    // fill it. Persistent software+native latency is governed separately.
+    const val QUEUE_CAPACITY_MS = 400
+    const val BURST_HEADROOM_MS = 60
+    const val BACKLOG_GRACE_MS = 250L
 
     fun nativeCapacityMs(health: PlaybackHealth): Int =
         // Reserve adaptive growth without rebuilding a healthy device. Allocation
         // is capacity, not admitted latency: pump/output still use the live target.
         (if (health.adaptive) PlaybackHealth.MAX_ADAPTIVE_TARGET_MS else health.targetMs) + NATIVE_HEADROOM_MS
 
-    // Leave a pump batch free: a packet crossing an exact60ms startup threshold
-    // would otherwise evict the beginning of the stream before the worker runs.
-    fun startupPrerollMs(targetMs: Int): Int = minOf(maxOf(1, targetMs / 2), QUEUE_CAPACITY_MS - 20)
+    // Allocation must not turn into a new startup-delay requirement.
+    fun startupPrerollMs(targetMs: Int): Int = minOf(maxOf(1, targetMs / 2), 40)
 }
 
