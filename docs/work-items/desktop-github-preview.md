@@ -28,3 +28,9 @@
 实现节点：使用GraphQL精确查找tag对应的Draft数据库ID，再按ID读取完整Release；公开版仍走REST tag接口。GraphQL权限/错误不得当作不存在。新增创建/恢复Draft、下载篡改阻止公开的回归场景。仅Desktop版本属性从vpn.2递增vpn.3；其余产品blob与导入参考保持。
 
 验证节点：9项本地无网络发布回归测试通过，覆盖公开查询404后的Draft路径、GraphQL错误、创建/恢复、下载字节篡改禁止公开及已有安全边界；本次未再改音频实现。完整Windows门禁和新版本CI重新构建/发布待远端执行。
+
+远端验证节点：准确源码3fc718ab1d6bfe9b64c153ce384434653119c78b的[run40075136207](https://github.com/mu23XR/AudioBridge/actions/runs/40075136207)两个Job均成功。完整Desktop检查、9项发布保护测试、版本手册、Windows打包和身份校验、Artifact上传、草稿附件上传/下载字节复核及公开预发布均通过。实际[Release](https://github.com/mu23XR/AudioBridge/releases/tag/v1.3.1-test.21-vpn.3)为prerelease=true、draft=false，含6个Windows包/来源/校验/说明附件。publish请求恢复false；后续源码只更新PR，不复用旧标签。
+
+状态：源码上传、Draft PR和公开PC预发布三项交付完成；独立公网下载、包身份/源码及全部附件SHA256校验通过。真机听感/长时音质仍待验收，不属于这次发布完成的承诺。
+
+最终验包节点：公开下载6个附件均与GitHub资产digest和SHA256SUMS一致；ZIP/TAR内容相互对应，内嵌preview版本及SOURCE_COMMIT=3fc718ab1d6bfe9b64c153ce384434653119c78b通过。ZIP 146505734字节，SHA256 bb51c7780549e3c77d26aa1477a40df7047e01bc67689622e35dc70d49864ed3；TAR 146265395字节，SHA256 42f93717dd316e252fc42a0427d5b81f26386b32048257828d672e608ad33e09。公开latest仍解析至v1.3.1。此校验不代表真机听感或长时测试；现有本地vpn.2和回退包保持。未来PC修复继续本主仓分支/PR。

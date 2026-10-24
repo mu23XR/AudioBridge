@@ -9,3 +9,7 @@ docs/releases/desktop-preview.json是明确的PC发布请求，版本必须为te
 只有Windows完整检查/构建及包校验通过，CI才以准确源码SHA创建不可覆盖的v<版本>标签和Draft预发布容器，上传并下载复核全部附件，再公开为prerelease=true/latest=false。已有公开版本不覆盖；恢复同一来源的未完成Draft只能补齐缺少的同名附件，校验失败明确报错。
 
 未来PC产品修复继续在有远端的主仓分支中进行，通过Draft PR/CI交付；旧独立本地仓保留作历史参考。开工先读取实际分支、HEAD、状态，不覆盖另一任务的工作树。CI通过不替代真机听感或过夜验收，音质相关Issue仍需用户场景验证。
+
+当前公开PC预览：[https://github.com/mu23XR/AudioBridge/releases/tag/v1.3.1-test.21-vpn.3](https://github.com/mu23XR/AudioBridge/releases/tag/v1.3.1-test.21-vpn.3)，准确源码3fc718ab1d6bfe9b64c153ce384434653119c78b，Windows门禁/发布成功：[run40075136207](https://github.com/mu23XR/AudioBridge/actions/runs/40075136207)。发布完成后必须将desktop-preview.json的publish恢复false；下一次发布使用新版本和对应说明，再明确置true。此开关已经关闭，不以新文档提交重写原标签。
+
+Draft查找通过GraphQL取得数据库ID再按ID读取REST详情；REST按tag只能查询已公开版，不能据其404断言草稿不存在。第一次vpn.2的空Draft/固定标签保留；vpn.3只更正该发布流程及PC预览版本，不再改动接收逻辑。
