@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -378,7 +378,7 @@ class AudioVisualizer(
         addRegion(250.0, 4000.0, "mids", fMax)
         addRegion(4000.0, 1e9, "highs", fMax)
 
-        val tp = rulePieces(" WiFi Audio Streaming | $label ")
+        val tp = rulePieces(" AudioBridge | $label ")
         topDashL = tp.first; topTitle = tp.second; topDashR = tp.third
         buildBottomRule()
 

@@ -383,7 +383,7 @@ object SnapcastMixer {
                 s.serverVersion.takeIf { it.isNotBlank() }
             ).joinToString(" ")
             val head = ArrayList<String>()
-            head.add(bold("  WiFi Audio Streaming") + dim("  ·  Snapcast mixer"))
+            head.add(bold("  AudioBridge") + dim("  ·  Snapcast mixer"))
             head.add("  " + cyan(fit(title, 26)) + dim(fit(who, 24)) +
                     dim("${s.groups.size} groups · ${s.allClients.size} clients · control ") + ctrl)
             audioLine()?.let { head.add("  " + it) }

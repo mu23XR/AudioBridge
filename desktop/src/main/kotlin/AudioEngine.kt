@@ -30,7 +30,7 @@ class AudioEngine(
     var lastError: String = ""
         private set
 
-    private var started = false
+    @Volatile private var started = false
 
     private val numSamplesPerRead = bufferFrames * 2
     private val readBufShort      = ShortArray(numSamplesPerRead)
@@ -39,6 +39,8 @@ class AudioEngine(
     private external fun nativeRead(outBuf: ShortArray, numSamples: Int): Int
     private external fun nativeStop()
     private external fun nativeGetError(): String
+    private external fun nativeRequestCaptureStop()
+    private external fun nativeCaptureCleanupComplete(): Boolean
 
     private external fun nativeMicSetMixEnabled(enabled: Boolean): Boolean
     private external fun nativeMicSetVolume(volume: Float)
@@ -58,6 +60,34 @@ class AudioEngine(
     private external fun nativeSetSystemVolume(volume: Float)
 
     private external fun nativeSetDebug(enabled: Boolean)
+
+    private val usesWindowsCapture = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+    private val windowsCapture by lazy {
+        WindowsCaptureLifecycle(object : WindowsCaptureBackend {
+            override fun start(): Boolean {
+                nativeSetDebug(AppDebug.enabled)
+                val result = nativeStart(sampleRate, channels, bufferFrames, muteRender)
+                lastError = if (result) "" else nativeGetError().ifEmpty { "Unknown error in nativeStart" }
+                return result
+            }
+            override fun read(): ShortArray? {
+                val count = nativeRead(readBufShort, numSamplesPerRead)
+                if (count < 0) {
+                    lastError = nativeGetError().ifEmpty { "Error in nativeRead" }
+                    throw CaptureLifecycleFailure(lastError)
+                }
+                return readBufShort.copyOf(count)
+            }
+            override fun stop() {
+                nativeStop()
+                if (!nativeCaptureCleanupComplete()) {
+                    lastError = nativeGetError().ifEmpty { "Windows capture cleanup did not complete" }
+                }
+            }
+            override fun requestStop() = nativeRequestCaptureStop()
+            override fun cleanupComplete() = nativeCaptureCleanupComplete()
+        })
+    }
 
     companion object {
         private var libraryLoaded = false
@@ -117,6 +147,12 @@ class AudioEngine(
         }
 
         fun getLoadError(): String? = loadError
+
+        /** Also covers a timed-out start whose caller never obtained an engine. */
+        fun stopPendingWindowsCapture() {
+            if (libraryLoaded && System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+                WindowsCaptureThread.stopPendingOwner()
+        }
     }
 
     fun start(): Boolean {
@@ -124,7 +160,16 @@ class AudioEngine(
             lastError = loadError ?: "Native library not loaded. Call AudioEngine.loadLibrary() first."
             return false
         }
-        if (started) return true
+        if (started && (!usesWindowsCapture || windowsCapture.isStarted)) return true
+
+        if (usesWindowsCapture) {
+            return try { windowsCapture.start().also { started = it } }
+            catch (failure: CaptureLifecycleFailure) {
+                lastError = listOf(failure.message, lastError.takeIf { it.isNotBlank() }).filterNotNull().distinct().joinToString("; ")
+                started = false
+                false
+            }
+        }
 
         nativeSetDebug(AppDebug.enabled)
         val ok = nativeStart(sampleRate, channels, bufferFrames, muteRender)
@@ -138,6 +183,17 @@ class AudioEngine(
     }
 
     fun stop() {
+        if (usesWindowsCapture && libraryLoaded) {
+            // A failed/timed-out start can still own a late native operation.
+            // Do not use the public started flag to discard its cleanup lease.
+            try { windowsCapture.stop() }
+            catch (failure: CaptureLifecycleFailure) {
+                lastError = listOf(failure.message, lastError.takeIf { it.isNotBlank() }).filterNotNull().distinct().joinToString("; ")
+                throw failure
+            }
+            finally { started = false }
+            return
+        }
         if (!started) return
         started = false
         if (libraryLoaded) nativeStop()
@@ -147,6 +203,15 @@ class AudioEngine(
         if (!started) {
             lastError = "AudioEngine not started"
             return@withContext null
+        }
+
+        if (usesWindowsCapture) {
+            return@withContext try {
+                windowsCapture.read().also { if (it?.isEmpty() == true) delay(2) }
+            } catch (failure: CaptureLifecycleFailure) {
+                lastError = failure.message.orEmpty()
+                throw failure
+            }
         }
 
         val written = nativeRead(readBufShort, numSamplesPerRead)
@@ -164,7 +229,7 @@ class AudioEngine(
         readBufShort.copyOf(written)
     }
 
-    val isStarted: Boolean get() = started
+    val isStarted: Boolean get() = if (usesWindowsCapture && started) windowsCapture.isStarted else started
 
     fun setMicMixEnabled(enabled: Boolean): Boolean {
         if (!libraryLoaded) return false

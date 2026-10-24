@@ -2,17 +2,30 @@ name: Validate Desktop Windows
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the explicit Windows preview request after all checks"
+        type: boolean
+        default: false
   push:
     branches: [ "main" ]
     paths:
       - "desktop/**"
       - "WFAS_PROTOCOL.md"
       - ".github/workflows/desktop-windows.yml"
+      - "scripts/desktop_preview.py"
+      - "scripts/test_desktop_preview.py"
+      - "scripts/check-wasapi-lifecycle.ps1"
+      - "docs/releases/desktop-preview.json"
   pull_request:
     paths:
       - "desktop/**"
       - "WFAS_PROTOCOL.md"
       - ".github/workflows/desktop-windows.yml"
+      - "scripts/desktop_preview.py"
+      - "scripts/test_desktop_preview.py"
+      - "scripts/check-wasapi-lifecycle.ps1"
+      - "docs/releases/desktop-preview.json"
 
 permissions:
   contents: read
@@ -28,9 +41,31 @@ defaults:
 jobs:
   windows:
     runs-on: windows-latest
+    outputs:
+      source: ${{ steps.preview.outputs.source }}
+      version: ${{ steps.preview.outputs.version }}
+      publish: ${{ steps.preview.outputs.publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate publication request and clean exact source
+        id: preview
+        working-directory: .
+        run: python scripts/desktop_preview.py prepare --allow-publish "$env:ALLOW_PUBLISH"
+        env:
+          ALLOW_PUBLISH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+
+      - name: Check preview verification and publication guards
+        working-directory: .
+        run: python scripts/test_desktop_preview.py
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -46,5 +81,54 @@ jobs:
       - name: Run Desktop checks
         run: .\gradlew.bat check
 
+      - name: Generate versioned manual before packaging resources
+        run: .\gradlew.bat generateMan
+
       - name: Build Windows portable package
         run: .\gradlew.bat createReleaseDistributable packagePortableArchives
+
+      - name: Verify Windows preview identity and create checksums
+        working-directory: .
+        run: python scripts/desktop_preview.py bundle --source "$env:SOURCE_SHA"
+        env:
+          SOURCE_SHA: ${{ steps.preview.outputs.source }}
+
+      - name: Upload verified Windows preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioBridge-Desktop-Windows
+          path: out/desktop-release/*
+          retention-days: 14
+          if-no-files-found: error
+
+  publish:
+    needs: windows
+    if: needs.windows.outputs.publish == 'true' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.publish))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout verified source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.windows.outputs.source }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Download verified Windows preview
+        uses: actions/download-artifact@v4
+        with:
+          name: AudioBridge-Desktop-Windows
+          path: out/desktop-release
+
+      - name: Verify uploaded assets and publish prerelease
+        run: python scripts/desktop_preview.py publish --source "$SOURCE_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.windows.outputs.source }}

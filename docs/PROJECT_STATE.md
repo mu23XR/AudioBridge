@@ -1,0 +1,9 @@
+# Project state
+
+2026-10-24 PC source is in the main-repository worktree desktop-publish, branch publish/desktop-receive-preview and [Draft PR#71](https://github.com/mu23XR/AudioBridge/pull/71). Continue PC work here; the previous independent repository is preserved as local reference history. The PR remains Draft and unmerged.
+
+[PC preview1.3.1-test.21-vpn.3](https://github.com/mu23XR/AudioBridge/releases/tag/v1.3.1-test.21-vpn.3) was built and published from exact source `3fc718ab1d6bfe9b64c153ce384434653119c78b`. [CI run40075136207](https://github.com/mu23XR/AudioBridge/actions/runs/40075136207) passed all Desktop checks, nine publication regressions, clean Windows packaging, package identity and uploaded-asset download verification. Independent public download verification passed for all six assets, including ZIP/TAR contents, package version, source SHA and GitHub asset SHA256 digests. The explicit publication request is now disabled so later commits do not attempt to reuse the immutable tag. The public latest-stable URL still resolves to v1.3.1.
+
+The original177 Desktop file blobs matched reference module tree35b82e9fb798a977f93b8d20fdddb6ab42ba1903, productc8c0cb6, apart from the main wrapper executable flag. The only subsequent product-file change is the preview version property. Android tree8bae6c11aebf0c2cb9a1e53a27c36ca4380fa91d, protocol and stable/Android workflows remain unchanged from main@ea2dfe8.
+
+The receive-buffer/clock/startup and automatic-update fixes are in this preview. Cold-start audio cropping, physical phone/tablet listening and long wireless acceptance remain open; the audio issue#55 is not closed by CI. The existing local vpn.2 installation and rollback packages are retained. The first vpn.2 publication failed after creating an empty draft/tag at b4d1d1b; its source was not replaced. Details: docs/work-items/desktop-github-preview.md and docs/handoffs/2026-10-24-desktop-github-preview.md.

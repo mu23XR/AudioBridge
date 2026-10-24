@@ -25,8 +25,8 @@ private fun rxCheck(n: String, c: Boolean, d: String = "") {
 
 private class FakeSink : PcmPlaybackSink {
     val pcm = java.io.ByteArrayOutputStream()
-    var concealCalls = 0
-    var concealBytes = 0
+    @Volatile var concealCalls = 0
+    @Volatile var concealBytes = 0
     override fun submit(pcmLittleEndian: ByteArray) { synchronized(pcm) { pcm.write(pcmLittleEndian) } }
     override fun conceal(approxBytes: Int) { concealCalls++; concealBytes += approxBytes }
     override fun bufferedMs(): Int = 120
@@ -59,8 +59,8 @@ fun rtpReceiverChecks() = runBlocking {
     val sink = FakeSink()
     val src = RtpSource(address = "", port = port, payloadType = 96,
                         encoding = "L16", sampleRate = 48000, channels = 2)
-    var lastStatus = RtpStatus()
-    val rx = RtpReceiver(src, onStatus = { lastStatus = it }, onPcm = null,
+    val lastStatus = java.util.concurrent.atomic.AtomicReference(RtpStatus())
+    val rx = RtpReceiver(src, onStatus = { lastStatus.set(it) }, onPcm = null,
                          openPlayer = { _, _ -> sink })
     val scope = CoroutineScope(Dispatchers.IO)
     rx.start(scope)
@@ -69,6 +69,16 @@ fun rtpReceiverChecks() = runBlocking {
     val tx = DatagramSocket()
     val dst = InetAddress.getByName("127.0.0.1")
     fun send(b: ByteArray) { tx.send(DatagramPacket(b, b.size, dst, port)) }
+
+    // The receiver probes the source format before opening playback. Complete
+    // that real startup phase before testing byte order/carry/loss individually.
+    send(rtp(98, 96, beSamples(0, 0, 0, 0)))
+    delay(650)
+    send(rtp(99, 96, beSamples(0, 0, 0, 0)))
+    withTimeout(3000) {
+        while (lastStatus.get().state != RtpState.PLAYING) delay(10)
+    }
+    synchronized(sink.pcm) { sink.pcm.reset() }
 
     // 1. Byte swap: due frame stereo, valori riconoscibili
     send(rtp(100, 96, beSamples(0x1234, 0x5678, 0x0A0B, 0x0C0D)))
@@ -107,7 +117,7 @@ fun rtpReceiverChecks() = runBlocking {
     // Lo stato si pubblica al massimo ogni 500 ms: serve un altro pacchetto
     // oltre quella soglia perche' il contatore arrivi alla UI.
     delay(600); send(rtp(107, 96, beSamples(1, 2))); delay(200)
-    rxCheck("perdita: contata", lastStatus.lostPackets >= 3, "persi=${lastStatus.lostPackets}")
+    rxCheck("perdita: contata", lastStatus.get().lostPackets >= 3, "persi=${lastStatus.get().lostPackets}")
 
     // 4. Duplicato / fuori ordine vecchio: scartato senza mascherare
     val cBefore = sink.concealCalls
@@ -128,7 +138,7 @@ fun rtpReceiverChecks() = runBlocking {
     send(rtp(9000, 96, beSamples(3, 4), ts = 999_999_999L))
     delay(200)
     rxCheck("mittente riavviato: nessuna mascheratura", sink.concealCalls == cBefore2)
-    rxCheck("riparte a ricevere", lastStatus.state == RtpState.PLAYING, "stato=${lastStatus.state}")
+    rxCheck("riparte a ricevere", lastStatus.get().state == RtpState.PLAYING, "stato=${lastStatus.get().state}")
 
     // 7. Buco misurato dal timestamp: la durata mascherata deve essere esatta.
     //    Ogni pacchetto qui porta UN frame stereo (2 short), quindi il

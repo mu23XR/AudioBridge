@@ -19,14 +19,19 @@ val displayVersion = System.getenv("WFAS_VERSION_NAME")
     ?.removePrefix("v")
     ?.removePrefix("V")
     ?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("desktopPreviewVersion").orNull
     ?: appVersion.split(".").let { p ->
         val major = ((p.getOrNull(0)?.toIntOrNull() ?: 0) - 4).coerceAtLeast(0)
         (listOf(major.toString()) + p.drop(1)).joinToString(".")
     }
+val packageNumericVersion = displayVersion.substringBefore('-').substringBefore('+')
+require(packageNumericVersion.matches(Regex("\\d+\\.\\d+\\.\\d+"))) { "Invalid package version: $displayVersion" }
+val distributionAppName = if (displayVersion.contains("-test.", ignoreCase = true)) "AudioBridge-Test" else "AudioBridge"
 
 tasks.register("generateDisplayVersionFile") {
     val outFile = layout.buildDirectory.file("display-version.txt")
     outputs.file(outFile)
+    inputs.property("displayVersion", displayVersion)
     doLast {
         outFile.get().asFile.apply { parentFile.mkdirs() }.writeText(displayVersion)
     }
@@ -35,10 +40,12 @@ tasks.register("generateDisplayVersionFile") {
 tasks.register("generateVersionProperties") {
     val outFile = layout.projectDirectory.file("src/main/resources/version.properties").asFile
     outputs.file(outFile)
+    inputs.property("displayVersion", displayVersion)
     doLast {
         outFile.writeText(
             "app.version=$appVersion\n" +
-                "app.display.version=$displayVersion\n"
+                "app.display.version=$displayVersion\n" +
+                "app.channel=${if (displayVersion.contains("-test.", ignoreCase = true)) "preview" else "stable"}\n"
         )
     }
 }
@@ -284,8 +291,8 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Rpm)
 
-            packageName = "AudioBridge"
-            packageVersion = appVersion
+            packageName = distributionAppName
+            packageVersion = packageNumericVersion
 
             modules(
                 "java.desktop",
@@ -354,7 +361,9 @@ val packageZip by tasks.registering(Zip::class) {
     group = "distribution"
     description = "Crea uno .zip portabile dell'app"
     dependsOn("createReleaseDistributable")
-    from(portableAppDir)
+    // A different channel may still have a historical app image in this root.
+    // Archive only the image produced for this build; never ship the old app too.
+    from(portableAppDir) { include("$distributionAppName/**") }
     destinationDirectory.set(portableOutDir)
     archiveFileName.set("AudioBridge-$displayVersion-$portableLabel.zip")
 }
@@ -363,7 +372,7 @@ val packageTarGz by tasks.registering(Tar::class) {
     group = "distribution"
     description = "Crea un .tar.gz portabile dell'app"
     dependsOn("createReleaseDistributable")
-    from(portableAppDir)
+    from(portableAppDir) { include("$distributionAppName/**") }
     destinationDirectory.set(portableOutDir)
     archiveFileName.set("AudioBridge-$displayVersion-$portableLabel.tar.gz")
     compression = Compression.GZIP
@@ -398,6 +407,7 @@ val generateMan by tasks.registering(JavaExec::class) {
         file("src/main/kotlin/CliArgs.kt")
     )
     outputs.file(manPageSrc)
+    inputs.property("displayVersion", displayVersion)
 }
 
 val checkHelpCoverage by tasks.registering(JavaExec::class) {
@@ -412,6 +422,28 @@ val checkHelpCoverage by tasks.registering(JavaExec::class) {
 
 tasks.named("check") {
     dependsOn(checkHelpCoverage)
+}
+
+val checkProtocols by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Run the RTP, WFAS, DLNA and Snapcast protocol regression checks"
+    dependsOn("testClasses")
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("DlnaProtocolCheckKt")
+}
+
+tasks.named("check") {
+    dependsOn(checkProtocols)
+}
+
+if (isWindows) {
+    val checkWasapiLifecycle by tasks.registering(Exec::class) {
+        group = "verification"
+        description = "Run production WASAPI lifecycle functions against in-memory COM fakes"
+        workingDir = rootDir.parentFile
+        commandLine("powershell.exe", "-NoProfile", "-File", "scripts/check-wasapi-lifecycle.ps1", "-Compiler", "gcc")
+    }
+    tasks.named("check") { dependsOn(checkWasapiLifecycle) }
 }
 
 tasks.register<Copy>("installManPage") {
@@ -467,9 +499,9 @@ if (isWindows) {
                 }
                 val suffix = if (taskName.contains("release", ignoreCase = true)) "main-release" else "main"
                 val appDir = layout.buildDirectory.dir("compose/binaries/$suffix/app").get().asFile
-                appDir.listFiles()
-                    ?.filter { it.isDirectory }
-                    ?.forEach { appSubDir ->
+                listOf(File(appDir, distributionAppName))
+                    .filter { it.isDirectory }
+                    .forEach { appSubDir ->
                         val binDir = File(appSubDir, "runtime\\bin")
                         if (binDir.exists()) {
                             javaExeSrc.copyTo(File(binDir, "java.exe"), overwrite = true)

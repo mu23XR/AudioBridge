@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -343,7 +343,7 @@ class DlnaMediaServer(
             val output = socket.getOutputStream()
 
             if (codec == null) {
-                val body = "WiFi Audio Streaming DLNA endpoint".toByteArray()
+                val body = "AudioBridge DLNA endpoint".toByteArray()
                 output.write(
                     ("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: ${body.size}\r\n" +
                             "Connection: close\r\n\r\n").toByteArray()

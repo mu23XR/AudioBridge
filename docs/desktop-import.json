@@ -1,0 +1,20 @@
+{
+  "referenceProductCommit": "c8c0cb688815bcf58888173a31abd2da460d3917",
+  "referenceDesktopTree": "35b82e9fb798a977f93b8d20fdddb6ab42ba1903",
+  "importedFiles": 177,
+  "preservedMainFileModes": [
+    "desktop/gradlew"
+  ],
+  "baseCommit": "ea2dfe802b05de2ba988363aa06c98be5c0027f4",
+  "unchangedAndroidTree": "8bae6c11aebf0c2cb9a1e53a27c36ca4380fa91d",
+  "removedDuplicates": [
+    "desktop/.github/workflows/release.yml",
+    "desktop/WFAS_PROTOCOL.md"
+  ],
+  "scope": "Committed PC snapshot plus portable publication tooling; no local runtime logs or private backups",
+  "initialImportCommit": "b4d1d1b564e02f7c8dd4d6c9f99aa16bc8260d0d",
+  "initialImportAllFileBlobsMatchReference": true,
+  "postImportDesktopEdits": [
+    "desktop/gradle.properties: preview version vpn.2 -> vpn.3 only; receive logic unchanged"
+  ]
+}

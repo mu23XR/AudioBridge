@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -57,7 +57,7 @@ object CliPathInstaller {
 
     private fun findWindowsExeViaRegistry(): String? {
         val ps = """
-            ${'$'}keywords = @('WiFiAudioStreaming', 'WiFi Audio Streaming', 'wfas')
+            ${'$'}keywords = @('AudioBridge', 'AudioBridge', 'wfas')
             ${'$'}roots = @(
                 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
                 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
@@ -154,7 +154,7 @@ object CliPathInstaller {
         }
 
         // 3. Known default install location (RPM/DEB installed via package manager)
-        val standardInstall = File("/opt/wifi-audio-streaming")
+        val standardInstall = File("/opt/audiobridge")
         if (standardInstall.exists()) {
             resolveFromRoot(standardInstall)?.let { return it }
         }
@@ -191,6 +191,7 @@ object CliPathInstaller {
     // ── Public API ────────────────────────────────────────────────────────────
 
     fun isInstalled(): Boolean = when {
+        BuildIdentity.preview -> false
         isWindows -> {
             val bat = File(wfasBatDir(), "wfas.bat")
             bat.exists() && isInWindowsUserPath(wfasBatDir().absolutePath)
@@ -211,6 +212,7 @@ object CliPathInstaller {
      * installazione non deve rifare il setup a mano.
      */
     fun refreshIfOutdated() {
+        if (BuildIdentity.preview) return
         runCatching {
             val shim = when {
                 isWindows -> File(wfasBatDir(), "wfas.bat")
@@ -227,6 +229,7 @@ object CliPathInstaller {
     }
 
     fun install(): InstallResult = when {
+        BuildIdentity.preview -> InstallResult.Failure(Strings.get("preview_cli_hint"))
         isWindows -> installWindows()
         isMac     -> installMac()
         isLinux   -> installLinux()
