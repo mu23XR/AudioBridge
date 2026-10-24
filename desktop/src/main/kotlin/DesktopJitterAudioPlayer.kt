@@ -32,8 +32,8 @@ internal open class DesktopJitterAudioPlayer(
 
     private val frameBytes = channels * 2
     private val bytesPerSecond = sampleRate * frameBytes
-    // WFAS latency belongs in the native target. A 400 ms manual setting must
-    // never turn a stalled software queue into another 400 ms of hidden delay.
+    // Capacity must absorb fresh receive bursts before the worker runs. The
+    // combined native/software budget, not this allocation, controls latency.
     private val capacityMs = if (health != null) DesktopPlayoutLimits.QUEUE_CAPACITY_MS
         else maxOf(prebufferMs, maxBufferMs).coerceIn(20, 4000)
     private val capacityBytes = bytesFor(capacityMs)
@@ -45,6 +45,7 @@ internal open class DesktopJitterAudioPlayer(
     private val silenceFeed = ReceiverSilenceFeed(sampleRate, frameBytes)
     private val ramp = PcmRamp(channels, maxOf(1, sampleRate / 200))
     private val drift = DesktopPlayoutDrift(sampleRate)
+    private val level = DesktopPlayoutLevel()
     private val resampler = DesktopPcmDriftResampler(channels)
     private val producer = Any()
     private var hasSubmittedPcm = false
@@ -63,6 +64,7 @@ internal open class DesktopJitterAudioPlayer(
     private var primed = false
     private var feedingSilence = false
     private var underruns = 0L
+    private var staleTrimBytes = 0L
     private var lastHealthAt = 0L
     private var lastTuneAt = 0L
     private var lastLogAt = 0L
@@ -74,6 +76,7 @@ internal open class DesktopJitterAudioPlayer(
             ramp.restart()
             synchronized(producer) { resampler.reset() }
             drift.reset()
+            level.reset()
             feedingSilence = false
             backlog.reset()
             onRecover()
@@ -146,8 +149,12 @@ internal open class DesktopJitterAudioPlayer(
                     }
                 } else null
 
-                if (health != null) backlog.softwareLimit(now, queue.bytes(), drained?.limited == true)?.let { keep ->
+                val controlNow = nowMs()
+                val nativeFrames = operation("BUFFER") { output.bufferedBytes() }.toLong() / frameBytes
+                if (health != null) backlog.softwareLimit(controlNow, queue.bytes(), nativeFrames, targetMs(),
+                    drained?.limited == true)?.let { keep ->
                     val discarded = queue.trimTo(keep)
+                    staleTrimBytes += discarded
                     if (discarded > 0) AppDebug.log("[PLAYOUT] stale software PCM trimmed: bytes=$discarded")
                 }
 
@@ -163,12 +170,14 @@ internal open class DesktopJitterAudioPlayer(
                     underruns++
                 }
 
-                if (now - lastTuneAt >= 200) {
-                    val nativeFrames = operation("BUFFER") { output.bufferedBytes() }.toLong() / frameBytes
-                    val ratio = drift.sample(input.isFlowing(now), nativeFrames,
+                val flowing = input.isFlowing(controlNow)
+                if (flowing) level.observe(controlNow, nativeFrames + if (health != null) queue.bytes() / frameBytes else 0)
+                else level.reset()
+                if (controlNow - lastTuneAt >= 200) {
+                    val ratio = drift.sample(flowing, level.averageFrames(),
                         sampleRate.toLong() * targetMs() / 1000)
                     synchronized(producer) { resampler.ratio = ratio }
-                    lastTuneAt = now
+                    lastTuneAt = controlNow
                 }
                 if (health != null && now - lastHealthAt >= 1000) {
                     val change = health.sample(now, underruns, input.isFlowing(now), output.stalledMs(),
@@ -186,6 +195,7 @@ internal open class DesktopJitterAudioPlayer(
                     val detail = "targetMs=${latest.targetMs} softwareBytes=${latest.softwareBytes} nativeBytes=${latest.nativeBytes} " +
                         "totalBufferedMs=${bufferedMs()} underruns=$underruns " +
                         "queueDiscardBytes=${latest.discardedBytes} nativeDiscardBytes=${latest.nativeDiscardedBytes} " +
+                        "queueTrimBytes=$staleTrimBytes queueCapacityMs=$capacityMs " +
                         "playedFrames=${latest.playedFrames} rebuilds=${latest.rebuilds} ratio=${latest.driftRatio}"
                     AppDebug.log("[PLAYOUT] $detail")
                     DesktopDiagnostics.event("PLAYOUT", detail)
@@ -339,16 +349,16 @@ internal open class DesktopJitterAudioPlayer(
     }
 }
 
-/** Network batching cannot directly raise playback pitch; only native backlog drives clock correction. */
+/** Correct slow clock error from averaged backlog; instantaneous packet bursts are not pitch commands. */
 internal class DesktopPlayoutDrift(private val sampleRate: Int) {
     @Volatile var ratio = 1.0
         private set
     private var averageFrames: Double? = null
     @Synchronized fun reset() { ratio = 1.0; averageFrames = null }
-    @Synchronized fun sample(active: Boolean, nativeFrames: Long, targetFrames: Long): Double {
+    @Synchronized fun sample(active: Boolean, bufferedFrames: Long, targetFrames: Long): Double {
         if (!active) { reset(); return ratio }
         require(targetFrames > 0)
-        val average = (averageFrames ?: targetFrames.toDouble()) * .9 + nativeFrames * .1
+        val average = (averageFrames ?: targetFrames.toDouble()) * .9 + bufferedFrames * .1
         averageFrames = average
         // Correct clock error over seconds, independent of the selected latency.
         // Dividing by a20ms target made this loop react20x harder than a400ms

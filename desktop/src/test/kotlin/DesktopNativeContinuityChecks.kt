@@ -24,7 +24,13 @@ internal object DesktopNativeContinuityChecks {
                 continuousClock(target, capacity, -250, jitter = true)
             }
         }
-        println("Receiver native capacity: continuous PCM at20/41/80/400ms and adaptive growth passed")
+        for (target in listOf(63, 191, 400)) {
+            continuousClock(target, requestedCapacity(target, false), arrivalBatchMs = 100)
+        }
+        for (ppm in listOf(-250, 250)) continuousClock(63, requestedCapacity(63, false), ppm, arrivalBatchMs = 100)
+        continuousClock(63, requestedCapacity(63, false), playerStallMs = 40)
+        continuousClock(191, requestedCapacity(191, false), playerStallMs = 100)
+        println("Receiver continuity: native capacity/adaptive growth,100ms batches,±250ppm and40/100ms player stalls passed")
     }
 
     private suspend fun requestedCapacity(target: Int, adaptive: Boolean): Int = coroutineScope {
@@ -65,15 +71,17 @@ internal object DesktopNativeContinuityChecks {
         }
     }
 
-    /** Ninety seconds, equal clocks, normal WFAS packet size,10ms native progress granularity. */
-    private fun continuousClock(targetMs: Int, capacityMs: Int, sourcePpm: Int = 0, jitter: Boolean = false) {
+    /** Ninety virtual seconds, ordinary WFAS packets and10ms native progress granularity. */
+    private fun continuousClock(targetMs: Int, capacityMs: Int, sourcePpm: Int = 0,
+                                jitter: Boolean = false, arrivalBatchMs: Int = 1, playerStallMs: Int = 0) {
         val sampleRate = 48_000
         val frameBytes = 4
-        val queue = PcmQueue(frameBytes, sampleRate * frameBytes * 60 / 1000)
+        val queue = PcmQueue(frameBytes, sampleRate * frameBytes * DesktopPlayoutLimits.QUEUE_CAPACITY_MS / 1000)
         var clockMs = 0L
         val pump = PcmDrainPump(queue, sampleRate, frameBytes, nowNanos = { clockMs * 1_000_000 })
         val backlog = ReceiverBacklogPolicy(sampleRate, frameBytes)
         val drift = DesktopPlayoutDrift(sampleRate)
+        val level = DesktopPlayoutLevel()
         val resampler = DesktopPcmDriftResampler(2)
         var nativeFrames = 0L
         var playedFrames = 0L
@@ -114,7 +122,7 @@ internal object DesktopNativeContinuityChecks {
                 }
                 val deliveryDelay = if (jitter) (inputFrames / 345 % 3).toInt() else 0
                 val dueFrames = (tick - deliveryDelay) * sampleRate.toDouble() * (1 + sourcePpm / 1_000_000.0) / 1000
-                if (inputFrames + 345 <= dueFrames) {
+                while (tick % arrivalBatchMs == 0 && inputFrames + 345 <= dueFrames) {
                     val pcm = ByteArray(345 * frameBytes)
                     val shorts = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
                     repeat(345) { frame ->
@@ -126,17 +134,21 @@ internal object DesktopNativeContinuityChecks {
                 }
                 if (!primed) primed = queue.bytes() >= sampleRate * frameBytes * DesktopPlayoutLimits.startupPrerollMs(targetMs) / 1000
                 if (!primed) continue
+                // A settled stream keeps receiving and consuming while the
+                // playback worker is descheduled; do not pause either clock.
+                if (tick >= 20_000 && tick % 1000 in 200 until 200 + playerStallMs) continue
                 var result: PcmDrainPump.Result
                 do {
                     result = pump.drain(targetMs, { nativeFrames }) { pcm, offset, length ->
                         output.writeSome(pcm, offset, length)
                     }
                 } while (result.limited)
-                backlog.softwareLimit(clockMs, queue.bytes(), result.limited)?.let(queue::trimTo)
-                if (tick % 200 == 0) resampler.ratio = drift.sample(true, nativeFrames,
+                backlog.softwareLimit(clockMs, queue.bytes(), nativeFrames, targetMs, result.limited)?.let(queue::trimTo)
+                level.observe(clockMs, nativeFrames + queue.bytes() / frameBytes)
+                if (tick % 200 == 0) resampler.ratio = drift.sample(true, level.averageFrames(),
                     sampleRate.toLong() * targetMs / 1000)
             }
-            println("[continuity] target=$targetMs nativeCapacity=$capacityMs sourcePpm=$sourcePpm jitter=$jitter discarded=${queue.discardedBytes} " +
+            println("[continuity] target=$targetMs nativeCapacity=$capacityMs sourcePpm=$sourcePpm jitter=$jitter arrivalBatchMs=$arrivalBatchMs playerStallMs=$playerStallMs discarded=${queue.discardedBytes} " +
                 "waveformEdges=$discontinuities underrunFrames=$underflowFrames ratio=${drift.ratio}")
             check(queue.discardedBytes == 0L && discontinuities == 0 && underflowFrames == 0L) {
                 "Continuous input was broken: target=$targetMs capacity=$capacityMs discarded=${queue.discardedBytes} " +

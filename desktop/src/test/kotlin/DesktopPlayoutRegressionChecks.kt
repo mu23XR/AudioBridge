@@ -50,14 +50,14 @@ internal object DesktopPlayoutRegressionChecks {
             clock += 42_000_000; length
         }
         check(first.limited && first.writes == 1 && queue.bytes() == 10_752)
-        check(policy.softwareLimit(42, queue.bytes(), first.limited) == null)
+        check(policy.softwareLimit(42, queue.bytes(), native, 20, first.limited) == null)
         var iterations = 0
         while (queue.bytes() > 0) {
             val result = pump.drain(20, { native }) { pcm, offset, length ->
                 accepted.write(pcm, offset, length); native += length / 4
                 check(native <= 1_680); length
             }
-            check(policy.softwareLimit(clock / 1_000_000, queue.bytes(), result.limited) == null)
+            check(policy.softwareLimit(clock / 1_000_000, queue.bytes(), native, 20, result.limited) == null)
             if (result.blocked) { native = (native - 960).coerceAtLeast(0); clock += 20_000_000 }
             check(++iterations < 10)
         }
@@ -342,7 +342,7 @@ internal object DesktopPlayoutRegressionChecks {
             repeat(10) { player.submit(pcm, 0, pcm.size); Thread.sleep(10) }
             val leastOutput = (3450 / 1.008).toInt() - 1 // Worst allowed resampling plus the carried frame.
             await("400ms manual target never started") { fixture.nonzeroFrames() >= leastOutput }
-            check(player.snapshot().softwareBytes <= 11_520)
+            check(player.snapshot().softwareBytes <= 48_000 * 4 * DesktopPlayoutLimits.QUEUE_CAPACITY_MS / 1000)
             check(player.snapshot().discardedBytes == 0L) { "Startup evicted the first PCM packet" }
             check(player.snapshot().targetMs == 400)
             player.throwIfFailed()

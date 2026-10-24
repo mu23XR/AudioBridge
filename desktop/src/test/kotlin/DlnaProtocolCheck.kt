@@ -229,6 +229,7 @@ fun main() {
     // green `check` cannot be reported while they never ran.
     receiverProtocolChecks()
     DesktopPlayoutRegressionChecks.runChecks()
+    DesktopBurstPlayoutChecks.runChecks()
     DesktopGainLimiterChecks.runChecks()
     DesktopConfigurationChecks.runChecks()
     DesktopDiagnosticsChecks.runChecks()
