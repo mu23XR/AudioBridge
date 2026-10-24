@@ -1,0 +1,10 @@
+/out/
+/logs/
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.apk
+*.aab
+__pycache__/
+*.pyc

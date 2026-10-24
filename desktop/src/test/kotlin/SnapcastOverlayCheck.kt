@@ -68,7 +68,8 @@ private class FakeSnapControlServer(private val confirmDelayMs: Long = 120L) {
                     send(ovStatusJson(vol, muted))
                     vol = p; muted = m
                     scope.launch(Dispatchers.IO) {
-                        delay(confirmDelayMs)
+                        // Force the superseded 80 confirmation to arrive after 35.
+                        delay(confirmDelayMs + if (p == 80) 150L else 0L)
                         send("""{"jsonrpc":"2.0","method":"Client.OnVolumeChanged","params":{"id":"aa:01","volume":{"muted":$m,"percent":$p}}}""")
                     }
                 }
@@ -91,17 +92,17 @@ fun snapcastOverlayChecks() = runBlocking {
     server.start(scope)
 
     val seen = java.util.Collections.synchronizedList(mutableListOf<Int>())
-    var last: SnapControlStatus? = null
+    val last = java.util.concurrent.atomic.AtomicReference<SnapControlStatus?>()
     val client = SnapcastControlClient("127.0.0.1", server.port) { st ->
-        last = st
+        last.set(st)
         st.status.client("aa:01")?.let { seen.add(it.volumePercent) }
     }
     client.start(scope)
 
-    withTimeoutOrNull(4000) { while (last?.state != SnapControlState.CONNECTED) delay(30) }
-    ovCheck("connesso al finto server", last?.state == SnapControlState.CONNECTED, "stato=${last?.state}")
-    ovCheck("volume iniziale letto", last?.status?.client("aa:01")?.volumePercent == 74,
-        "${last?.status?.client("aa:01")?.volumePercent}")
+    withTimeoutOrNull(4000) { while (last.get()?.state != SnapControlState.CONNECTED) delay(30) }
+    ovCheck("connesso al finto server", last.get()?.state == SnapControlState.CONNECTED, "stato=${last.get()?.state}")
+    ovCheck("volume iniziale letto", last.get()?.status?.client("aa:01")?.volumePercent == 74,
+        "${last.get()?.status?.client("aa:01")?.volumePercent}")
 
     // ── PRIMO comando ─────────────────────────────────────────────────────
     seen.clear()
@@ -111,8 +112,8 @@ fun snapcastOverlayChecks() = runBlocking {
     ovCheck("1o comando: nessun ritorno al valore vecchio", seen.none { it == 74 },
         "valori pubblicati: ${seen.toList()}")
     ovCheck("1o comando: resta sul valore comandato",
-        last?.status?.client("aa:01")?.volumePercent == 20,
-        "${last?.status?.client("aa:01")?.volumePercent}")
+        last.get()?.status?.client("aa:01")?.volumePercent == 20,
+        "${last.get()?.status?.client("aa:01")?.volumePercent}")
 
     // ── SECONDO comando: e' qui che si vedeva il difetto ──────────────────
     seen.clear()
@@ -122,8 +123,8 @@ fun snapcastOverlayChecks() = runBlocking {
     ovCheck("2o comando: nessun ritorno al valore precedente", seen.none { it == 20 },
         "valori pubblicati: ${seen.toList()}")
     ovCheck("2o comando: resta sul valore comandato",
-        last?.status?.client("aa:01")?.volumePercent == 50,
-        "${last?.status?.client("aa:01")?.volumePercent}")
+        last.get()?.status?.client("aa:01")?.volumePercent == 50,
+        "${last.get()?.status?.client("aa:01")?.volumePercent}")
 
     // ── TERZO, subito dopo il secondo senza pause ─────────────────────────
     seen.clear()
@@ -132,8 +133,8 @@ fun snapcastOverlayChecks() = runBlocking {
     withTimeoutOrNull(2000) { while (server.setVolumeCount < 4) delay(20) }
     delay(600)
     ovCheck("due comandi ravvicinati: vince l'ultimo",
-        last?.status?.client("aa:01")?.volumePercent == 35,
-        "${last?.status?.client("aa:01")?.volumePercent}")
+        last.get()?.status?.client("aa:01")?.volumePercent == 35,
+        "${last.get()?.status?.client("aa:01")?.volumePercent}")
 
     // ── Una fotografia vecchia che arriva spontanea ───────────────────────
     seen.clear()
@@ -147,21 +148,29 @@ fun snapcastOverlayChecks() = runBlocking {
     // ── Il mute, due volte di fila ────────────────────────────────────────
     client.setClientVolume("aa:01", 10, true)
     delay(400)
-    ovCheck("1o mute applicato", last?.status?.client("aa:01")?.muted == true)
+    ovCheck("1o mute applicato", last.get()?.status?.client("aa:01")?.muted == true)
     client.setClientVolume("aa:01", 10, false)
     delay(400)
-    ovCheck("2o mute (smute) applicato", last?.status?.client("aa:01")?.muted == false,
-        "muted=${last?.status?.client("aa:01")?.muted}")
+    ovCheck("2o mute (smute) applicato", last.get()?.status?.client("aa:01")?.muted == false,
+        "muted=${last.get()?.status?.client("aa:01")?.muted}")
     client.setClientVolume("aa:01", 10, true)
     delay(400)
-    ovCheck("3o mute applicato", last?.status?.client("aa:01")?.muted == true,
-        "muted=${last?.status?.client("aa:01")?.muted}")
+    ovCheck("3o mute applicato", last.get()?.status?.client("aa:01")?.muted == true,
+        "muted=${last.get()?.status?.client("aa:01")?.muted}")
 
     // ── Il gruppo ─────────────────────────────────────────────────────────
     client.setGroupMute("g-1", true)
     delay(300)
     ovCheck("il mute di gruppo non torna indietro",
-        last?.status?.groups?.first()?.muted == true)
+        last.get()?.status?.groups?.first()?.muted == true)
+
+    server.send(ovStatusJson(63, false))
+    delay(200)
+    ovCheck("unrelated remote volume still applies", last.get()?.status?.client("aa:01")?.volumePercent == 63)
+    delay(2600)
+    server.send(ovStatusJson(35, false))
+    delay(200)
+    ovCheck("echo guard expires for remote changes", last.get()?.status?.client("aa:01")?.volumePercent == 35)
 
     client.stop(); scope.cancel(); runCatching { server.socket.close() }
     delay(200)

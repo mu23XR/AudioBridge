@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -343,7 +343,7 @@ object PairCli {
             out += if (live)
                 dim("  n=new invite   r=new key   k=show/hide key   q=quit") + dim("   (then Enter)")
             else
-                dim("  Scan it with the WFAS app, or open the link on the other device.")
+                dim("  Scan it with AudioBridge on the other device.")
         }
 
         out.forEachIndexed { i, line ->
@@ -564,8 +564,7 @@ object PairCli {
                     "scheme_registered" to registered,
                     "scheme_command" to ProtocolRegistrar.registeredCommand(),
                     "launcher" to ProtocolRegistrar.launcherPath(),
-                    "applink_en" to "https://${WfasPairingUri.APPLINK_HOST}${WfasPairingUri.APPLINK_PATH}",
-                    "applink_it" to "https://${WfasPairingUri.APPLINK_HOST}${WfasPairingUri.APPLINK_PATH_IT}",
+                    "pairing_uri" to "${WfasPairingUri.SCHEME}://${WfasPairingUri.HOST}",
                     "ttl" to WfasPairingUri.PAIRING_TTL_SECONDS,
                     "running_pid" to running?.second
                 )
@@ -631,7 +630,7 @@ object PairCli {
         return if (r.isSuccess) {
             val ok = ProtocolRegistrar.isRegistered()
             if (json) println(jsonObject("status" to "ok", "registered" to ok, "scheme" to ProtocolRegistrar.SCHEME))
-            else println("  ${green("✓")}  ${ProtocolRegistrar.SCHEME}:// links now open WiFi Audio Streaming.")
+            else println("  ${green("✓")}  ${ProtocolRegistrar.SCHEME}:// links now open AudioBridge.")
             ExitCode.OK
         } else {
             fail(
