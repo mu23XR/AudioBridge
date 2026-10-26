@@ -43,6 +43,13 @@ EXPECTED_TESTS = sum(CLASSES.values())
 PULSE_SINK = "audiobridge_native"
 
 
+def validate_display(environment):
+    display = environment.get("DISPLAY", "")
+    if not re.fullmatch(r":[0-9]+(?:\.[0-9]+)?", display):
+        raise RuntimeError("Native audio requires a local Xvfb DISPLAY for the full emulator")
+    return display
+
+
 def validate_pulse_environment(environment, uid, stat_path=os.stat):
     """Record only routing metadata; never inspect or export authentication cookies."""
     server = environment.get("PULSE_SERVER", "")
@@ -192,6 +199,7 @@ class Acceptance:
             raise RuntimeError("A full exact source commit is required")
         self.output.mkdir(parents=True, exist_ok=False)
         audio_environment = validate_pulse_environment(os.environ, os.getuid())
+        audio_environment["display"] = validate_display(os.environ)
         (self.output / "audio-environment.json").write_text(json.dumps(audio_environment, indent=2) + "\n", encoding="utf-8")
         source = self.run("git-head", ["git", "rev-parse", "HEAD"]).decode().strip()
         if source != self.args.source_commit:
@@ -228,8 +236,10 @@ class Acceptance:
 
     def boot(self) -> None:
         self.emulator_log = (self.output / "emulator.txt").open("wb")
+        # -no-window/-no-qt select QEMU's headless binary, whose PulseAudio
+        # functions are stubs. The full backend runs only on CI's virtual X11.
         self.emulator = subprocess.Popen([
-            self.args.emulator, "-avd", AVD, "-port", "5554", "-no-window",
+            self.args.emulator, "-avd", AVD, "-port", "5554",
             "-gpu", "swiftshader_indirect", "-no-snapshot", "-no-boot-anim",
             "-camera-back", "none", "-camera-front", "none",
             "-memory", "2048", "-cores", "4", "-accel", "on",

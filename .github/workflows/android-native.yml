@@ -87,7 +87,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y pulseaudio pulseaudio-utils
+          sudo apt-get install --no-install-recommends -y pulseaudio pulseaudio-utils xvfb xauth \
+            libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-render-util0 libxcb-xinerama0 libxcb-xinput0
           pulseaudio --start --exit-idle-time=-1
           pactl load-module module-null-sink sink_name=audiobridge_native rate=48000 channels=2
           pactl set-default-sink audiobridge_native
@@ -115,7 +117,7 @@ jobs:
 
       - name: Run strict native acceptance and retain failure evidence
         run: |
-          python3 scripts/run_android_native.py \
+          xvfb-run -a --server-args='-screen 0 1280x720x24 -nolisten tcp' python3 scripts/run_android_native.py \
             --source-commit "${{ steps.source.outputs.sha }}" \
             --emulator "$ANDROID_HOME/emulator/emulator" \
             --adb "$ANDROID_HOME/platform-tools/adb" \

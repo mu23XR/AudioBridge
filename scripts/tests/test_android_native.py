@@ -94,6 +94,13 @@ class AndroidNativeAudioEnvironmentTest(unittest.TestCase):
                          "/run/user/1001": SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=1001)}
         self.stream = {"index": 3, "sink": 1, "corked": False, "properties": {"application.process.id": "42"}}
 
+    def test_full_emulator_requires_a_local_virtual_display(self):
+        for display in (":99", ":100.0"):
+            self.assertEqual(display, native.validate_display({"DISPLAY": display}))
+        for display in ("", "localhost:99", "tcp:remote:1", ":99;command"):
+            with self.assertRaisesRegex(RuntimeError, "local Xvfb DISPLAY"):
+                native.validate_display({"DISPLAY": display})
+
     def test_explicit_owned_socket_and_private_runtime_are_required(self):
         record = native.validate_pulse_environment(self.environment, 1001, self.metadata.__getitem__)
         self.assertEqual(record["server"], self.environment["PULSE_SERVER"])
