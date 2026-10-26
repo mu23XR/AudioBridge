@@ -96,3 +96,20 @@ Do not delete previous stable Releases merely because a new release is bad. Publ
 - version metadata verified
 - WFAS protocol version compatible with both clients
 - release notes describe breaking/migration behavior
+
+## 2.0.1 exact-source release request
+
+Stable publication may be requested by an explicitly authorized same-repository PR
+with `docs/releases/stable-build-request.json` containing a unique semantic
+version and `publish: true`. The root release workflow checks out the exact PR
+head, runs Android unit/lint/native, Windows and governance gates, verifies the
+release identities and one shared source SHA, and only then creates the release.
+Forks cannot publish. Existing releases/tags are not replaced. Uploaded assets are
+downloaded and checksum-verified before the draft becomes stable/latest.
+
+The stable Windows build injects `WFAS_VERSION_NAME`; the preview default and its
+independent publication request remain preview-only. Generate the versioned manual
+in a separate Gradle invocation before resource packaging. Stable Android uses
+`assembleRelease`, the permanent certificate and the monotonic UTC versionCode.
+Both native and software regression checks are required, but are not a substitute
+for real-device or overnight listening. See `releases/2.0.1.md` for migration.

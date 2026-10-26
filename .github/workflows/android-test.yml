@@ -34,6 +34,11 @@ concurrency:
 jobs:
   windows:
     uses: ./.github/workflows/desktop-windows.yml
+    # The called workflow also contains the request/same-repository guarded PC
+    # preview publisher. Reusable builds skip it and leave publish empty; their
+    # build job still requests contents:read. Permit that job's declared ceiling.
+    permissions:
+      contents: write
     with:
       source_ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
       version_name: ${{ inputs.version_name || (github.event_name == 'push' && github.ref_name) || '' }}

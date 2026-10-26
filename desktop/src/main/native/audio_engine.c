@@ -178,6 +178,8 @@ static void mic_mix_into(int16_t *out, int num_shorts) {
 #include <mmreg.h>
 #include <ksmedia.h>
 #include <propidl.h>
+/* Older MinGW import libraries do not define these device property keys. */
+#include <initguid.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <stdarg.h>
 
@@ -199,13 +201,15 @@ static IAudioCaptureClient  *g_capture_client = NULL;
 static WAVEFORMATEX         *g_mix_format    = NULL;
 
 static int                   g_initialized   = 0;
+static int                   g_capture_com_owned = 0;
+static DWORD                 g_capture_com_thread = 0;
 static int                   g_rate_req      = 48000;
 static int                   g_src_is_float  = 0;
 static int                   g_src_channels  = 2;
 static int                   g_src_rate      = 48000;
 static int                   g_src_bps       = 16;
 
-static volatile int          g_stopping      = 0;
+static volatile LONG         g_stopping      = 0;
 static volatile int          g_reading       = 0;
 
 static float                 g_resample_phase[8] = {0};
@@ -379,8 +383,8 @@ static void atexit_safety_handler(void) {
     }
 }
 
-static void mute_render_endpoint(IMMDevice *device) {
-    if (!device) return;
+static int mute_render_endpoint(IMMDevice *device) {
+    if (!device) return 0;
 
     HRESULT hr = IMMDevice_Activate(
         device,
@@ -390,9 +394,8 @@ static void mute_render_endpoint(IMMDevice *device) {
         (void **)&g_endpoint_volume);
 
     if (FAILED(hr) || !g_endpoint_volume) {
-        fprintf(stderr, "[AudioEngine] Cannot activate IAudioEndpointVolume: 0x%08lX\n", hr);
-        g_endpoint_volume = NULL;
-        return;
+        set_error("Cannot activate IAudioEndpointVolume: 0x%08lX", hr);
+        return 0;
     }
 
     BOOL prev = FALSE;
@@ -402,12 +405,15 @@ static void mute_render_endpoint(IMMDevice *device) {
         g_had_prev_mute_state = 1;
     } else {
         g_had_prev_mute_state = 0;
+        /* Without the original state there is no safe restoration target. */
+        set_error("Cannot read endpoint mute state: 0x%08lX", hr);
+        return 0;
     }
 
     if (g_had_prev_mute_state && prev) {
         AE_LOG("[AudioEngine] Endpoint already muted, leaving as-is.\n");
         g_did_mute_endpoint = 0;
-        return;
+        return 1;
     }
 
     hr = IAudioEndpointVolume_SetMute(g_endpoint_volume, TRUE, NULL);
@@ -419,9 +425,11 @@ static void mute_render_endpoint(IMMDevice *device) {
         if (InterlockedCompareExchange(&g_atexit_registered, 1, 0) == 0) {
             atexit(atexit_safety_handler);
         }
+        return 1;
     } else {
-        fprintf(stderr, "[AudioEngine] SetMute(TRUE) failed: 0x%08lX\n", hr);
+        set_error("SetMute(TRUE) failed: 0x%08lX", hr);
         g_did_mute_endpoint = 0;
+        return 0;
     }
 }
 
@@ -434,7 +442,11 @@ static void restore_render_endpoint_mute(void) {
             AE_LOG("[AudioEngine] Endpoint mute restored to %s.\n",
                     g_prev_mute_state ? "muted" : "unmuted");
         } else {
-            fprintf(stderr, "[AudioEngine] SetMute restore failed: 0x%08lX\n", hr);
+            set_error("SetMute restore failed: 0x%08lX", hr);
+            /* Retain the handle and saved state for stop()/exit to retry. A
+             * failed restore must not be reported as completed or overwritten
+             * by the next capture's saved mute state. */
+            return;
         }
     }
 
@@ -456,30 +468,35 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved) {
 }
 
 static jboolean wasapi_start(int sample_rate, int channels) {
-    if (g_initialized) {
-        wasapi_stop();
-    }
+    /* Failed starts also own partial COM objects and possibly a muted endpoint. */
+    wasapi_stop();
+    if (g_endpoint_volume) return JNI_FALSE;
 
     g_stopping = 0;
     HRESULT hr;
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return JNI_FALSE;
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        set_error("CoInitializeEx failed: 0x%08lX", hr);
+        goto fail;
+    }
+    g_capture_com_owned = SUCCEEDED(hr);
+    g_capture_com_thread = g_capture_com_owned ? GetCurrentThreadId() : 0;
 
     hr = CoCreateInstance(&CLSID_MMDeviceEnumerator_local, NULL, CLSCTX_ALL,
                           &IID_IMMDeviceEnumerator_local, (void **)&g_enumerator);
-    if (FAILED(hr)) { set_error("CoCreateInstance enumerator failed: 0x%08lX", hr); return JNI_FALSE; }
+    if (FAILED(hr)) { set_error("CoCreateInstance enumerator failed: 0x%08lX", hr); goto fail; }
 
     g_device = pick_best_render_device(g_enumerator);
-    if (!g_device) { set_error("No render device found"); return JNI_FALSE; }
+    if (!g_device) { set_error("No render device found"); goto fail; }
 
-    if (g_mute_render) mute_render_endpoint(g_device);
+    if (g_mute_render && !mute_render_endpoint(g_device)) goto fail;
 
     hr = IMMDevice_Activate(g_device, &IID_IAudioClient_local, CLSCTX_ALL, NULL, (void **)&g_audio_client);
-    if (FAILED(hr)) { set_error("IMMDevice_Activate failed: 0x%08lX", hr); return JNI_FALSE; }
+    if (FAILED(hr)) { set_error("IMMDevice_Activate failed: 0x%08lX", hr); goto fail; }
 
     hr = IAudioClient_GetMixFormat(g_audio_client, &g_mix_format);
-    if (FAILED(hr)) { set_error("GetMixFormat failed: 0x%08lX", hr); return JNI_FALSE; }
+    if (FAILED(hr)) { set_error("GetMixFormat failed: 0x%08lX", hr); goto fail; }
 
     if (g_mix_format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
         WAVEFORMATEXTENSIBLE *ext = (WAVEFORMATEXTENSIBLE *)g_mix_format;
@@ -497,13 +514,13 @@ static jboolean wasapi_start(int sample_rate, int channels) {
 
     hr = IAudioClient_Initialize(g_audio_client, AUDCLNT_SHAREMODE_SHARED,
                                  AUDCLNT_STREAMFLAGS_LOOPBACK, 2000000, 0, g_mix_format, NULL);
-    if (FAILED(hr)) { set_error("IAudioClient_Initialize failed: 0x%08lX", hr); return JNI_FALSE; }
+    if (FAILED(hr)) { set_error("IAudioClient_Initialize failed: 0x%08lX", hr); goto fail; }
 
     hr = IAudioClient_GetService(g_audio_client, &IID_IAudioCaptureClient_local, (void **)&g_capture_client);
-    if (FAILED(hr)) { set_error("GetService CaptureClient failed: 0x%08lX", hr); return JNI_FALSE; }
+    if (FAILED(hr)) { set_error("GetService CaptureClient failed: 0x%08lX", hr); goto fail; }
 
     hr = IAudioClient_Start(g_audio_client);
-    if (FAILED(hr)) { set_error("IAudioClient_Start failed: 0x%08lX", hr); return JNI_FALSE; }
+    if (FAILED(hr)) { set_error("IAudioClient_Start failed: 0x%08lX", hr); goto fail; }
 
     g_channels_req = channels;
     g_rate_req     = sample_rate;
@@ -517,6 +534,9 @@ static jboolean wasapi_start(int sample_rate, int channels) {
 
     g_initialized = 1;
     return JNI_TRUE;
+fail:
+    wasapi_stop();
+    return JNI_FALSE;
 }
 
 static int16_t fetch_frame_ch(BYTE *pData, UINT32 frame_idx, int ch, DWORD flags) {
@@ -557,6 +577,7 @@ static jint wasapi_read(int16_t *out, int num_stereo_samples) {
 
     HRESULT hr;
     int written = 0;
+    int read_failed = 0;
     int tgt_ch = g_channels_req;
     double ratio = (double)g_src_rate / (double)g_rate_req;
     int need_resample = (g_src_rate != g_rate_req);
@@ -579,7 +600,11 @@ static jint wasapi_read(int16_t *out, int num_stereo_samples) {
     while (written < num_stereo_samples && !g_stopping) {
         UINT32 packet_size = 0;
         hr = IAudioCaptureClient_GetNextPacketSize(g_capture_client, &packet_size);
-        if (FAILED(hr)) break;
+        if (FAILED(hr)) {
+            set_error("IAudioCaptureClient_GetNextPacketSize failed: 0x%08lX", hr);
+            read_failed = 1;
+            break;
+        }
 
         if (packet_size == 0) {
             if (wait_count >= max_wait_ms) break;
@@ -594,7 +619,11 @@ static jint wasapi_read(int16_t *out, int num_stereo_samples) {
         DWORD  flags       = 0;
 
         hr = IAudioCaptureClient_GetBuffer(g_capture_client, &pData, &frames_available, &flags, NULL, NULL);
-        if (FAILED(hr)) break;
+        if (FAILED(hr)) {
+            set_error("IAudioCaptureClient_GetBuffer failed: 0x%08lX", hr);
+            read_failed = 1;
+            break;
+        }
 
         if (!need_resample) {
             UINT32 f;
@@ -693,12 +722,12 @@ static jint wasapi_read(int16_t *out, int num_stereo_samples) {
     }
 
     g_reading = 0;
-    return (jint)written;
+    return written > 0 ? (jint)written : (read_failed ? -1 : 0);
 }
 
 static void wasapi_stop(void) {
-    if (!g_initialized) return;
-
+    /* g_initialized is only set after Start succeeds. Cleanup must also cover
+     * every earlier acquisition, especially the endpoint mute. */
     g_stopping = 1;
     while (g_reading) { Sleep(1); }
 
@@ -716,7 +745,14 @@ static void wasapi_stop(void) {
     restore_render_endpoint_mute();
     if (g_device)         { IUnknown_Release((IUnknown *)g_device); g_device = NULL; }
     if (g_enumerator)     { IUnknown_Release((IUnknown *)g_enumerator); g_enumerator = NULL; }
-    CoUninitialize();
+    /* A failed mute restore retains an endpoint interface for a later retry. */
+    if (g_capture_com_owned && !g_endpoint_volume) {
+        if (g_capture_com_thread == GetCurrentThreadId()) CoUninitialize();
+        else fprintf(stderr, "[AudioEngine] Capture COM owner thread differs from stop thread; "
+                     "resources released without uninitializing another thread's COM apartment.\n");
+        g_capture_com_owned = 0;
+        g_capture_com_thread = 0;
+    }
 
     g_stopping = 0;
 }
@@ -1766,7 +1802,10 @@ Java_AudioEngine_nativeRead(JNIEnv *env, jobject thiz,
     (void)stereo_frames;   /* usato solo dai rami Windows/macOS */
 
 #if defined(_WIN32)
-    result = wasapi_read((int16_t *)buf, stereo_frames) * 2;
+    {
+        jint got = wasapi_read((int16_t *)buf, stereo_frames);
+        result = got < 0 ? got : got * 2;
+    }
 #elif defined(__linux__)
     /* Semantica allineata a Windows: pulse_read torna i FRAME scritti, anche
      * parziali; 0 = niente audio entro il timeout (il ramo mic sotto puo'
@@ -1815,6 +1854,28 @@ Java_AudioEngine_nativeRead(JNIEnv *env, jobject thiz,
 
     (*env)->ReleaseShortArrayElements(env, out_buf, buf, 0);
     return result;
+}
+
+JNIEXPORT void JNICALL
+Java_AudioEngine_nativeRequestCaptureStop(JNIEnv *env, jobject thiz) {
+    (void)env; (void)thiz;
+#if defined(_WIN32)
+    /* The only cross-thread capture operation: wake a quiet nativeRead so its
+     * COM owner thread can execute the queued stop and release its own apartment. */
+    InterlockedExchange(&g_stopping, 1);
+#endif
+}
+
+JNIEXPORT jboolean JNICALL
+Java_AudioEngine_nativeCaptureCleanupComplete(JNIEnv *env, jobject thiz) {
+    (void)env; (void)thiz;
+#if defined(_WIN32)
+    return !g_initialized && !g_reading && !g_capture_com_owned &&
+        !g_enumerator && !g_device && !g_audio_client && !g_capture_client &&
+        !g_mix_format && !g_endpoint_volume && !g_pending && !g_src_accum ? JNI_TRUE : JNI_FALSE;
+#else
+    return JNI_TRUE;
+#endif
 }
 
 JNIEXPORT void JNICALL

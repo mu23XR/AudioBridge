@@ -733,7 +733,9 @@ same-revision repeated STATE snapshots are inert and cannot roll state back.
 Off/Ask messages omit the MAC. Duplicate fields, extra fields, invalid decimal
 numbers and oversized/non-ASCII control messages are rejected.
 
-This extension is currently implemented by the Android standard and Shizuku
-senders/receiver. Shizuku currently offers Off authorization only; it does not
-claim authenticated controls. Existing Desktop and older Android peers remain
-audio-compatible and report remote controls as unsupported until implemented.
+This extension is implemented by the Android standard and Shizuku senders,
+the Android receiver, and Desktop senders/receivers. Desktop receiver control
+is enabled through the optional remote-volume synchronization setting.
+Shizuku currently offers Off authorization only; it does not claim authenticated
+controls. Older peers without this extension remain audio-compatible and report
+remote controls as unsupported.

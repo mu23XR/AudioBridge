@@ -29,3 +29,6 @@ Thumbs.db
 /dist/
 /out/
 /tmp/
+
+# Native lifecycle fixture scratch outputs; never release source/assets.
+/logs/

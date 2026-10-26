@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Minimize
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.Update
 import androidx.compose.material3.*
@@ -54,6 +53,7 @@ import io.ktor.network.sockets.*
 import io.ktor.utils.io.core.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import androidx.compose.runtime.collectAsState
@@ -238,8 +238,9 @@ data class AudioSettings_V1(
     val bitDepth: Int,
     val channels: Int,
     val bufferSize: Int,
-    val latencyMs: Int = 120,
-    val maxPayloadBytes: Int = 1390
+    val latencyMs: Int = 20,
+    val maxPayloadBytes: Int = 1390,
+    val adaptiveLatency: Boolean = true
 ) {
     fun toAudioFormat(): AudioFormat = AudioFormat(sampleRate, bitDepth, channels, true, false)
 }
@@ -388,7 +389,7 @@ object AutostartManager {
         val exePath = getExecutablePath()
         if (exePath.isEmpty()) return "Error: Executable path not found."
 
-        val appName = "AudioBridge"
+        val appName = if (BuildIdentity.preview) "AudioBridge-Test" else "AudioBridge"
         // Older builds registered the Run value as "WiFiAudioStreamer". Disabling
         // autostart deletes that name too, otherwise a machine set up before the
         // rename would keep launching on boot from a value the new code never
@@ -404,7 +405,7 @@ object AutostartManager {
                         "reg", "add", regKey, "/v", appName, "/t", "REG_SZ", "/d", "\"$exePath\"", "/f"
                     ).redirectErrorStream(true).start()
                     val output = process.inputStream.bufferedReader().readText()
-                    runCatching {
+                    if (!BuildIdentity.preview) runCatching {
                         ProcessBuilder("reg", "delete", regKey, "/v", legacyAppName, "/f")
                             .redirectErrorStream(true).start().waitFor()
                     }
@@ -414,7 +415,7 @@ object AutostartManager {
                         .redirectErrorStream(true).start()
                     val output = process.inputStream.bufferedReader().readText()
                     process.waitFor()
-                    runCatching {
+                    if (!BuildIdentity.preview) runCatching {
                         ProcessBuilder("reg", "delete", regKey, "/v", legacyAppName, "/f")
                             .redirectErrorStream(true).start().waitFor()
                     }
@@ -423,9 +424,9 @@ object AutostartManager {
                     ) "Registry Error: $output" else null
                 }
             } else if (os.contains("mac")) {
-                val plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n<key>Label</key>\n<string>com.wifiaudiostreaming</string>\n<key>ProgramArguments</key>\n<array><string>$exePath</string></array>\n<key>RunAtLoad</key>\n<true/>\n</dict>\n</plist>"
+                val plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n<key>Label</key>\n<string>${if (BuildIdentity.preview) "io.github.mu23xr.audiobridge.test" else "com.wifiaudiostreaming"}</string>\n<key>ProgramArguments</key>\n<array><string>$exePath</string></array>\n<key>RunAtLoad</key>\n<true/>\n</dict>\n</plist>"
                 val dir = File(System.getProperty("user.home"), "Library/LaunchAgents")
-                val file = File(dir, "com.wifiaudiostreaming.plist")
+                val file = File(dir, if (BuildIdentity.preview) "io.github.mu23xr.audiobridge.test.plist" else "com.wifiaudiostreaming.plist")
                 if (enable) {
                     dir.mkdirs()
                     file.writeText(plist)
@@ -436,7 +437,7 @@ object AutostartManager {
             } else {
                 val desktopContent = "[Desktop Entry]\nType=Application\nExec=\"$exePath\"\nHidden=false\nNoDisplay=false\nTerminal=false\nX-GNOME-Autostart-enabled=true\nName=AudioBridge\nComment=Start AudioBridge on login"
                 val dir = File(System.getProperty("user.home"), ".config/autostart")
-                val file = File(dir, "wifiaudiostreaming.desktop")
+                val file = File(dir, if (BuildIdentity.preview) "audiobridge-test.desktop" else "wifiaudiostreaming.desktop")
                 if (enable) {
                     dir.mkdirs()
                     file.writeText(desktopContent)
@@ -488,11 +489,13 @@ object NetworkHandler_v1 {
     private const val DISCOVERY_VERSION    = 2
 
     const val WFAS_PROTOCOL_VERSION = 2
-    private const val MULTICAST_SILENCE_TIMEOUT_MS = 6000L
     // How long an issued auth challenge stays answerable. Long enough for a
     // round trip on a bad link, short enough that an unanswered one does not
     // linger as something to answer later.
     private const val CHALLENGE_TTL_MS = 15_000L
+    // Receivers that answer PING with PONG are evicted on silence, not on a
+    // single lost datagram. Matches the Android server's heartbeat window.
+    private const val PONG_HEARTBEAT_TIMEOUT_MS = 8_000L
     private const val INCOMPATIBLE_PREFIX = "WFAS_INCOMPATIBLE"
     private const val HELLO_ACK_PREFIX    = "HELLO_ACK"
     private const val PENDING_MESSAGE       = "WFAS_PENDING"
@@ -554,7 +557,7 @@ object NetworkHandler_v1 {
     @Volatile var micRecvDir: WfasCrypto.Dir? = null
     @Volatile var micRecvWin: WfasCrypto.ReplayWindow = WfasCrypto.ReplayWindow()
     @Volatile var micSendDir: WfasCrypto.Dir? = null
-    var onAuthRequest: ((peer: String) -> Boolean)? = null
+    var onAuthRequest: (suspend (peer: String) -> Boolean)? = null
     var onKeyRequest: (suspend (wrong: Boolean) -> String?)? = null
 
     private fun clientHelloMessage(): String = "$CLIENT_HELLO_MESSAGE;v=$WFAS_PROTOCOL_VERSION"
@@ -646,39 +649,35 @@ object NetworkHandler_v1 {
     } catch (_: Exception) { null }
 
     suspend fun probeIsMulticast(ip: String, port: Int): Boolean {
-        return try {
-            var isUnicast = false
-            withTimeout(1000) {
-                aSocket(selectorManager).udp().bind(InetSocketAddress(NetAddr.wildcardFor(ip), 0)).use { sock ->
-                    val remoteAddress = InetSocketAddress(ip, port)
-                    // Bussa alla porta con una richiesta speciale
-                    sock.send(Datagram(buildPacket { writeText("MODE_PROBE") }, remoteAddress))
-                    val ack = sock.receive()
-                    if (ack.packet.readText().trim() == "UNICAST") {
-                        isUnicast = true
-                    }
-                }
-            }
-            !isUnicast
-        } catch (e: Exception) {
-            true // Se va in timeout, il server non ascolta in unicast -> è in Multicast
+        require(port in 1..65535) { "Source port must be between 1 and 65535" }
+        // Discovery/pairing supplies an explicit mode. With only an address,
+        // absence of a probe reply is never evidence for multicast.
+        return withContext(Dispatchers.IO) {
+            java.net.InetAddress.getByName(NetAddr.normalize(ip)).isMulticastAddress
         }
     }
 
     suspend fun pingServerUnicast(ip: String, port: Int): Boolean {
+        require(port in 1..65535) { "Source port must be between 1 and 65535" }
         return try {
             var online = false
-            withTimeout(1000) {
+            withTimeoutOrNull(1000) {
                 aSocket(selectorManager).udp().bind(InetSocketAddress(NetAddr.wildcardFor(ip), 0)).use { sock ->
-                    val remoteAddress = InetSocketAddress(ip, port)
+                    val host = withContext(Dispatchers.IO) { InetAddress.getByName(NetAddr.normalize(ip)).hostAddress }
+                    val remoteAddress = InetSocketAddress(host, port)
                     sock.send(Datagram(buildPacket { writeText("MODE_PROBE") }, remoteAddress))
-                    val ack = sock.receive()
-                    if (ack.packet.readText().trim() == "UNICAST") {
-                        online = true
+                    while (!online) {
+                        val ack = sock.receive()
+                        if (ack.address == remoteAddress) {
+                            val reply = ack.packet.readText().trim()
+                            online = reply == "UNICAST" || reply == BUSY_MESSAGE
+                        }
                     }
                 }
-            }
-            online
+                online
+            } ?: false
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             false
         }
@@ -696,24 +695,34 @@ object NetworkHandler_v1 {
 
     @Volatile var currentServerVolume: Float = 1.0f
         private set
+    val captureGain = MutableStateFlow(1f)
 
     @Volatile var currentClientVolume: Float = 1.0f
         private set
 
-    fun setServerVolume(volume: Float) { currentServerVolume = volume.coerceIn(0f, 2f) }
+    fun setServerVolume(volume: Float) {
+        require(volume.isFinite()) { "Sender gain must be finite" }
+        currentServerVolume = volume.coerceIn(0f, 2f)
+        captureGain.value = currentServerVolume
+    }
 
-    fun setClientVolume(volume: Float) { currentClientVolume = volume.coerceIn(0f, 2f) }
+    fun setClientVolume(volume: Float) {
+        require(volume.isFinite()) { "Receiver gain must be finite" }
+        currentClientVolume = volume.coerceIn(0f, 2f)
+    }
 
     fun setPlaybackOrCaptureVolume(volume: Float) {
+        require(volume.isFinite()) { "Audio gain must be finite" }
         val v = volume.coerceIn(0f, 2f)
-        currentServerVolume = v
-        currentClientVolume = v
+        setServerVolume(v)
+        setClientVolume(v)
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val selectorManager = SelectorManager(Dispatchers.IO)
 
     val isMicMuted = MutableStateFlow(false)
+    val playbackTargetMs = MutableStateFlow<Int?>(null)
 
     private var streamingJob:    Job? = null
     private var listeningJob:    Job? = null
@@ -753,8 +762,6 @@ object NetworkHandler_v1 {
         dst[6] = 0; dst[7] = 0; dst[8] = 0; dst[9] = 0
     }
 
-    @Volatile private var audioSeqNum:   Int  = 0
-    @Volatile private var audioSamplePos: Long = 0L
 
     // ── Sidecar PCM queues ─────────────────────────────────────────────────────
     // Riempite dal loop del grabber, svuotate dagli encoder. offer() non-bloccante:
@@ -1321,22 +1328,32 @@ object NetworkHandler_v1 {
                 var totalBytes   = 0L
                 var micVersionChecked = false
                 var lastPayloadShorts = 0
-                var micEncSeen = false
 
                 while (isActive) {
                     try {
                         packet.setData(buf, 0, buf.size)
                         socket.receive(packet)
+                        // Only the peer that owns this session may inject microphone
+                        // audio. Without this check any host on the LAN can push PCM
+                        // into the mic port whenever the session runs unencrypted;
+                        // multicast has no single owner, so it stays keyed only.
+                        val sessionPeer = activePeerIp
+                        if (!unicastPeerConnected.value ||
+                            !MicSourceFilter.accepts(sessionPeer, packet.address?.hostAddress)) {
+                            AppDebug.log("[MicReceiver] dropped packet from ${packet.address?.hostAddress}, session peer is $sessionPeer")
+                            continue
+                        }
                         val rawLen = packet.length
+                        if (rawLen < AUDIO_HEADER_SIZE || buf[0] != AUDIO_MAGIC_0 || buf[1] != AUDIO_MAGIC_1 ||
+                            (buf[2].toInt() and 0xFF) != WFAS_PROTOCOL_VERSION) continue
                         if (rawLen >= AUDIO_HEADER_SIZE && buf[0] == AUDIO_MAGIC_0 && buf[1] == AUDIO_MAGIC_1) {
                             if ((buf[3].toInt() and WfasCrypto.FLAG_ENCRYPTED) != 0) {
                                 val md = micRecvDir ?: continue
                                 val r = WfasCrypto.decryptPacket(md, micRecvWin, buf, rawLen)
                                 if (r !is WfasCrypto.Decrypted.Ok) continue
-                                micEncSeen = true
                                 System.arraycopy(r.pcm, 0, buf, AUDIO_HEADER_SIZE, r.pcm.size)
                                 packet.setData(buf, 0, AUDIO_HEADER_SIZE + r.pcm.size)
-                            } else if (micEncSeen) {
+                            } else if (sessionEncryptedLive.value || micRecvDir != null) {
                                 continue
                             }
                         }
@@ -1632,7 +1649,8 @@ object NetworkHandler_v1 {
         audioSettings: AudioSettings_V1,
         serverInfo: ServerInfo,
         micInputMixerInfo: Mixer.Info,
-        micPort: Int
+        micPort: Int,
+        sessionSendDirection: WfasCrypto.Dir? = null
     ) = launch {
         val mixer    = resolveMixer(micInputMixerInfo) ?: return@launch
         val format   = audioSettings.toAudioFormat()
@@ -1642,6 +1660,9 @@ object NetworkHandler_v1 {
         val line = (mixer.getLine(lineInfo) as TargetDataLine).also {
             it.open(format, audioSettings.bufferSize)
             it.start()
+        }
+        val closeOnCancel = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { line.stop(); line.close() }
         }
         var micCaptureId = 0L
         var socket: DatagramSocket? = null
@@ -1661,7 +1682,7 @@ object NetworkHandler_v1 {
             var seq = 0
             var lastMutedSent = false
             fun sendMicPacket(silence: Boolean, src: ByteArray?, off: Int, len: Int) {
-                val md = micSendDir
+                val md = sessionSendDirection
                 if (md != null) {
                     val payload = if (!silence && src != null && len > 0) src.copyOfRange(off, off + len) else ByteArray(0)
                     val enc = WfasCrypto.encryptPacket(md, seq, 0, silence, payload)
@@ -1705,6 +1726,7 @@ object NetworkHandler_v1 {
             MicStats.off()
             if (micCaptureId != 0L) CaptureMonitor.end(micCaptureId)
             socket?.close()
+            closeOnCancel.cancel()
             line.stop(); line.close()
         }
     }
@@ -1795,8 +1817,9 @@ object NetworkHandler_v1 {
         chunkArray: ShortArray,
         byteBuffer: java.nio.ByteBuffer,
         maxShortsPerPacket: Int,
+        timeline: WfasPacketTimeline,
         onPcm: ((ShortArray) -> Unit)? = null,
-        onChunk: suspend (bytesToSend: Int) -> Unit
+        onChunk: suspend (bytesToSend: Int) -> Boolean
     ) {
         val samples = frame.samples ?: return
         val source = samples.getOrNull(0) as? java.nio.ShortBuffer ?: return
@@ -1811,24 +1834,23 @@ object NetworkHandler_v1 {
             return
         }
 
+        require(pcm.size % timeline.channels == 0) { "Grabber returned an incomplete PCM frame" }
         var offset = 0
         while (offset < pcm.size) {
             val shortsToRead = minOf(pcm.size - offset, maxShortsPerPacket)
             pcm.copyInto(chunkArray, 0, offset, offset + shortsToRead)
             offset += shortsToRead
             softwareMicMixer.mixInto(chunkArray, shortsToRead)
-            val vol = currentServerVolume
-            if (vol != 1.0f) {
-                for (i in 0 until shortsToRead) {
-                    chunkArray[i] = (chunkArray[i] * vol).toInt()
-                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                        .toShort()
-                }
-            }
+            DesktopGainLimiter.apply(chunkArray, shortsToRead, currentServerVolume)
             onPcm?.invoke(chunkArray.copyOf(shortsToRead))
             byteBuffer.clear()
             byteBuffer.asShortBuffer().put(chunkArray, 0, shortsToRead)
-            onChunk(shortsToRead * 2)
+            // A packet the sender refused aborts the frame: its samples must not be re-sent as a
+            // later packet with a new sequence number.
+            if (!onChunk(shortsToRead * 2)) {
+                timeline.skipPcm((pcm.size - offset) * 2)
+                return
+            }
         }
     }
 
@@ -2504,23 +2526,18 @@ object NetworkHandler_v1 {
         chunkArray: ShortArray,
         byteBuffer: java.nio.ByteBuffer,
         maxShortsPerPacket: Int,
-        channels: Int,
-        onChunk: suspend (bytesToSend: Int) -> Unit
+        timeline: WfasPacketTimeline,
+        silenceFrames: Int = 0,
+        onChunk: suspend (bytesToSend: Int) -> Boolean
     ) {
         if (samples.isEmpty()) {
             byteBuffer.clear()
-            byteBuffer.order(java.nio.ByteOrder.BIG_ENDIAN)
-            byteBuffer.put(AUDIO_MAGIC_0)
-            byteBuffer.put(AUDIO_MAGIC_1)
-            byteBuffer.put(AUDIO_VERSION)
-            byteBuffer.put(0x01.toByte())
-            byteBuffer.putShort((audioSeqNum and 0xFFFF).toShort())
-            byteBuffer.putInt((audioSamplePos and 0xFFFFFFFFL).toInt())
-            audioSeqNum = (audioSeqNum + 1) and 0xFFFF
+            timeline.stampSilence(byteBuffer.array(), silenceFrames)
             onChunk(AUDIO_HEADER_SIZE)
             return
         }
-
+        val channels = timeline.channels
+        require(samples.size % channels == 0) { "Capture returned an incomplete PCM frame" }
         var offset = 0
         while (offset < samples.size) {
             var shortsToRead = minOf(samples.size - offset, maxShortsPerPacket)
@@ -2529,23 +2546,10 @@ object NetworkHandler_v1 {
 
             for (i in 0 until shortsToRead) chunkArray[i] = samples[offset + i]
 
-            val vol = currentServerVolume
-            if (vol != 1.0f) {
-                for (i in 0 until shortsToRead) {
-                    chunkArray[i] = (chunkArray[i] * vol).toInt()
-                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                        .toShort()
-                }
-            }
+            DesktopGainLimiter.apply(chunkArray, shortsToRead, currentServerVolume)
 
             byteBuffer.clear()
-            byteBuffer.order(java.nio.ByteOrder.BIG_ENDIAN)
-            byteBuffer.put(AUDIO_MAGIC_0)
-            byteBuffer.put(AUDIO_MAGIC_1)
-            byteBuffer.put(AUDIO_VERSION)
-            byteBuffer.put(0x00.toByte())
-            byteBuffer.putShort((audioSeqNum and 0xFFFF).toShort())
-            byteBuffer.putInt((audioSamplePos and 0xFFFFFFFFL).toInt())
+            timeline.stampPcm(byteBuffer.array(), shortsToRead * 2)
 
             val payloadBytes = byteBuffer.array()
             var bytePos = AUDIO_HEADER_SIZE
@@ -2555,12 +2559,24 @@ object NetworkHandler_v1 {
                 payloadBytes[bytePos++] = ((sample shr 8) and 0xFF).toByte()
             }
 
-            audioSeqNum    = (audioSeqNum + 1) and 0xFFFF
-            audioSamplePos += (shortsToRead / channels).toLong()
             offset         += shortsToRead
 
-            onChunk(AUDIO_HEADER_SIZE + (shortsToRead * 2))
+            // Stop the frame when the peer link refused this packet: retrying later packets of the
+            // same frame would send audio under sequence numbers that never carried it.
+            if (!onChunk(AUDIO_HEADER_SIZE + (shortsToRead * 2))) {
+                timeline.skipPcm((samples.size - offset) * 2)
+                return
+            }
         }
+    }
+
+    /**
+     * Legacy (grabber) silence packet: magic, version, silence flag, 16-bit sequence and no
+     * payload. The grabber returns null instead of silence when the source stalls, so the caller
+     * emits this header to keep the peer's session alive without inventing audio.
+     */
+    private fun writeLegacySilenceHeader(packetArray: ByteArray, timeline: WfasPacketTimeline, elapsedFrames: Int) {
+        timeline.stampSilence(packetArray, elapsedFrames)
     }
 
     // ── Server ─────────────────────────────────────────────────────────────────
@@ -2718,6 +2734,7 @@ object NetworkHandler_v1 {
             if (summary.isNotEmpty()) onStatusUpdate("status_serving_protocols", arrayOf(summary))
         }
 
+        val ownedMicReceiver = micReceiverJob
         streamingJob = scope.launch(Dispatchers.IO) {
             try {
                 if (isMulticast) {
@@ -2735,7 +2752,7 @@ object NetworkHandler_v1 {
                         }
                     }
 
-                    onStatusUpdate("Streaming Multicast on %s:%d...", arrayOf(MULTICAST_GROUP_IP, port))
+                    onStatusUpdate("status_multicast_streaming", arrayOf(port))
 
                     val nCh               = audioSettings.channels
                     val mcSession = McastSession()
@@ -2787,9 +2804,7 @@ object NetworkHandler_v1 {
                         if (useNativeEngine) exactPayloadBytes else maxShortsPerPacket * 2
                     ).apply { if (!useNativeEngine) order(java.nio.ByteOrder.LITTLE_ENDIAN) }
                     val packetArray        = ByteArray(exactPayloadBytes)
-                    audioSeqNum    = 0
-                    audioSamplePos = 0L
-                    var legacySeq  = 0
+                    val packetTimeline = WfasPacketTimeline(nCh)
                     fun frameForSend(buf: ByteArray, len: Int): ByteArray {
                         val dir = mcSession.dir ?: return if (len == buf.size) buf else buf.copyOf(len)
                         val silence = (buf[3].toInt() and 0x01) != 0
@@ -2810,15 +2825,22 @@ object NetworkHandler_v1 {
                             val group = MulticastNet.audioGroup(socket.networkInterface)
                             var sendFailureLogged = false
 
-                            fun emit(bytes: ByteArray, size: Int = bytes.size) {
-                                try {
+                            suspend fun emit(bytes: ByteArray, size: Int = bytes.size): Boolean {
+                                return try {
                                     socket.send(DatagramPacket(bytes, size, group, port))
+                                    sendFailureLogged = false
+                                    true
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
                                 } catch (e: Exception) {
                                     if (!sendFailureLogged) {
                                         sendFailureLogged = true
                                         AppDebug.log("[SERVER][MULTICAST] send fallita su $group:$port via ${socket.networkInterface?.name ?: "default"}: ${e.message}")
                                         onStatusUpdate("status_multicast_send_failed", arrayOf(e.message ?: e.javaClass.simpleName))
                                     }
+                                    if (!TransientSendError.isTransient(e)) throw e
+                                    delay(500)
+                                    false
                                 }
                             }
 
@@ -2836,22 +2858,35 @@ object NetworkHandler_v1 {
                                 }
                             }
 
+                            val silenceTimeline = SilenceTimeline(audioSettings.sampleRate.toInt())
                             try {
                                 while (isActive) {
                                     if (useNativeEngine) {
                                         val engine  = serverEngine ?: break
                                         val samples = engine.readFrame() ?: break
-                                        if (samples.isEmpty()) continue
-                                        onAudioFrame?.invoke(samples)
+                                        // The beacon proves the sender is alive, but a silent stream still
+                                        // starves the receiver's audio freshness check. Emitting silence
+                                        // headers keeps the sample timeline moving like the unicast path.
+                                        val silentRead = samples.isEmpty()
+                                        val nowNs = System.nanoTime()
+                                        val silenceFrames = if (silentRead) {
+                                            silenceTimeline.onSilence(nowNs)
+                                        } else {
+                                            silenceTimeline.onAudio(nowNs)
+                                            0
+                                        }
+                                        if (!silentRead) onAudioFrame?.invoke(samples)
 
-                                        processEngineFrame(samples, chunkArray, byteBuffer, maxShortsPerPacket, nCh) { bytesToSend ->
+                                        processEngineFrame(samples, chunkArray, byteBuffer, maxShortsPerPacket, packetTimeline, silenceFrames) { bytesToSend ->
                                             byteBuffer.array().copyInto(packetArray, 0, 0, bytesToSend)
                                             val ob = frameForSend(packetArray, bytesToSend)
-                                            emit(ob)
-                                            WfasStats.add(if ((packetArray[3].toInt() and 0x01) != 0) WfasStats.Cat.SILENCE else WfasStats.Cat.AUDIO, bytesToSend)
-                                            if (aacPcmQueue != null || opusPcmQueue != null || rtpPcmQueue != null || dlnaManager != null || snapcastManager != null)
+                                            val sent = emit(ob)
+                                            if (sent) WfasStats.add(if ((packetArray[3].toInt() and 0x01) != 0) WfasStats.Cat.SILENCE else WfasStats.Cat.AUDIO, bytesToSend)
+                                            if (sent && (aacPcmQueue != null || opusPcmQueue != null || rtpPcmQueue != null || dlnaManager != null || snapcastManager != null))
                                                 distributeToSidecars(byteBuffer.array().copyOfRange(AUDIO_HEADER_SIZE, bytesToSend))
+                                            sent
                                         }
+                                        if (silentRead) delay(10)
                                     } else {
                                         val grabber = serverGrabber ?: break
                                         val frame = try { grabber.grabSamples() }
@@ -2860,23 +2895,23 @@ object NetworkHandler_v1 {
                                             break
                                         }
                                         if (frame != null) {
-                                            processGrabberFrame(frame, chunkArray, byteBuffer, maxShortsPerPacket, onAudioFrame) { bytesToSend ->
-                                                packetArray[0] = AUDIO_MAGIC_0
-                                                packetArray[1] = AUDIO_MAGIC_1
-                                                packetArray[2] = AUDIO_VERSION
-                                                packetArray[3] = 0x00
-                                                packetArray[4] = ((legacySeq shr 8) and 0xFF).toByte()
-                                                packetArray[5] = (legacySeq and 0xFF).toByte()
-                                                packetArray[6] = 0; packetArray[7] = 0; packetArray[8] = 0; packetArray[9] = 0
+                                            silenceTimeline.onAudio(System.nanoTime())
+                                            processGrabberFrame(frame, chunkArray, byteBuffer, maxShortsPerPacket, packetTimeline, onAudioFrame) { bytesToSend ->
+                                                packetTimeline.stampPcm(packetArray, bytesToSend)
                                                 byteBuffer.array().copyInto(packetArray, AUDIO_HEADER_SIZE, 0, bytesToSend)
-                                                legacySeq = (legacySeq + 1) and 0xFFFF
                                                 val totalBytes = AUDIO_HEADER_SIZE + bytesToSend
                                                 val ob = frameForSend(packetArray, totalBytes)
-                                                emit(ob)
-                                                WfasStats.add(WfasStats.Cat.AUDIO, totalBytes)
-                                                if (aacPcmQueue != null || opusPcmQueue != null || rtpPcmQueue != null || dlnaManager != null || snapcastManager != null)
+                                                val sent = emit(ob)
+                                                if (sent) WfasStats.add(WfasStats.Cat.AUDIO, totalBytes)
+                                                if (sent && (aacPcmQueue != null || opusPcmQueue != null || rtpPcmQueue != null || dlnaManager != null || snapcastManager != null))
                                                     distributeToSidecars(byteBuffer.array().copyOf(bytesToSend))
+                                                sent
                                             }
+                                        } else {
+                                            writeLegacySilenceHeader(packetArray, packetTimeline, silenceTimeline.onSilence(System.nanoTime()))
+                                            if (emit(frameForSend(packetArray, AUDIO_HEADER_SIZE)))
+                                                WfasStats.add(WfasStats.Cat.SILENCE, AUDIO_HEADER_SIZE)
+                                            delay(10)
                                         }
                                     }
                                 }
@@ -2931,7 +2966,7 @@ object NetworkHandler_v1 {
                         var pendSnonce = ""
                         while (isActive) {
                             startAnnouncingPresence(isMulticast = false, port = port, capabilities = annCaps, audioSettings = audioSettings)
-                            onStatusUpdate("Waiting for Unicast Client on Port %d...", arrayOf(port))
+                            onStatusUpdate("status_server_waiting", arrayOf(port))
 
                             val clientDatagram = socket.receive()
                             val rxAt = System.currentTimeMillis()
@@ -2953,7 +2988,7 @@ object NetworkHandler_v1 {
                             // not resolve to a literal host we still want a stable key, so
                             // the raw socket address stands in rather than one shared
                             // bucket that every unresolved peer would land in.
-                            val challengeKey = peerHost ?: clientAddress.toString()
+                            val challengeKey = clientAddress.toString()
                             AppDebug.log("[SERVER][TIMING] peer=$peerHost usbPeer=${UsbLink.isUsbPeer(peerHost)} " +
                                     "mode=${WfasPolicy.mode} allowed=${WfasPolicy.enabledForPeer(peerHost)} at +${System.currentTimeMillis() - rxAt}ms")
                             if (!WfasPolicy.enabledForPeer(peerHost)) {
@@ -3019,9 +3054,17 @@ object NetworkHandler_v1 {
                                     AppDebug.log("[SERVER][UNICAST] auth OK for $clientAddress")
                                 }
                                 SecurityMode.ASK -> {
-                                    socket.send(Datagram(buildPacket { writeText(PENDING_MESSAGE) }, clientAddress))
-                                    val allow = onAuthRequest?.invoke(clientAddress.toString()) ?: true
-                                    if (!allow) {
+                                    val approval = awaitDesktopApproval(
+                                        request = { onAuthRequest?.invoke(clientAddress.toString()) ?: false },
+                                        sendPending = {
+                                            socket.send(Datagram(buildPacket { writeText(PENDING_MESSAGE) }, clientAddress))
+                                        }
+                                    )
+                                    if (approval != DesktopApproval.APPROVED) {
+                                        if (approval == DesktopApproval.TIMED_OUT) {
+                                            DesktopDiagnostics.event("AUTH_APPROVAL_TIMEOUT", "timeoutMs=30000")
+                                            onStatusUpdate("status_auth_approval_timeout", emptyArray())
+                                        }
                                         socket.send(Datagram(buildPacket { writeText(UNAUTHORIZED_MESSAGE) }, clientAddress))
                                         continue
                                     }
@@ -3034,8 +3077,6 @@ object NetworkHandler_v1 {
                             val sessionKeys = if (encrypting)
                                 WfasCrypto.deriveUnicast(authKey, pendCnonce, pendSnonce) else null
                             val sendDir: WfasCrypto.Dir? = sessionKeys?.second
-                            unicastPeerConnected.value = true
-                            sessionEncryptedLive.value = sendDir != null
                             micRecvDir = sessionKeys?.first
                             if (encrypting) micRecvWin = WfasCrypto.ReplayWindow()
                             fun frameForSend(buf: ByteArray, len: Int): ByteArray {
@@ -3048,29 +3089,67 @@ object NetworkHandler_v1 {
                                 return WfasCrypto.encryptPacket(dir, seq, pos, silence, pcm)
                             }
 
-                            onStatusUpdate("Client Connected: %s", arrayOf(clientAddress.toString()))
                             stopAnnouncingPresence()
 
-                            val ackText = helloAckMessage() + if (encrypting) ";enc=1" else ""
+                            // Remote volume control exists only when the receiver asked
+                            // for it (rvol=1 + rvnonce in HELLO). The session id is bound
+                            // to this endpoint because the ACK is addressed to it, so a
+                            // third peer cannot drive another peer's volume.
+                            val volumeControl = RemoteVolumeProtocol.offer(
+                                msg,
+                                if (SecurityMode.requiresKey(securityMode)) authKey else "",
+                                pendCnonce, pendSnonce,
+                                object : RemoteVolumeProtocol.Volume {
+                                    override fun getPercent() = DesktopVolumeScale.percent(
+                                        currentServerVolume, DesktopVolumeScale.SENDER_MAX
+                                    )
+                                    override fun setPercent(value: Int) {
+                                        setServerVolume(DesktopVolumeScale.gain(value, DesktopVolumeScale.SENDER_MAX))
+                                    }
+                                }
+                            )
+                            // The receiver expects audio as soon as it reads this ACK, so
+                            // the capture session must already be running. Opening a WASAPI
+                            // loopback takes tens of milliseconds; acknowledging first and
+                            // failing afterwards leaves the peer connected to nothing.
+                            val captureReady = if (useNativeEngine) {
+                                serverEngine = buildAndStartEngine(audioSettings, muteRender)
+                                serverEngine != null
+                            } else {
+                                serverGrabber = buildAndStartGrabber(audioSettings)
+                                serverGrabber != null
+                            }
+                            if (!captureReady) {
+                                unicastPeerConnected.value = false
+                                sessionEncryptedLive.value = false
+                                micRecvDir = null
+                                micRecvWin = WfasCrypto.ReplayWindow()
+                                activePeerIp = null
+                                pendCnonce = ""; pendSnonce = ""
+                                challenges.remove(challengeKey)
+                                DesktopDiagnostics.event("CAPTURE_START_FAILED", "persist=$persist")
+                                onStatusUpdate("status_capture_unavailable", emptyArray())
+                                if (!persist) break
+                                continue
+                            }
+                            unicastPeerConnected.value = true
+                            sessionEncryptedLive.value = sendDir != null
+                            onStatusUpdate("status_client_connected", arrayOf(clientAddress.toString()))
+
+                            val ackText = helloAckMessage() + (if (encrypting) ";enc=1" else "") +
+                                    (volumeControl?.ackSuffix() ?: "")
                             AppDebug.log("[SERVER][TIMING] sending HELLO_ACK at +${System.currentTimeMillis() - rxAt}ms")
                             socket.send(Datagram(buildPacket { writeText(ackText) }, clientAddress))
                             WfasStats.add(WfasStats.Cat.HELLO, ackText.length)
 
-                            if (useNativeEngine) {
-                                serverEngine = buildAndStartEngine(audioSettings, muteRender)
-                                if (serverEngine == null) {
-                                    onStatusUpdate("error_virtual_driver_missing", emptyArray())
-                                    break
-                                }
-                            } else {
-                                serverGrabber = buildAndStartGrabber(audioSettings)
-                                if (serverGrabber == null) {
-                                    onStatusUpdate("error_virtual_driver_missing", emptyArray())
-                                    break
-                                }
-                            }
-
                             val clientAlive = java.util.concurrent.atomic.AtomicBoolean(true)
+                            // Capability-gated heartbeat: only a peer that answered PONG
+                            // can be evicted on silence. Older peers keep the send-failure
+                            // rule, so a receiver that never sends PONG is never dropped
+                            // for not sending it.
+                            val clientPongCapable = java.util.concurrent.atomic.AtomicBoolean(false)
+                            val lastClientHeartbeatAt =
+                                java.util.concurrent.atomic.AtomicLong(System.nanoTime() / 1_000_000)
 
                             val pingJob = launch {
                                 var failures = 0
@@ -3079,10 +3158,26 @@ object NetworkHandler_v1 {
                                     try {
                                         socket.send(Datagram(buildPacket { writeText("PING") }, clientAddress))
                                         WfasStats.add(WfasStats.Cat.PING, 4)
+                                        volumeControl?.snapshot()?.let { update ->
+                                            socket.send(Datagram(buildPacket { writeText(update) }, clientAddress))
+                                        }
                                         failures = 0
+                                        if (clientPongCapable.get() &&
+                                            System.nanoTime() / 1_000_000 - lastClientHeartbeatAt.get() >
+                                            PONG_HEARTBEAT_TIMEOUT_MS
+                                        ) {
+                                            AppDebug.log("---PONG heartbeat stale, client considered gone ---")
+                                            clientAlive.set(false)
+                                        }
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
                                     } catch (_: Exception) {
-                                        if (++failures >= 3) {
-                                            AppDebug.log("---PING failed 3 times, client considered gone ---")
+                                        // One PING every second, so eight failures is the same
+                                        // eight-second budget a PONG-capable peer gets. Ending the
+                                        // session after three transient send errors dropped healthy
+                                        // clients during a short Wi-Fi hiccup.
+                                        if (++failures >= 8) {
+                                            AppDebug.log("---PING failed 8 times, client considered gone ---")
                                             clientAlive.set(false)
                                         }
                                     }
@@ -3110,6 +3205,34 @@ object NetworkHandler_v1 {
                                             }
                                             continue
                                         }
+                                        if (msg == "PONG") {
+                                            clientPongCapable.set(true)
+                                            lastClientHeartbeatAt.set(System.nanoTime() / 1_000_000)
+                                            continue
+                                        }
+                                        if (volumeControl != null &&
+                                            (msg.startsWith(RemoteVolumeProtocol.GET) ||
+                                                    msg.startsWith(RemoteVolumeProtocol.SET))
+                                        ) {
+                                            volumeControl.receive(msg)?.let { reply ->
+                                                runCatching {
+                                                    socket.send(Datagram(buildPacket { writeText(reply) }, clientAddress))
+                                                }
+                                            }
+                                            lastClientHeartbeatAt.set(System.nanoTime() / 1_000_000)
+                                            continue
+                                        }
+                                        // A HELLO_ACK lost in flight must not cost a whole
+                                        // reconnect: repeat it for this endpoint and for the
+                                        // session that actually negotiated it.
+                                        if (msg.startsWith(CLIENT_HELLO_MESSAGE) &&
+                                            (volumeControl == null || volumeControl.acceptsHello(msg))
+                                        ) {
+                                            runCatching {
+                                                socket.send(Datagram(buildPacket { writeText(ackText) }, clientAddress))
+                                            }
+                                            continue
+                                        }
                                         if (msg == "CLIENT_BYE") {
                                             AppDebug.log("---Received CLIENT_BYE from $clientAddress ---")
                                             clientAlive.set(false)
@@ -3121,7 +3244,12 @@ object NetworkHandler_v1 {
                                             break
                                         }
                                     }
-                                } catch (_: Exception) {}
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (failure: Exception) {
+                                    DesktopDiagnostics.event("SERVER_CONTROL_FAILED", "type=${failure.javaClass.simpleName}")
+                                    clientAlive.set(false)
+                                }
                             }
 
                             try {
@@ -3139,29 +3267,63 @@ object NetworkHandler_v1 {
                                     val byteBuffer = java.nio.ByteBuffer.allocate(exactPayloadBytes)
                                     if (audioSettings.channels == 2 && maxShortsPerPacket % 2 != 0) maxShortsPerPacket -= 1
                                     val packetArray = ByteArray(exactPayloadBytes)
-                                    audioSeqNum    = 0
-                                    audioSamplePos = 0L
+                                    val packetTimeline = WfasPacketTimeline(audioSettings.channels)
 
+                                    val silenceTimeline = SilenceTimeline(audioSettings.sampleRate.toInt())
+                                    var linkDown = false
+                                    var failedSends = 0
                                     while (isActive && clientAlive.get()) {
                                         val engine = serverEngine ?: break
                                         val samples = engine.readFrame() ?: break
                                         if (!clientAlive.get()) break
-                                        if (samples.isEmpty()) continue
-                                        onAudioFrame?.invoke(samples)
-                                        processEngineFrame(samples, chunkArray, byteBuffer, maxShortsPerPacket, audioSettings.channels) { bytesToSend ->
+                                        // A quiet loopback device returns "no data" rather than silence, and
+                                        // skipping those reads leaves the peer without any frame for the whole
+                                        // quiet period, which the receiver eventually treats as a dead session.
+                                        val silentRead = samples.isEmpty()
+                                        val nowNs = System.nanoTime()
+                                        val silenceFrames = if (silentRead) {
+                                            silenceTimeline.onSilence(nowNs)
+                                        } else {
+                                            silenceTimeline.onAudio(nowNs)
+                                            0
+                                        }
+                                        if (!silentRead) onAudioFrame?.invoke(samples)
+                                        processEngineFrame(samples, chunkArray, byteBuffer, maxShortsPerPacket, packetTimeline, silenceFrames) { bytesToSend ->
                                             byteBuffer.array().copyInto(packetArray, 0, 0, bytesToSend)
                                             val outBytes = frameForSend(packetArray, bytesToSend)
                                             val packet = buildPacket { writeFully(outBytes, 0, outBytes.size) }
-                                            try {
+                                            val sent = try {
                                                 socket.send(Datagram(packet, clientAddress))
                                                 WfasStats.add(if ((packetArray[3].toInt() and 0x01) != 0) WfasStats.Cat.SILENCE else WfasStats.Cat.AUDIO, bytesToSend)
-                                            } catch (_: Exception) {
-                                                clientAlive.set(false)
+                                                if (linkDown) {
+                                                    linkDown = false
+                                                    onStatusUpdate("status_link_restored", arrayOf<Any>())
+                                                }
+                                                failedSends = 0
+                                                true
+                                            } catch (cancelled: CancellationException) {
+                                                throw cancelled
+                                            } catch (e: Exception) {
+                                                if (TransientSendError.isTransient(e)) {
+                                                    failedSends++
+                                                    if (!linkDown) {
+                                                        linkDown = true
+                                                        onStatusUpdate("status_link_lost_waiting", arrayOf<Any>())
+                                                    }
+                                                    AppDebug.log("[SERVER][UNICAST] transient send failure #$failedSends: ${e.message}")
+                                                    delay(500)
+                                                    false
+                                                } else {
+                                                    clientAlive.set(false)
+                                                    false
+                                                }
                                             }
-                                            if (clientAlive.get() &&
+                                            if (sent && clientAlive.get() &&
                                                 (aacPcmQueue != null || opusPcmQueue != null || rtpPcmQueue != null || dlnaManager != null || snapcastManager != null))
                                                 distributeToSidecars(byteBuffer.array().copyOfRange(AUDIO_HEADER_SIZE, bytesToSend))
+                                            sent
                                         }
+                                        if (silentRead) delay(10)
                                     }
                                 } else {
                                     val safeMtuSize = 1400
@@ -3177,7 +3339,10 @@ object NetworkHandler_v1 {
                                     val byteBuffer         = java.nio.ByteBuffer.allocate(maxShortsPerPacket * 2)
                                         .apply { order(java.nio.ByteOrder.LITTLE_ENDIAN) }
                                     val packetArray        = ByteArray(exactPayloadBytes)
-                                    var legacySeq          = 0
+                                    val packetTimeline     = WfasPacketTimeline(audioSettings.channels)
+                                    val silenceTimeline    = SilenceTimeline(audioSettings.sampleRate.toInt())
+                                    var linkDown           = false
+                                    var failedSends        = 0
 
                                     while (isActive && clientAlive.get()) {
                                         val grabber = serverGrabber ?: break
@@ -3188,37 +3353,82 @@ object NetworkHandler_v1 {
                                         }
                                         if (!clientAlive.get()) break
                                         if (frame != null) {
-                                            processGrabberFrame(frame, chunkArray, byteBuffer, maxShortsPerPacket, onAudioFrame) { bytesToSend ->
-                                                packetArray[0] = AUDIO_MAGIC_0
-                                                packetArray[1] = AUDIO_MAGIC_1
-                                                packetArray[2] = AUDIO_VERSION
-                                                packetArray[3] = 0x00
-                                                packetArray[4] = ((legacySeq shr 8) and 0xFF).toByte()
-                                                packetArray[5] = (legacySeq and 0xFF).toByte()
-                                                packetArray[6] = 0; packetArray[7] = 0; packetArray[8] = 0; packetArray[9] = 0
+                                            silenceTimeline.onAudio(System.nanoTime())
+                                            processGrabberFrame(frame, chunkArray, byteBuffer, maxShortsPerPacket, packetTimeline, onAudioFrame) { bytesToSend ->
+                                                packetTimeline.stampPcm(packetArray, bytesToSend)
                                                 byteBuffer.array().copyInto(packetArray, AUDIO_HEADER_SIZE, 0, bytesToSend)
-                                                legacySeq = (legacySeq + 1) and 0xFFFF
                                                 val totalBytes = AUDIO_HEADER_SIZE + bytesToSend
                                                 val outBytes = frameForSend(packetArray, totalBytes)
                                                 val packet = buildPacket { writeFully(outBytes, 0, outBytes.size) }
-                                                try {
+                                                val sent = try {
                                                     socket.send(Datagram(packet, clientAddress))
                                                     WfasStats.add(WfasStats.Cat.AUDIO, totalBytes)
-                                                } catch (_: Exception) {
-                                                    clientAlive.set(false)
+                                                    if (linkDown) {
+                                                        linkDown = false
+                                                        onStatusUpdate("status_link_restored", arrayOf<Any>())
+                                                    }
+                                                    failedSends = 0
+                                                    true
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (e: Exception) {
+                                                    if (TransientSendError.isTransient(e)) {
+                                                        failedSends++
+                                                        if (!linkDown) {
+                                                            linkDown = true
+                                                            onStatusUpdate("status_link_lost_waiting", arrayOf<Any>())
+                                                        }
+                                                        AppDebug.log("[SERVER][UNICAST] transient send failure #$failedSends: ${e.message}")
+                                                        delay(500)
+                                                        false
+                                                    } else {
+                                                        clientAlive.set(false)
+                                                        false
+                                                    }
                                                 }
-                                                if (clientAlive.get() &&
+                                                if (sent && clientAlive.get() &&
                                                     (aacPcmQueue != null || opusPcmQueue != null || rtpPcmQueue != null || dlnaManager != null || snapcastManager != null))
                                                     distributeToSidecars(byteBuffer.array().copyOf(bytesToSend))
+                                                sent
                                             }
+                                        } else {
+                                            // The grabber reports a stalled source as null; keep the session
+                                            // alive with a payload-less silence header instead of idling.
+                                            writeLegacySilenceHeader(packetArray, packetTimeline, silenceTimeline.onSilence(System.nanoTime()))
+                                            val outBytes = frameForSend(packetArray, AUDIO_HEADER_SIZE)
+                                            val packet = buildPacket { writeFully(outBytes, 0, outBytes.size) }
+                                            try {
+                                                socket.send(Datagram(packet, clientAddress))
+                                                WfasStats.add(WfasStats.Cat.SILENCE, AUDIO_HEADER_SIZE)
+                                                if (linkDown) {
+                                                    linkDown = false
+                                                    onStatusUpdate("status_link_restored", arrayOf<Any>())
+                                                }
+                                                failedSends = 0
+                                            } catch (cancelled: CancellationException) {
+                                                throw cancelled
+                                            } catch (e: Exception) {
+                                                if (TransientSendError.isTransient(e)) {
+                                                    failedSends++
+                                                    if (!linkDown) {
+                                                        linkDown = true
+                                                        onStatusUpdate("status_link_lost_waiting", arrayOf<Any>())
+                                                    }
+                                                    AppDebug.log("[SERVER][UNICAST] transient silence send failure #$failedSends: ${e.message}")
+                                                    delay(500)
+                                                } else clientAlive.set(false)
+                                            }
+                                            delay(10)
                                         }
                                     }
                                 }
                             } finally {
                                 unicastPeerConnected.value = false
                                 sessionEncryptedLive.value = false
-                                clientByeReceiverJob.cancel()
-                                pingJob.cancel()
+                                withContext(NonCancellable) {
+                                    clientByeReceiverJob.cancelAndJoin()
+                                    pingJob.cancelAndJoin()
+                                }
                                 if (clientAlive.get()) {
                                     withContext(NonCancellable) {
                                         runCatching {
@@ -3235,7 +3445,6 @@ object NetworkHandler_v1 {
                                 } else {
                                     val grabberToStop = serverGrabber
                                     serverGrabber = null
-                                    delay(50)
                                     runCatching { grabberToStop?.stop() }
                                     runCatching { grabberToStop?.release() }
                                 }
@@ -3262,9 +3471,16 @@ object NetworkHandler_v1 {
                 if (t !is CancellationException) {
                     println("=== CRITICAL SERVER ERROR ===")
                     t.printStackTrace()
-                    onStatusUpdate("Error: %s", arrayOf(t.message ?: t.toString()))
+                    onStatusUpdate("status_error_server", arrayOf(t.message ?: t.toString()))
                 }
             } finally {
+                unicastPeerConnected.value = false
+                sessionEncryptedLive.value = false
+                activePeerIp = null
+                micRecvDir = null
+                micRecvWin = WfasCrypto.ReplayWindow()
+                withContext(NonCancellable) { ownedMicReceiver?.cancelAndJoin() }
+                if (micReceiverJob === ownedMicReceiver) micReceiverJob = null
                 stopAnnouncingPresence()
                 if (useNativeEngine) {
                     val engineToStop = serverEngine
@@ -3292,547 +3508,153 @@ object NetworkHandler_v1 {
         connectionSoundEnabled: Boolean = true,
         disconnectionSoundEnabled: Boolean = true,
         onAudioFrame: ((ShortArray) -> Unit)? = null,
+        outputMixerProvider: (() -> Mixer.Info?)? = null,
         onStatusUpdate: (key: String, args: Array<out Any>) -> Unit
     ) {
-        // Protocol selection: WFAS > RTP > HTTP
-        val caps         = serverInfo.capabilities
-        val wfasAvailable = caps == null || StreamingProtocol.WFAS in caps.protocols
-        val httpFallback  = caps != null && !wfasAvailable &&
-                StreamingProtocol.HTTP in caps.protocols && caps.httpPort != null
-
-        if (httpFallback) {
-            val url = "http://${NetAddr.hostPort(serverInfo.ip, caps!!.httpPort)}"
+        val caps = serverInfo.capabilities
+        if (caps != null && StreamingProtocol.WFAS !in caps.protocols &&
+            StreamingProtocol.HTTP in caps.protocols && caps.httpPort != null) {
+            val url = "http://${NetAddr.hostPort(serverInfo.ip, caps.httpPort)}"
             onStatusUpdate("status_opening_browser", arrayOf(url))
-            runCatching { openUrl(url) }
-                .onFailure { e ->
-                    AppDebug.log("Cannot open browser: ${e.message}")
-                    onStatusUpdate("status_error_client", arrayOf(e.message ?: "browser unavailable"))
-                }
+            runCatching { openUrl(url) }.onFailure {
+                onStatusUpdate("status_error_client", arrayOf(it.message ?: "browser unavailable"))
+            }
             return
         }
-
-        micSendDir = null   // mic stays plaintext until the handshake derives the session key
-        val peerAcceptsMic = serverInfo.capabilities?.acceptsClientMic ?: true
-        if (sendMicrophone && micInputMixerInfo != null) {
-            if (peerAcceptsMic) {
-                micReceiverJob = scope.launchMicSender(audioSettings, serverInfo, micInputMixerInfo, micPort)
-            } else {
-                AppDebug.log("[CLIENT] mic requested but ${serverInfo.ip} advertises mic without rx, not sending")
-                onStatusUpdate("status_mic_not_accepted", emptyArray())
-            }
-        }
-
+        // Compatibility entry point for CLI/single-source callers. Additional GUI
+        // sources use addReceiverSource and do not replace any existing session.
         streamingJob = scope.launch {
-            var sourceDataLine: SourceDataLine? = null
-            var player: JitterAudioPlayer? = null
-            val playbackState = ClientPlaybackState()
-            AppDebug.log("[CLIENT] launchClientInstance started: server=${serverInfo.ip}:${serverInfo.port} isMulticast=${serverInfo.isMulticast} sendMic=$sendMicrophone mixer='${selectedMixerInfo.name}'")
-
-            // I byte li manda il server: comanda il suo formato, le impostazioni
-            // locali valgono solo se il beacon non lo annuncia. Un formato che non
-            // sappiamo riprodurre va rifiutato: reinterpretarlo produce solo rumore.
-            val advertised = serverInfo.serverAudioSettings
-            if (advertised != null && !isPlayableFormat(advertised)) {
-                AppDebug.log("[CLIENT] Unsupported stream format: ${describeFormat(advertised)} - refusing to play")
-                onStatusUpdate("status_unsupported_format", arrayOf(describeFormat(advertised)))
-                return@launch
-            }
-            val playbackSettings = advertised ?: audioSettings
-            if (advertised != null) {
-                AppDebug.log("[CLIENT] Using server-advertised format: ${describeFormat(advertised)}")
-            } else {
-                AppDebug.log(
-                    "[CLIENT] Server did not advertise a format (no discovery announcement seen): " +
-                            "assuming local ${describeFormat(audioSettings)}. If the server streams anything " +
-                            "else, playback speed and pitch will be wrong."
-                )
-            }
-
-            try {
-                if (!serverInfo.isMulticast) { // Unicast
-                    val remoteAddress = InetSocketAddress(serverInfo.ip, serverInfo.port)
-                    AppDebug.log("[CLIENT][UNICAST] unicast connection to $remoteAddress")
-                    val localBind = InetSocketAddress(NetAddr.wildcardFor(serverInfo.ip), 0)
-                    aSocket(selectorManager).udp().bind(localBind).use { socket ->
-                        sourceDataLine = prepareSourceDataLine(selectedMixerInfo, playbackSettings)
-                        if (sourceDataLine == null) {
-                            AppDebug.log("[CLIENT][UNICAST] Output device rejected ${describeFormat(playbackSettings)}")
-                            onStatusUpdate("status_unsupported_format", arrayOf(describeFormat(playbackSettings)))
-                            return@launch
-                        }
-                        player = sourceDataLine?.let {
-                            JitterAudioPlayer(it, playbackSettings.sampleRate.toInt(), playbackSettings.channels,
-                                prebufferMs = UsbLink.effectiveLatencyMs(audioSettings.latencyMs),
-                                maxBufferMs = UsbLink.effectiveLatencyMs(audioSettings.latencyMs) + 280).also { p -> p.start() }
-                        }
-                        AppDebug.log("[CLIENT][UNICAST] SourceDataLine started, sending HELLO to $remoteAddress")
-                        activePeerIp = NetAddr.normalize(serverInfo.ip)
-                        LinkMetrics.start(
-                            if (sessionUsesUsb()) "USB" else "WIFI",
-                            playbackSettings.sampleRate.toInt()
-                        )
-
-                        onStatusUpdate("status_contacting_server", arrayOf(remoteAddress))
-                        val cnonce = WfasAuth.nonceHex()
-                        var helloMsg = "${clientHelloMessage()};cnonce=$cnonce"
-                        var proved = false
-                        var clientSnonce = ""
-                        var clientKey = clientPresharedKey
-                        var sessionEncrypted = false
-                        socket.send(Datagram(buildPacket { writeText(helloMsg) }, remoteAddress))
-                        AppDebug.log("[CLIENT][UNICAST] HELLO sent, waiting for reply...")
-                        onStatusUpdate("status_waiting_ack", emptyArray())
-
-                        var handshakeDeadline = System.currentTimeMillis() + 30000
-                        var handshakeOk = false
-
-                        suspend fun promptKeyAndRestart(wrong: Boolean): Boolean {
-                            val k = onKeyRequest?.invoke(wrong) ?: return false
-                            if (k.isBlank()) return false
-                            clientKey = k
-                            proved = false
-                            helloMsg = "${clientHelloMessage()};cnonce=$cnonce"
-                            socket.send(Datagram(buildPacket { writeText(helloMsg) }, remoteAddress))
-                            handshakeDeadline = System.currentTimeMillis() + 30000
-                            return true
-                        }
-
-                        var helloWaitMs = 150L
-                        var helloAttempts = 0
-                        var anyReplyReceived = false
-                        val handshakeStartedAt = System.currentTimeMillis()
-                        while (System.currentTimeMillis() < handshakeDeadline) {
-                            if (!anyReplyReceived &&
-                                System.currentTimeMillis() - handshakeStartedAt >= SILENT_PEER_TIMEOUT_MS
-                            ) {
-                                AppDebug.log("[CLIENT][UNICAST] no reply at all after ${SILENT_PEER_TIMEOUT_MS}ms, giving up")
-                                unresponsiveServer.value = serverInfo.ip
-                                onStatusUpdate("status_server_silent_maybe_outdated", emptyArray())
-                                return@use
-                            }
-                            val ackText = try {
-                                withTimeout(helloWaitMs) { socket.receive() }.packet.readText().trim()
-                            } catch (_: TimeoutCancellationException) {
-                                helloAttempts++
-                                helloWaitMs = (helloWaitMs * 2).coerceAtMost(2000L)
-                                socket.send(Datagram(buildPacket { writeText(helloMsg) }, remoteAddress))
-                                AppDebug.log("[CLIENT][UNICAST] no reply, resend #$helloAttempts, next wait ${helloWaitMs}ms")
-                                continue
-                            }
-                            anyReplyReceived = true
-                            AppDebug.log("[CLIENT][UNICAST] reply '$ackText' at +${System.currentTimeMillis() - handshakeStartedAt}ms")
-                            when {
-                                ackText.startsWith(INCOMPATIBLE_PREFIX) -> {
-                                    signalProtocolMismatch(parseProtocolVersion(ackText), PeerRole.SENDER)
-                                    onStatusUpdate("status_protocol_incompatible", emptyArray())
-                                    return@use
-                                }
-                                ackText == UNAUTHORIZED_MESSAGE -> {
-                                    AppDebug.log("[CLIENT][UNICAST] unauthorized")
-                                    if (clientKeyFromInvite) {
-                                        pendingInviteRejected.value = true
-                                        onStatusUpdate("status_unauthorized", emptyArray())
-                                        return@use
-                                    }
-                                    if (!promptKeyAndRestart(true)) {
-                                        onStatusUpdate("status_unauthorized", emptyArray())
-                                        return@use
-                                    }
-                                }
-                                ackText == PENDING_MESSAGE -> {
-                                    onStatusUpdate("status_awaiting_approval", emptyArray())
-                                }
-                                ackText.startsWith(AUTH_REQUIRED_PREFIX) -> {
-                                    if (clientKey.isEmpty()) {
-                                        AppDebug.log("[CLIENT][UNICAST] server requires a key")
-                                        val k = onKeyRequest?.invoke(false)
-                                        if (k.isNullOrBlank()) {
-                                            onStatusUpdate("status_key_required", emptyArray())
-                                            return@use
-                                        }
-                                        clientKey = k
-                                        handshakeDeadline = System.currentTimeMillis() + 30000
-                                    }
-                                    val snonce = WfasAuth.getToken(ackText, "snonce") ?: ""
-                                    clientSnonce = snonce
-                                    val sproof = WfasAuth.getToken(ackText, "sproof") ?: ""
-                                    if (!WfasAuth.constantTimeEquals(sproof, WfasAuth.proof(clientKey, 'S', cnonce, snonce))) {
-                                        AppDebug.log("[CLIENT][UNICAST] server proof invalid (rogue server or wrong key)")
-                                        if (!promptKeyAndRestart(true)) {
-                                            onStatusUpdate("status_unauthorized", emptyArray())
-                                            return@use
-                                        }
-                                    } else {
-                                        val cproof = WfasAuth.proof(clientKey, 'C', cnonce, snonce)
-                                        helloMsg = "${clientHelloMessage()};cnonce=$cnonce;cproof=$cproof"
-                                        proved = true
-                                        socket.send(Datagram(buildPacket { writeText(helloMsg) }, remoteAddress))
-                                    }
-                                }
-                                ackText == BUSY_MESSAGE -> {
-                                    AppDebug.log("[CLIENT] server busy with another device")
-                                    onStatusUpdate("status_server_busy", emptyArray())
-                                    return@launch
-                                }
-                                ackText.startsWith(HELLO_ACK_PREFIX) -> {
-                                    val serverVersion = parseProtocolVersion(ackText)
-                                    if (serverVersion != WFAS_PROTOCOL_VERSION) {
-                                        signalProtocolMismatch(serverVersion, PeerRole.SENDER)
-                                        onStatusUpdate("status_protocol_incompatible", emptyArray())
-                                        return@use
-                                    }
-                                    if (clientKey.isNotEmpty() && !proved) {
-                                        AppDebug.log("[CLIENT][UNICAST] server skipped auth (possible downgrade) — aborting")
-                                        onStatusUpdate("status_unauthorized", emptyArray())
-                                        return@use
-                                    }
-                                    if (WfasAuth.getToken(ackText, "enc") == "1") sessionEncrypted = true
-                                    handshakeOk = true
-                                }
-                                else -> AppDebug.log("[CLIENT][UNICAST] unexpected reply '$ackText'")
-                            }
-                            if (handshakeOk) break
-                        }
-                        if (!handshakeOk) {
-                            onStatusUpdate("status_handshake_failed", emptyArray())
-                            return@use
-                        }
-                        AppDebug.log("[CLIENT][UNICAST] handshake OK in ${System.currentTimeMillis() - handshakeStartedAt}ms " +
-                                "after $helloAttempts resend(s), streaming from $remoteAddress")
-                        onStatusUpdate("status_connected_streaming_from", arrayOf(remoteAddress))
-                        if (connectionSoundEnabled) playConnectionSound()
-
-                        val sessionKeys = if (clientKey.isNotEmpty() && proved)
-                            WfasCrypto.deriveUnicast(clientKey, cnonce, clientSnonce) else null
-                        val recvDir: WfasCrypto.Dir? = sessionKeys?.second
-                        micSendDir = if (sessionEncrypted) sessionKeys?.first else null
-                        sessionEncryptedLive.value = sessionEncrypted && recvDir != null
-                        val recvWin = WfasCrypto.ReplayWindow()
-                        var serverEncrypts = sessionEncrypted
-
-                        var lastPingReceived = System.currentTimeMillis()
-                        val pingTimeoutMs    = 3000L
-                        val serverAlive      = java.util.concurrent.atomic.AtomicBoolean(true)
-                        var receivedPackets  = 0L
-                        var audioPackets     = 0L
-                        var totalAudioBytes  = 0L
-                        var pingCount        = 0L
-                        var versionChecked   = false
-
-                        val watchdogJob = launch {
-                            while (isActive && serverAlive.get()) {
-                                delay(1000)
-                                val elapsed = System.currentTimeMillis() - lastPingReceived
-                                AppDebug.log("[CLIENT][UNICAST] watchdog: ${elapsed}ms since last PING (timeout=${pingTimeoutMs}ms) audioPkts=$audioPackets totalAudioBytes=$totalAudioBytes")
-                                if (elapsed > pingTimeoutMs) {
-                                    AppDebug.log("---Server timeout: no PING for ${pingTimeoutMs}ms ---")
-                                    AppDebug.log("[CLIENT][UNICAST] TIMEOUT: no PING in ${pingTimeoutMs}ms, disconnecting")
-                                    onStatusUpdate("status_server_disconnected", emptyArray())
-                                    if (disconnectionSoundEnabled) playDisconnectionSound()
-                                    serverAlive.set(false)
-                                }
-                            }
-                        }
-
-                        try {
-                            while (isActive && serverAlive.get()) {
-                                val datagram = socket.receive()
-                                val bytes    = ByteArray(datagram.packet.remaining.toInt())
-                                datagram.packet.readFully(bytes)
-                                receivedPackets++
-
-                                if (bytes.size >= AUDIO_HEADER_SIZE && bytes[0] == AUDIO_MAGIC_0 && bytes[1] == AUDIO_MAGIC_1) {
-                                    if (!versionChecked) {
-                                        versionChecked = true
-                                        val packetVersion = bytes[2].toInt() and 0xFF
-                                        if (packetVersion != WFAS_PROTOCOL_VERSION) {
-                                            AppDebug.log("[CLIENT][UNICAST] packet v=$packetVersion incompatible (mine v=$WFAS_PROTOCOL_VERSION)")
-                                            signalProtocolMismatch(packetVersion, PeerRole.SENDER)
-                                            onStatusUpdate("status_protocol_incompatible", emptyArray())
-                                            serverAlive.set(false)
-                                            break
-                                        }
-                                    }
-                                    WfasStats.add(if ((bytes[3].toInt() and 0x01) != 0) WfasStats.Cat.SILENCE else WfasStats.Cat.AUDIO, bytes.size)
-                                    val pcmLen = bytes.size - AUDIO_HEADER_SIZE
-                                    audioPackets++
-                                    totalAudioBytes += pcmLen
-                                    if (audioPackets == 1L || audioPackets % 500L == 0L) {
-                                        AppDebug.log("[CLIENT][UNICAST] audioPkt #$audioPackets size=${bytes.size} pcmLen=$pcmLen totalAudioBytes=$totalAudioBytes SDL=${sourceDataLine?.isActive}")
-                                    }
-                                    val p = player
-                                    if (p != null) {
-                                        val encFlag = (bytes[3].toInt() and WfasCrypto.FLAG_ENCRYPTED) != 0
-                                        if (encFlag) {
-                                            if (recvDir != null) {
-                                                val r = WfasCrypto.decryptPacket(recvDir, recvWin, bytes, bytes.size)
-                                                if (r is WfasCrypto.Decrypted.Ok) {
-                                                    serverEncrypts = true
-                                                    val plain = ByteArray(AUDIO_HEADER_SIZE + r.pcm.size)
-                                                    System.arraycopy(bytes, 0, plain, 0, AUDIO_HEADER_SIZE)
-                                                    System.arraycopy(r.pcm, 0, plain, AUDIO_HEADER_SIZE, r.pcm.size)
-                                                    handleAudioPacket(p, plain, plain.size, playbackSettings.channels, playbackState, onAudioFrame)
-                                                }
-                                                // replay/auth-fail/malformed -> drop
-                                            }
-                                            // encrypted but no key -> drop
-                                        } else if (!serverEncrypts) {
-                                            handleAudioPacket(p, bytes, bytes.size, playbackSettings.channels, playbackState, onAudioFrame)
-                                        }
-                                        // cleartext after encryption seen -> drop (downgrade)
-                                    }
-                                } else {
-                                    val text = bytes.toString(Charsets.UTF_8).trim()
-                                    WfasStats.add(
-                                        when (text) {
-                                            "PING" -> WfasStats.Cat.PING
-                                            "BYE"  -> WfasStats.Cat.BYE
-                                            else   -> WfasStats.Cat.OTHER
-                                        },
-                                        bytes.size
-                                    )
-                                    when (text) {
-                                        "PING" -> {
-                                            lastPingReceived = System.currentTimeMillis()
-                                            pingCount++
-                                            if (pingCount == 1L || pingCount % 10L == 0L) {
-                                                AppDebug.log("[CLIENT][UNICAST] PING #$pingCount received from ${datagram.address}")
-                                            }
-                                        }
-                                        "BYE"  -> {
-                                            AppDebug.log("---Received BYE from server ---")
-                                            AppDebug.log("[CLIENT][UNICAST] BYE received, clean disconnect")
-                                            onStatusUpdate("status_server_disconnected", emptyArray())
-                                            if (disconnectionSoundEnabled) playDisconnectionSound()
-                                            serverAlive.set(false)
-                                        }
-                                        else -> AppDebug.log("[CLIENT][UNICAST] unknown msg (#$receivedPackets): '$text'")
-                                    }
-                                }
-                            }
-                        } finally {
-                            AppDebug.log("[CLIENT][UNICAST] loop ended: receivedPackets=$receivedPackets audioPackets=$audioPackets pingCount=$pingCount totalAudioBytes=$totalAudioBytes")
-                            watchdogJob.cancel()
-                            withContext(NonCancellable) {
-                                runCatching {
-                                    AppDebug.log("[CLIENT][UNICAST] sending CLIENT_BYE to $remoteAddress")
-                                    socket.send(Datagram(buildPacket { writeText("CLIENT_BYE") }, remoteAddress))
-                                }
-                            }
-                        }
-                    }
-                } else { // Multicast
-                    AppDebug.log("[CLIENT][MULTICAST] multicast mode, port=${serverInfo.port} ip=${serverInfo.ip}")
-                    onStatusUpdate("status_joining_multicast", arrayOf(serverInfo.port))
-                    val groupAddress = InetAddress.getByName(MULTICAST_GROUP_IP)
-                    MulticastSocket(null as java.net.SocketAddress?).use { socket ->
-                        socket.reuseAddress = true
-                        socket.bind(java.net.InetSocketAddress(serverInfo.port))
-                        val joined = MulticastNet.joinAllGroups(socket)
-                        AppDebug.log("[CLIENT][MULTICAST] join group $groupAddress on $joined interface(s)")
-                        val effectiveAudioSettings = playbackSettings
-                        AppDebug.log("[CLIENT][MULTICAST] effectiveAudioSettings: sr=${effectiveAudioSettings.sampleRate} ch=${effectiveAudioSettings.channels} bd=${effectiveAudioSettings.bitDepth}")
-                        sourceDataLine = prepareSourceDataLine(selectedMixerInfo, effectiveAudioSettings)
-                        if (sourceDataLine == null) {
-                            AppDebug.log("[CLIENT][MULTICAST] Output device rejected ${describeFormat(effectiveAudioSettings)}")
-                            onStatusUpdate("status_unsupported_format", arrayOf(describeFormat(effectiveAudioSettings)))
-                            return@launch
-                        }
-                        player = sourceDataLine?.let {
-                            JitterAudioPlayer(it, effectiveAudioSettings.sampleRate.toInt(), effectiveAudioSettings.channels,
-                                prebufferMs = UsbLink.effectiveLatencyMs(audioSettings.latencyMs),
-                                maxBufferMs = UsbLink.effectiveLatencyMs(audioSettings.latencyMs) + 280).also { p -> p.start() }
-                        }
-                        AppDebug.log("[CLIENT][MULTICAST] SourceDataLine started, waiting for multicast packets...")
-                        LinkMetrics.start(
-                            if (sessionUsesUsb()) "USB" else "WIFI",
-                            effectiveAudioSettings.sampleRate.toInt()
-                        )
-                        onStatusUpdate("status_multicast_streaming", arrayOf(serverInfo.port))
-                        if (connectionSoundEnabled) playConnectionSound()
-                        socket.soTimeout = 2000
-                        val buf    = ByteArray(8192)
-                        val packet = DatagramPacket(buf, buf.size)
-                        val frameSize = effectiveAudioSettings.channels * (effectiveAudioSettings.bitDepth / 8)
-                        var mcAudioPkts = 0L
-                        var mcTotalBytes = 0L
-                        var mcVersionChecked = false
-                        var mcDir: WfasCrypto.Dir? = null
-                        var mcWin = WfasCrypto.ReplayWindow()
-                        var mcKey = clientPresharedKey
-                        var mcAsked = false
-                        var mcWrong = false
-                        val mcExpectedEpoch = expectedMcastEpoch
-                        val mcFromInvite = clientKeyFromInvite
-                        // Whether the group is encrypted is settled here, from our
-                        // own configuration (key set, invite, expected epoch) or from
-                        // a beacon whose MAC verified - neither of which can be
-                        // forged. Once settled, audio without FLAG_ENCRYPTED is not
-                        // from the server and is dropped: the flag rides in the
-                        // cleartext header, so it is never evidence on its own, and
-                        // the sender does not get a per-packet vote on whether the
-                        // AEAD applies.
-                        var mcEncRequired = mcKey.isNotEmpty() || mcFromInvite || mcExpectedEpoch != null
-                        var mcLastEpoch = when {
-                            mcExpectedEpoch != null -> mcExpectedEpoch - 1
-                            mcFromInvite -> 0L
-                            else -> SettingsRepository.getMcastClientEpoch(serverInfo.ip)
-                        }
-                        var mcEpochVerified = mcExpectedEpoch == null
-                        var mcEpochRejected = false
-                        var mcMacFailStreak = 0
-                        val beaconPrefixLen = WfasCrypto.MSG_MCAST_ENC.length
-                        var mcLastRxAt = System.currentTimeMillis()
-                        var mcAnyRx = false
-                        while (isActive) {
-                            try {
-                                packet.length = buf.size
-                                socket.receive(packet)
-                                mcLastRxAt = System.currentTimeMillis()
-                                mcAnyRx = true
-                            } catch (_: java.net.SocketTimeoutException) {
-                                val beaconExpected = mcDir != null || (mcKey.isNotEmpty() && !mcAnyRx)
-                                if (beaconExpected &&
-                                    System.currentTimeMillis() - mcLastRxAt >= MULTICAST_SILENCE_TIMEOUT_MS) {
-                                    AppDebug.log("[CLIENT][MULTICAST] nessun pacchetto per ${MULTICAST_SILENCE_TIMEOUT_MS}ms: server considerato spento")
-                                    onStatusUpdate("status_server_disconnected", emptyArray())
-                                    if (disconnectionSoundEnabled) playDisconnectionSound()
-                                    break
-                                }
-                                continue
-                            }
-                            if (packet.length >= beaconPrefixLen &&
-                                String(packet.data, 0, beaconPrefixLen, Charsets.US_ASCII) == WfasCrypto.MSG_MCAST_ENC) {
-                                val beaconStr = String(packet.data, 0, packet.length, Charsets.US_ASCII)
-                                if (mcDir == null) {
-                                    if (mcKey.isEmpty()) {
-                                        if (mcAsked && onKeyRequest == null) continue
-                                        mcAsked = true
-                                        mcKey = onKeyRequest?.invoke(mcWrong)?.takeIf { it.isNotBlank() } ?: ""
-                                        if (mcKey.isEmpty()) { onStatusUpdate("status_key_required", emptyArray()); continue }
-                                        mcEncRequired = true
-                                    }
-                                    val info = WfasCrypto.parseMcastBeacon(mcKey, beaconStr, -1L)
-                                    if (info != null) {
-                                        if (!mcEpochVerified) {
-                                            mcEpochVerified = true
-                                            if (mcExpectedEpoch != null && info.epoch != mcExpectedEpoch) {
-                                                pendingEpochMismatch.value = true
-                                            }
-                                        }
-                                        if (info.epoch >= mcLastEpoch) {
-                                            mcDir = WfasCrypto.deriveMulticast(mcKey, info.salt)
-                                            mcWin = WfasCrypto.ReplayWindow()
-                                            mcEncRequired = true
-                                            sessionEncryptedLive.value = true
-                                            if (info.epoch > mcLastEpoch) {
-                                                mcLastEpoch = info.epoch
-                                                if (!mcFromInvite) {
-                                                    SettingsRepository.setMcastClientEpoch(serverInfo.ip, info.epoch)
-                                                }
-                                            }
-                                            onStatusUpdate("status_key_accepted", emptyArray())
-                                        } else if (!mcEpochRejected) {
-                                            mcEpochRejected = true
-                                            pendingEpochMismatch.value = true
-                                            onStatusUpdate("status_group_rekeyed", emptyArray())
-                                        }
-                                    } else {
-                                        mcWrong = true
-                                        mcKey = ""
-                                    }
-                                } else {
-                                    val info = WfasCrypto.parseMcastBeacon(mcKey, beaconStr, -1L)
-                                    if (info == null) {
-                                        mcMacFailStreak++
-                                        if (mcMacFailStreak >= 6) {
-                                            pendingEpochMismatch.value = true
-                                            onStatusUpdate("status_group_rekeyed", emptyArray())
-                                            break
-                                        }
-                                    } else {
-                                        mcMacFailStreak = 0
-                                        if (info.epoch > mcLastEpoch) {
-                                            mcDir = WfasCrypto.deriveMulticast(mcKey, info.salt)
-                                            mcWin = WfasCrypto.ReplayWindow()
-                                            mcEncRequired = true
-                                            mcLastEpoch = info.epoch
-                                            SettingsRepository.setMcastClientEpoch(serverInfo.ip, info.epoch)
-                                        }
-                                    }
-                                }
-                                continue
-                            }
-                            if (packet.length >= AUDIO_HEADER_SIZE && packet.data[0] == AUDIO_MAGIC_0 && packet.data[1] == AUDIO_MAGIC_1) {
-                                if (!mcVersionChecked) {
-                                    mcVersionChecked = true
-                                    val packetVersion = packet.data[2].toInt() and 0xFF
-                                    if (packetVersion != WFAS_PROTOCOL_VERSION) {
-                                        AppDebug.log("[CLIENT][MULTICAST] packet v=$packetVersion incompatible (mine v=$WFAS_PROTOCOL_VERSION)")
-                                        signalProtocolMismatch(packetVersion, PeerRole.SENDER)
-                                        onStatusUpdate("status_protocol_incompatible", emptyArray())
-                                        break
-                                    }
-                                }
-                                if (packet.length == AUDIO_HEADER_SIZE) continue
-                                WfasStats.add(if ((packet.data[3].toInt() and 0x01) != 0) WfasStats.Cat.SILENCE else WfasStats.Cat.AUDIO, packet.length)
-                                mcAudioPkts++
-                                if ((packet.data[3].toInt() and WfasCrypto.FLAG_ENCRYPTED) != 0) {
-                                    val dir = mcDir
-                                    if (dir != null) {
-                                        val r = WfasCrypto.decryptPacket(dir, mcWin, packet.data, packet.length)
-                                        if (r is WfasCrypto.Decrypted.Ok) {
-                                            mcTotalBytes += r.pcm.size
-                                            val plain = ByteArray(AUDIO_HEADER_SIZE + r.pcm.size)
-                                            System.arraycopy(packet.data, 0, plain, 0, AUDIO_HEADER_SIZE)
-                                            System.arraycopy(r.pcm, 0, plain, AUDIO_HEADER_SIZE, r.pcm.size)
-                                            player?.let { handleAudioPacket(it, plain, plain.size, effectiveAudioSettings.channels, playbackState, onAudioFrame) }
-                                        }
-                                    }
-                                    // no key yet -> drop until a valid beacon arrives
-                                } else if (!mcEncRequired) {
-                                    val pcmLen = packet.length - AUDIO_HEADER_SIZE
-                                    val aligned = pcmLen - (pcmLen % frameSize)
-                                    mcTotalBytes += aligned
-                                    if (aligned > 0) {
-                                        player?.let { handleAudioPacket(it, packet.data, packet.length, effectiveAudioSettings.channels, playbackState, onAudioFrame) }
-                                    }
-                                }
-                                // cleartext inside an encrypted group -> dropped
-                            } else if (packet.length >= 3 && String(packet.data, 0, minOf(packet.length, 3), Charsets.UTF_8) == "BYE") {
-                                WfasStats.add(WfasStats.Cat.BYE, packet.length)
-                                AppDebug.log("---Received BYE from multicast server ---")
-                                AppDebug.log("[CLIENT][MULTICAST] BYE received after $mcAudioPkts audio packets ($mcTotalBytes total bytes)")
-                                onStatusUpdate("status_server_disconnected", emptyArray())
-                                if (disconnectionSoundEnabled) playDisconnectionSound()
-                                break
-                            }
-                        }
-                    }
-                }
-            } catch (_: TimeoutCancellationException) {
-                AppDebug.log("[CLIENT] TIMEOUT: no response from server within 15s")
-                onStatusUpdate("status_server_no_response", emptyArray())
-            } catch (e: Exception) {
-                if (e !is CancellationException) {
-                    AppDebug.log("[CLIENT] ECCEZIONE: ${e.javaClass.simpleName}: ${e.message}")
-                    e.printStackTrace()
-                    onStatusUpdate("Error: %s", arrayOf(e.message ?: e.toString()))
-                }
-            } finally {
-                activePeerIp = null
-                LinkMetrics.stop()
-                AppDebug.log("[CLIENT] finally: closing player/SourceDataLine")
-                val p = player
-                if (p != null) {
-                    p.stop()
-                } else {
-                    runCatching { sourceDataLine?.stop() }
-                    runCatching { sourceDataLine?.close() }
-                }
-                AppDebug.log("[CLIENT] launchClientInstance ended")
-            }
+            val id = addReceiverSource(audioSettings, serverInfo, selectedMixerInfo,
+                sendMicrophone, micInputMixerInfo, micPort, connectionSoundEnabled,
+                onAudioFrame, onStatusUpdate, outputMixerProvider)
+            try { awaitCancellation() } finally { DesktopReceiverSessions.remove(id) }
         }
+    }
+
+    fun addReceiverSource(
+        audioSettings: AudioSettings_V1,
+        serverInfo: ServerInfo,
+        selectedMixerInfo: Mixer.Info,
+        sendMicrophone: Boolean = false,
+        micInputMixerInfo: Mixer.Info? = null,
+        micPort: Int = 9092,
+        connectionSoundEnabled: Boolean = true,
+        onAudioFrame: ((ShortArray) -> Unit)? = null,
+        onStatusUpdate: (String, Array<out Any>) -> Unit = { _, _ -> },
+        outputMixerProvider: (() -> Mixer.Info?)? = null
+    ): String {
+        val request = buildReceiverRequest(audioSettings, serverInfo, selectedMixerInfo, sendMicrophone,
+            micInputMixerInfo, micPort, connectionSoundEnabled, onAudioFrame, onStatusUpdate,
+            outputMixerProvider = outputMixerProvider)
+        val id = DesktopReceiverSessions.connect(request)
+        try {
+            rememberReceiverSource(id, serverInfo, audioSettings, clientPresharedKey)
+        } catch (failure: Exception) {
+            DesktopReceiverSessions.remove(id)
+            throw failure
+        }
+        return id
+    }
+    internal fun receiverCredential(id: String): String? = DesktopReceiverSessions.credentialForPersistence(id)
+
+    /**
+     * [selectedMixerInfo] is resolved lazily so a remembered source can be restored at
+     * startup, before the user has picked an output device.
+     */
+    private fun buildReceiverRequest(
+        audioSettings: AudioSettings_V1,
+        serverInfo: ServerInfo,
+        selectedMixerInfo: Mixer.Info?,
+        sendMicrophone: Boolean,
+        micInputMixerInfo: Mixer.Info?,
+        micPort: Int,
+        connectionSoundEnabled: Boolean,
+        onAudioFrame: ((ShortArray) -> Unit)?,
+        onStatusUpdate: (String, Array<out Any>) -> Unit,
+        key: String = clientPresharedKey,
+        fromInvite: Boolean = clientKeyFromInvite,
+        expectedEpoch: Long? = expectedMcastEpoch,
+        outputMixerProvider: (() -> Mixer.Info?)? = null
+    ): DesktopReceiverRequest {
+        val settings = SettingsRepository.loadSettings().app
+        return DesktopReceiverRequest(
+            peer = serverInfo, audio = audioSettings,
+            openOutput = { format, preroll ->
+                val mixer = desktopReceiverOutput(selectedMixerInfo, outputMixerProvider) {
+                    findAvailableOutputMixers().firstOrNull()
+                }
+                prepareSourceDataLine(mixer, format, preroll, allowDefaultFallback = outputMixerProvider == null)
+                    ?: throw PlaybackOutputFailure("Cannot open selected audio output")
+            },
+            interfaceName = settings.networkInterface,
+            key = key, fromInvite = fromInvite, expectedEpoch = expectedEpoch,
+            connectionSoundEnabled = connectionSoundEnabled,
+            remoteVolumeEnabled = settings.remoteVolumeSyncEnabled,
+            requestKey = { wrong -> if (clientKeyPromptAllowed) onKeyRequest?.invoke(wrong) else null },
+            onConnectionCue = { playConnectionSound() },
+            onProtocolMismatch = { signalProtocolMismatch(it, PeerRole.SENDER) },
+            onStatus = onStatusUpdate, onFrame = onAudioFrame,
+            masterGain = { currentClientVolume },
+            onTargetChanged = {},
+            onMicrophoneReady = { direction ->
+                // The microphone is never opened before a validated HELLO_ACK.
+                // One desktop microphone is shared explicitly, never silently
+                // retargeted by an unrelated receiver's retry.
+                if (sendMicrophone && micInputMixerInfo != null &&
+                    serverInfo.capabilities?.acceptsClientMic != false && micReceiverJob?.isActive != true) {
+                    scope.launchMicSender(audioSettings, serverInfo, micInputMixerInfo, micPort, direction)
+                        .also { micReceiverJob = it }
+                } else null
+            })
+    }
+
+    private fun rememberReceiverSource(id: String, serverInfo: ServerInfo, audio: AudioSettings_V1, key: String) {
+        val state = DesktopReceiverSessions.sources.value.firstOrNull { it.id == id }
+        ReceiverSourceStore.remember(
+            RememberedReceiverSource(
+                id = id, ip = serverInfo.ip, port = serverInfo.port, multicast = serverInfo.isMulticast,
+                gain = state?.gain ?: 1f, muted = state?.muted ?: false,
+                latencyMs = state?.manualLatencyMs ?: audio.latencyMs.coerceIn(20, 400),
+                adaptive = state?.adaptive ?: audio.adaptiveLatency,
+                paused = false, serverAudio = serverInfo.serverAudioSettings,
+                capabilities = serverInfo.capabilities, viaUsb = serverInfo.viaUsb,
+                fromInvite = clientKeyFromInvite, expectedEpoch = expectedMcastEpoch
+            ), key = key.takeIf { it.isNotBlank() }
+        )
+    }
+
+    /**
+     * Rebuilds the remembered receiver list as paused sources: they reappear in the UI
+     * with their own gain and latency, but nothing opens the audio device until the user
+     * retries. Returns the number of entries restored.
+     */
+    fun restoreRememberedSources(selectedMixerInfo: Mixer.Info? = null,
+                                 outputMixerProvider: (() -> Mixer.Info?)? = null): Int {
+        val settings = SettingsRepository.loadSettings()
+        var restored = 0
+        for (source in ReceiverSourceStore.load()) {
+            if (DesktopReceiverSessions.sources.value.size >= DesktopReceiverSessions.MAX_SOURCES) break
+            val audio = settings.audio.copy(latencyMs = source.latencyMs, adaptiveLatency = source.adaptive)
+            val request = buildReceiverRequest(
+                audioSettings = audio,
+                serverInfo = source.toServerInfo(settings.audio),
+                selectedMixerInfo = selectedMixerInfo,
+                sendMicrophone = false,
+                micInputMixerInfo = null,
+                micPort = settings.micPort.toIntOrNull() ?: 9092,
+                connectionSoundEnabled = settings.app.connectionSoundEnabled,
+                onAudioFrame = null,
+                onStatusUpdate = { _, _ -> },
+                key = ReceiverSourceStore.loadKey(source).orEmpty(),
+                fromInvite = source.fromInvite,
+                expectedEpoch = source.expectedEpoch,
+                outputMixerProvider = outputMixerProvider
+            )
+            DesktopReceiverSessions.restore(request, id = source.id, gain = source.gain,
+                muted = source.muted, adaptive = source.adaptive, manualMs = source.latencyMs, paused = true)
+            restored++
+        }
+        return restored
     }
 
     private val MAX_CONCEAL_FRAMES = 9600L
@@ -3845,241 +3667,24 @@ object NetworkHandler_v1 {
         var concealTail: ByteArray? = null
     }
 
-    private class JitterAudioPlayer(
-        private val line: SourceDataLine,
+    // Keep the existing transport/test API while the shared receiver owns playout.
+    internal class JitterAudioPlayer(
+        line: SourceDataLine,
         sampleRate: Int,
         channels: Int,
         prebufferMs: Int = 120,
-        maxBufferMs: Int = 400
-    ) {
-        // ── Riduzione del rumore (opt-in, modalita' sviluppatore) ───────────
-        private val noiseReducer = dsp.NoiseReducer().apply { init(sampleRate, channels) }
-        private var nrScratch = ShortArray(0)
-        private var nrWasEnabled = false
-
-        /** PCM 16 bit little endian, elaborato in place. */
-        private fun denoise(buf: ByteArray) {
-            val on = NoiseReductionControl.enabled
-            if (on && !nrWasEnabled) noiseReducer.reset()
-            nrWasEnabled = on
-            if (!on || buf.size < 2) return
-            noiseReducer.setStrength(NoiseReductionControl.strength / 100f)
-            val samples = buf.size / 2
-            if (nrScratch.size < samples) nrScratch = ShortArray(samples)
-            val sc = nrScratch
-            var bi = 0
-            for (i in 0 until samples) {
-                sc[i] = ((buf[bi].toInt() and 0xFF) or (buf[bi + 1].toInt() shl 8)).toShort()
-                bi += 2
-            }
-            noiseReducer.process(sc, 0, samples)
-            bi = 0
-            for (i in 0 until samples) {
-                val v = sc[i].toInt()
-                buf[bi] = (v and 0xFF).toByte()
-                buf[bi + 1] = ((v shr 8) and 0xFF).toByte()
-                bi += 2
-            }
-        }
-
-        private val frameBytes = (channels * 2).coerceAtLeast(2)
-        private val bytesPerSec = sampleRate * frameBytes
-        private val prebufferBytes =
-            ((bytesPerSec.toLong() * prebufferMs) / 1000L).toInt().let { it - (it % frameBytes) }.coerceAtLeast(frameBytes)
-        private val maxBytes =
-            ((bytesPerSec.toLong() * maxBufferMs) / 1000L).toInt().let { it - (it % frameBytes) }.coerceAtLeast(prebufferBytes + frameBytes)
-        private val silenceChunk =
-            ByteArray(((bytesPerSec / 100).let { it - (it % frameBytes) }).coerceAtLeast(frameBytes))
-        private val queue = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
-        private val queuedBytes = java.util.concurrent.atomic.AtomicInteger(0)
-
-        // Livello di riempimento a cui la coda deve tornare: senza questo la coda si
-        // stabilizza sul massimo e la latenza cresce fino a mezzo secondo.
-        private val targetBytes = prebufferBytes
-        private val highBytes =
-            (targetBytes + ((bytesPerSec * 60) / 1000).let { it - (it % frameBytes) })
-                .coerceAtMost(maxBytes)
-                .coerceAtLeast(targetBytes + frameBytes)
-
-        // Uno scarto isolato non si sente, una raffica si': la rientranza va diluita.
-        private val minDropIntervalNs = 250_000_000L
-        private var lastDropAt = 0L
-
-        private val driftChannels = channels.coerceAtLeast(1)
-        private var avgBufferedBytes = targetBytes.toDouble()
-        @Volatile private var driftRatio = 1.0
-        private var lastRetuneAt = 0L
-        private var lastDriftLogAt = 0L
-        private var resamplePos = 0.0
-        private var resampleCarry = ShortArray(0)
-
-        private fun retune(now: Long) {
-            if (now - lastRetuneAt < 200_000_000L) return
-            lastRetuneAt = now
-            val buffered = queuedBytes.get().toDouble()
-            avgBufferedBytes = avgBufferedBytes * 0.9 + buffered * 0.1
-            val err = avgBufferedBytes - targetBytes
-            val errRatio = if (targetBytes > 0) err / targetBytes.toDouble() else 0.0
-            driftRatio = (1.0 + errRatio * 0.05).coerceIn(0.995, 1.005)
-            if (now - lastDriftLogAt > 10_000_000_000L) {
-                lastDriftLogAt = now
-                AppDebug.log(
-                    "[PLAYOUT] buffered=${(buffered * 1000 / bytesPerSec).toInt()}ms " +
-                            "target=${(targetBytes.toLong() * 1000 / bytesPerSec).toInt()}ms " +
-                            "ratio=${"%.5f".format(driftRatio)}"
-                )
-            }
-        }
-
-        private fun resampleForDrift(chunk: ByteArray, offset: Int, len: Int): Pair<ByteArray, Int> {
-            val ratio = driftRatio
-            val frames = len / frameBytes
-            if (ratio == 1.0 || frames < 2) return chunk to len
-
-            val ch = driftChannels
-            val hasCarry = resampleCarry.size == ch
-            val total = frames + (if (hasCarry) 1 else 0)
-            val src = ShortArray(total * ch)
-            var si = 0
-            if (hasCarry) { resampleCarry.copyInto(src, 0); si = ch }
-            val bb = java.nio.ByteBuffer.wrap(chunk, offset, len).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            for (i in 0 until frames * ch) src[si + i] = bb.short
-
-            val maxOut = ((total - 1) / ratio).toInt() + 2
-            val out = ShortArray(maxOut * ch)
-            var o = 0
-            var p = resamplePos
-            while (p.toInt() + 1 < total && o < maxOut) {
-                val idx = p.toInt()
-                val frac = (p - idx).toFloat()
-                for (c in 0 until ch) {
-                    val a = src[idx * ch + c].toFloat()
-                    val b = src[(idx + 1) * ch + c].toFloat()
-                    out[o * ch + c] = (a + (b - a) * frac).toInt()
-                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                }
-                o++
-                p += ratio
-            }
-            resamplePos = (p - (total - 1)).coerceAtLeast(0.0)
-            resampleCarry = ShortArray(ch) { src[(total - 1) * ch + it] }
-
-            val outBytes = ByteArray(o * frameBytes)
-            val ob = java.nio.ByteBuffer.wrap(outBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            for (i in 0 until o * ch) ob.putShort(out[i])
-            return outBytes to outBytes.size
-        }
-
-        private fun writeCompensated(chunk: ByteArray, offset: Int, len: Int) {
-            if (len <= 0) return
-            val (buf, n) = resampleForDrift(chunk, offset, len)
-            if (buf === chunk) runCatching { line.write(chunk, offset, len) }
-            else runCatching { line.write(buf, 0, n) }
-        }
-
-        // Il silenzio iniettato quando la coda si svuota va restituito, altrimenti ogni
-        // buco di rete sposta in avanti la riproduzione in modo permanente.
-        private val paddingDebt = java.util.concurrent.atomic.AtomicInteger(0)
-
-        @Volatile private var running = false
-        @Volatile private var primed = false
-        private var thread: Thread? = null
-
-        fun bufferedBytes(): Int = queuedBytes.get()
-
-        fun bufferedMs(): Int =
-            if (bytesPerSec <= 0) 0 else (queuedBytes.get().toLong() * 1000L / bytesPerSec).toInt()
-
-        fun start() {
-            if (running) return
-            running = true
-            runCatching { line.start() }
-            thread = Thread {
-                while (running) {
-                    if (!primed) {
-                        if (queuedBytes.get() >= prebufferBytes) primed = true
-                        else {
-                            try { Thread.sleep(3) } catch (_: InterruptedException) { break }
-                            continue
-                        }
-                    }
-                    val now = System.nanoTime()
-                    retune(now)
-                    if (queuedBytes.get() > highBytes && now - lastDropAt > minDropIntervalNs) {
-                        val stale = queue.poll()
-                        if (stale != null) {
-                            queuedBytes.addAndGet(-stale.size)
-                            lastDropAt = now
-                        }
-                    }
-                    val chunk = try {
-                        queue.poll(15, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    } catch (_: InterruptedException) { break }
-                    if (chunk != null) {
-                        queuedBytes.addAndGet(-chunk.size)
-                        val debt = paddingDebt.get()
-                        if (debt <= 0) {
-                            writeCompensated(chunk, 0, chunk.size)
-                        } else {
-                            val skip = minOf(debt, chunk.size).let { it - (it % frameBytes) }
-                            paddingDebt.addAndGet(-skip)
-                            if (skip < chunk.size) {
-                                writeCompensated(chunk, skip, chunk.size - skip)
-                            }
-                        }
-                    } else {
-                        runCatching { line.write(silenceChunk, 0, silenceChunk.size) }
-                        if (paddingDebt.get() < targetBytes) {
-                            paddingDebt.addAndGet(silenceChunk.size)
-                        }
-                    }
-                }
-            }.apply { isDaemon = true; name = "wfas-jitter-player"; start() }
-        }
-
-        fun submit(pcm: ByteArray, offset: Int, len: Int) {
-            if (len <= 0) return
-            val chunk = pcm.copyOfRange(offset, offset + len)
-            denoise(chunk)
-            applyClientVolume(chunk)
-            while (queuedBytes.get() + chunk.size > maxBytes) {
-                val dropped = queue.poll() ?: break
-                queuedBytes.addAndGet(-dropped.size)
-            }
-            queue.offer(chunk)
-            queuedBytes.addAndGet(chunk.size)
-        }
-
-        fun submitSilence(bytes: Int) {
-            val n = bytes - (bytes % frameBytes)
-            if (n <= 0) return
-            submit(ByteArray(n), 0, n)
-        }
-
-        private fun applyClientVolume(chunk: ByteArray) {
-            val vol = currentClientVolume
-            if (vol == 1.0f) return
-            val bb = java.nio.ByteBuffer.wrap(chunk).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            var i = 0
-            while (i + 1 < chunk.size) {
-                val scaled = (bb.getShort(i) * vol).toInt()
-                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                bb.putShort(i, scaled.toShort())
-                i += 2
-            }
-        }
-
-        fun stop() {
-            running = false
-            runCatching { line.stop() }
-            runCatching { line.flush() }
-            thread?.interrupt()
-            runCatching { thread?.join(300) }
-            thread = null
-            runCatching { line.close() }
-        }
-    }
-
+        maxBufferMs: Int = 400,
+        health: PlaybackHealth? = null,
+        lineFactory: (() -> SourceDataLine)? = null,
+        onRecover: () -> Unit = {},
+        onRecovered: () -> Unit = {},
+        watchdogTimeoutMs: Long = 5000
+    ) : DesktopJitterAudioPlayer(
+        line, sampleRate, channels, prebufferMs, maxBufferMs, health, lineFactory,
+        onRecover, onRecovered, watchdogTimeoutMs,
+        currentVolume = { currentClientVolume },
+        onTargetChanged = { playbackTargetMs.value = it }
+    )
     private const val PLC_XFADE_FRAMES = 96
 
     private fun bestContinuationFrame(ref: ShortArray, channels: Int, refFrames: Int): Int {
@@ -4216,6 +3821,8 @@ object NetworkHandler_v1 {
         state.expectedSeq = (seq + 1) and 0xFFFF
         state.expectedSamplePos = samplePos + (if (pcmLen > 0) (pcmLen / frameBytes).toLong() else 0L)
 
+        player.noteAudioFlow(!silence && pcmLen > 0)
+
         if (silence || pcmLen <= 0) {
             val n = state.lastGoodPcm?.size ?: (frameBytes * 480)
             if (state.inSilence) {
@@ -4346,14 +3953,15 @@ object NetworkHandler_v1 {
         }
     }
 
-    private fun prepareSourceDataLine(mixerInfo: Mixer.Info, audioSettings: AudioSettings_V1): SourceDataLine? {
+    private fun prepareSourceDataLine(mixerInfo: Mixer.Info, audioSettings: AudioSettings_V1,
+                                      deviceBufferMs: Int = 80, allowDefaultFallback: Boolean = true): SourceDataLine? {
         val format       = audioSettings.toAudioFormat()
         val dataLineInfo = DataLine.Info(SourceDataLine::class.java, format)
 
         AppDebug.log("[CLIENT] prepareSourceDataLine: mixer='${mixerInfo.name}' format=$format sr=${audioSettings.sampleRate} ch=${audioSettings.channels} bd=${audioSettings.bitDepth}")
 
         val frameSize = format.frameSize
-        val targetLatencyMs = 80
+        val targetLatencyMs = deviceBufferMs
         val targetBytes = ((audioSettings.sampleRate.toInt() * targetLatencyMs / 1000) * frameSize)
             .let { it - (it % frameSize) }
             .coerceAtLeast(frameSize * 256)
@@ -4364,15 +3972,17 @@ object NetworkHandler_v1 {
         }
         val line = when {
             mixer == null -> {
-                AppDebug.log("[CLIENT] ripiego sull'uscita predefinita di sistema")
-                runCatching { AudioSystem.getSourceDataLine(format) }.getOrNull()
+                if (allowDefaultFallback) {
+                    AppDebug.log("[CLIENT] ripiego sull'uscita predefinita di sistema")
+                    runCatching { AudioSystem.getSourceDataLine(format) }.getOrNull()
+                } else null
             }
             else -> runCatching { mixer.getLine(dataLineInfo) as SourceDataLine }
                 .onFailure { AppDebug.log("[CLIENT] getLine su '${mixerInfo.name}' fallito: ${it.message}") }
                 .getOrNull()
                 ?: runCatching { AudioSystem.getSourceDataLine(format, mixerInfo) }.getOrNull()
-                ?: runCatching { AudioSystem.getSourceDataLine(format) }
-                    .onSuccess { AppDebug.log("[CLIENT] ripiego sull'uscita predefinita di sistema") }
+                ?: runCatching { if (allowDefaultFallback) AudioSystem.getSourceDataLine(format) else null }
+                    .onSuccess { if (it != null) AppDebug.log("[CLIENT] ripiego sull'uscita predefinita di sistema") }
                     .getOrNull()
         }
         if (line == null) {
@@ -4384,6 +3994,8 @@ object NetworkHandler_v1 {
         return runCatching { line.also { sdl ->
             sdl.open(format, targetBytes)
             AppDebug.log("[CLIENT] SourceDataLine opened: bufferSize=${sdl.bufferSize} format=${sdl.format} realLatency=${sdl.bufferSize * 1000 / (audioSettings.sampleRate.toInt() * frameSize)}ms")
+            DesktopDiagnostics.event("PLAYOUT_OPEN", "rate=${audioSettings.sampleRate.toInt()} channels=${audioSettings.channels} " +
+                "requestedCapacityMs=$deviceBufferMs actualCapacityBytes=${sdl.bufferSize}")
 
             val gainInfo = sdl.controls
                 .filterIsInstance<javax.sound.sampled.FloatControl>()
@@ -4410,22 +4022,23 @@ object NetworkHandler_v1 {
     }
 
     // ── Stop / terminate ───────────────────────────────────────────────────────
-    fun requestStopCurrentStream(): Job {
+    fun requestStopCurrentStream(retainReceiverSources: Boolean = false): Deferred<Unit> {
         val myGen = lifecycleGeneration.incrementAndGet()
-        return scope.launch {
+        return scope.async {
             lifecycleMutex.withLock {
                 if (myGen < lifecycleGeneration.get()) return@withLock
-                stopCurrentStreamLocked()
+                stopCurrentStreamLocked(retainReceiverSources)
             }
         }
     }
 
-    suspend fun stopCurrentStream() {
-        requestStopCurrentStream().join()
+    suspend fun stopCurrentStream(retainReceiverSources: Boolean = false) {
+        requestStopCurrentStream(retainReceiverSources).await()
     }
 
-    private suspend fun stopCurrentStreamLocked() {
-        CaptureMonitor.clear()
+    private suspend fun stopCurrentStreamLocked(retainReceiverSources: Boolean = false) {
+        if (retainReceiverSources) DesktopReceiverSessions.pauseAllAndJoin()
+        else DesktopReceiverSessions.stopAllAndJoin()
         stopAnnouncingPresence()
 
         unicastPeerConnected.value = false
@@ -4456,6 +4069,8 @@ object NetworkHandler_v1 {
                 runCatching { serverGrabber?.stop() }
                 if (withTimeoutOrNull(3000) { streaming.join() } == null) {
                     AppDebug.log("[SERVER] il loop di streaming non ha risposto entro il timeout")
+                    streamingJob = streaming
+                    throw PlaybackOutputFailure("Capture did not stop; refusing a new audio owner")
                 }
             }
         }
@@ -4466,6 +4081,10 @@ object NetworkHandler_v1 {
         softwareMicMixer.enable(false)
         softwareMicMixer.volume = 1.0f
         isMicMuted.value = false
+        // Failed/timed-out starts retain a process-global native lease even
+        // before serverEngine is assigned. A role change must await that lease.
+        AudioEngine.stopPendingWindowsCapture()
+        CaptureMonitor.clear()
 
         val savedVol = macOriginalVolume
         if (savedVol >= 0f) {
@@ -4681,6 +4300,20 @@ fun main(args: Array<String>) {
     System.setOut(java.io.PrintStream(System.out, true, "UTF-8"))
     System.setErr(java.io.PrintStream(System.err, true, "UTF-8"))
 
+    val socketDirProperty = "jdk.net.unixdomain.tmpdir"
+    if (System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true) &&
+        System.getProperty(socketDirProperty) == null) {
+        System.getProperty("compose.application.resources.dir")?.takeIf { it.isNotBlank() }?.let { resourcesDir ->
+            val appDir = File(resourcesDir).absoluteFile.parentFile
+                ?: error("Cannot locate the bundled app directory from $resourcesDir")
+            require(appDir.isDirectory) { "Bundled app directory does not exist: $appDir" }
+            // Some Windows TEMP folders accept AF_UNIX bind but reject connect, breaking
+            // Selector.open(). Use the bundle for internal wakeup sockets; Java uses TCP
+            // if it cannot bind there. Apply before the first networking initialization.
+            System.setProperty(socketDirProperty, appDir.path)
+        }
+    }
+
     CliPathInstaller.refreshIfOutdated()
 
     // Un deep link di pairing non e' un argomento CLI: va tolto prima del parsing,
@@ -4775,14 +4408,17 @@ fun main(args: Array<String>) {
     // StubRoutines::jlong_disjoint_arraycopy_avx3 durante la copia di buffer audio
     // nativi su alcune CPU Windows con la JVM Temurin 17.
 
+    DesktopDiagnostics.initialize()
     AudioEngine.loadLibrary()
     val loadedSettingsForInit = SettingsRepository.loadSettings()
+    Strings.setLanguage(loadedSettingsForInit.app.language)
     NetworkHandler_v1.setupLinuxVirtualCable(loadedSettingsForInit.app.useNativeEngine)
     org.bytedeco.javacv.FFmpegLogCallback.set()
     org.bytedeco.ffmpeg.global.avdevice.avdevice_register_all()
 
     Runtime.getRuntime().addShutdownHook(Thread {
         runCatching { NetworkHandler_v1.terminateAllServices() }
+        runCatching { DesktopDiagnostics.shutdown() }
     })
 
     val isHeadless = java.awt.GraphicsEnvironment.isHeadless()
@@ -4811,7 +4447,7 @@ fun main(args: Array<String>) {
 }
 
 fun startGuiApplication(cliArgs: CliArgs) = application {
-    val loadedSettings = SettingsRepository.loadSettings()
+    val loadedSettings = remember { SettingsRepository.loadSettings() }
     // La chiave del pairing QR non e' stata salvata: se ne conia una per questa
     // sessione, altrimenti il modo chiave partirebbe senza chiave.
     var appSettings    by remember { mutableStateOf(QrPairingState.seedSessionKey(loadedSettings.app)) }
@@ -4819,11 +4455,26 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
     var streamingPort  by remember { mutableStateOf(loadedSettings.streamingPort) }
     var micPort        by remember { mutableStateOf(loadedSettings.micPort) }
     var micRoutingMode by remember { mutableStateOf(MicRoutingMode.fromStringSafe(loadedSettings.micRoutingMode)) }
+    var settingsWriteError by remember { mutableStateOf<String?>(null) }
+    val settingsSaveMutex = remember { Mutex() }
+    var quitting by remember { mutableStateOf(false) }
 
     val isWindowsOS = remember { System.getProperty("os.name").lowercase().contains("win") }
-    var serverVolume by remember { mutableStateOf(1f) }
+    val receiverSources by DesktopReceiverSessions.sources.collectAsState()
 
-    LaunchedEffect(serverVolume) { NetworkHandler_v1.setServerVolume(serverVolume) }
+    LaunchedEffect(appSettings.language) { Strings.setLanguage(appSettings.language) }
+
+    LaunchedEffect(appSettings.senderGain) { NetworkHandler_v1.setServerVolume(appSettings.senderGain) }
+    LaunchedEffect(Unit) {
+        NetworkHandler_v1.setServerVolume(appSettings.senderGain)
+        NetworkHandler_v1.captureGain.collect { gain ->
+            if (appSettings.senderGain != gain) appSettings = appSettings.copy(senderGain = gain)
+        }
+    }
+    LaunchedEffect(appSettings.receiverGain) { NetworkHandler_v1.setClientVolume(appSettings.receiverGain) }
+    LaunchedEffect(appSettings.remoteVolumeSyncEnabled) {
+        DesktopReceiverSessions.setRemoteVolumeEnabled(appSettings.remoteVolumeSyncEnabled)
+    }
 
     // Il denoiser legge da qui: cambiando l'impostazione l'effetto e' immediato
     // sul flusso in riproduzione, senza riconnettersi.
@@ -4834,8 +4485,19 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
         )
     }
 
-    LaunchedEffect(appSettings, audioSettings, streamingPort, micPort, micRoutingMode) {
-        SettingsRepository.saveSettings(AllSettings(appSettings, audioSettings, streamingPort, micPort, micRoutingMode.name))
+    LaunchedEffect(appSettings, audioSettings, streamingPort, micPort, micRoutingMode, quitting) {
+        if (quitting) return@LaunchedEffect
+        val snapshot = AllSettings(appSettings, audioSettings, streamingPort, micPort, micRoutingMode.name)
+        try {
+            delay(250)
+            settingsSaveMutex.withLock {
+                withContext(Dispatchers.IO) { SettingsRepository.saveSettings(snapshot) }
+            }
+        } catch (failure: Exception) {
+            if (failure is CancellationException) throw failure
+            settingsWriteError = failure.message ?: failure.javaClass.simpleName
+            DesktopDiagnostics.event("SETTINGS_SAVE_FAILED", "type=${failure.javaClass.simpleName}")
+        }
     }
 
     var showWelcome        by remember { mutableStateOf(!SettingsRepository.hasSeenWelcome()) }
@@ -4847,7 +4509,6 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
     }
     var changelogStandalone by remember { mutableStateOf(SettingsRepository.hasSeenWelcome()) }
     var updateBanner        by remember { mutableStateOf<UpdateChecker.Result.Available?>(null) }
-    var versionAhead        by remember { mutableStateOf<UpdateChecker.Result.Ahead?>(null) }
     var manualUpdateResult  by remember { mutableStateOf<UpdateChecker.Result?>(null) }
     var checkingForUpdate   by remember { mutableStateOf(false) }
 
@@ -4860,15 +4521,9 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
     LaunchedEffect(showWelcome, appSettings.autoUpdateCheckEnabled) {
         if (showWelcome) return@LaunchedEffect
         if (!appSettings.autoUpdateCheckEnabled) return@LaunchedEffect
-        if (updateBanner != null || versionAhead != null) return@LaunchedEffect
+        if (updateBanner != null) return@LaunchedEffect
         val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { UpdateChecker.check() }
-        // In automatico si mostra solo qualcosa di utile: se GitHub non
-        // risponde si resta in silenzio.
-        when (r) {
-            is UpdateChecker.Result.Available -> updateBanner = r
-            is UpdateChecker.Result.Ahead     -> versionAhead = r
-            else -> Unit
-        }
+        updateBanner = UpdateChecker.automaticNotice(r)
     }
 
     val vizChannels = audioSettings.channels
@@ -4882,12 +4537,20 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
     var isServer           by remember { mutableStateOf(true) }
     val discoveredDevices  = remember { mutableStateMapOf<String, ServerInfo>() }
     var connectionStatus   by remember { mutableStateOf(Strings.get("status_inactive")) }
+    LaunchedEffect(settingsWriteError) {
+        settingsWriteError?.let { connectionStatus = Strings.get("receiver_source_action_failed", it) }
+    }
     var isStreaming         by remember { mutableStateOf(false) }
     LaunchedEffect(isStreaming) {
         if (!isStreaming) SpectrumAnalyzer.reset()
     }
     var virtualDriverStatus by remember { mutableStateOf<VirtualDriverStatus>(VirtualDriverStatus.Ok) }
-    val scope = rememberCoroutineScope()
+    val scope = rememberCoroutineScope {
+        CoroutineExceptionHandler { _, failure ->
+            connectionStatus = Strings.get("receiver_source_action_failed", failure.message ?: failure.javaClass.simpleName)
+            DesktopDiagnostics.event("GUI_ACTION_FAILED", "type=${failure.javaClass.simpleName} detail=${failure.message}")
+        }
+    }
 
     // ── Ricezione RTP / SDP ─────────────────────────────────────────────────
     // Il draft e' la configurazione in corso di modifica nella card; le salvate
@@ -4952,12 +4615,64 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
 
     val outputDevices = remember { mutableStateOf<List<Mixer.Info>>(emptyList()) }
     var selectedOutputDevice by remember { mutableStateOf<Mixer.Info?>(null) }
+    val currentReceiverOutput = rememberUpdatedState(selectedOutputDevice)
+    var audioDevicesEnumerated by remember { mutableStateOf(false) }
     val inputDevices  = remember { mutableStateOf<List<Mixer.Info>>(emptyList()) }
     var selectedInputDevice  by remember { mutableStateOf<Mixer.Info?>(null) }
     var sendMicrophone          by remember { mutableStateOf(false) }
     var selectedClientMic       by remember { mutableStateOf<Mixer.Info?>(null) }
     var selectedServerMicOutput by remember { mutableStateOf<Mixer.Info?>(null) }
     var selectedMicMixInput     by remember { mutableStateOf<Mixer.Info?>(null) }
+    var lastWfasServer by remember { mutableStateOf<ServerInfo?>(null) }
+    var autoConnectSuspended by remember { mutableStateOf(false) }
+    var autoAttemptPeer by remember { mutableStateOf<String?>(null) }
+    var autoAnnouncedPeer by remember { mutableStateOf<String?>(null) }
+    var guiSessionGeneration by remember { mutableStateOf(0L) }
+    var guiStartupPending by remember { mutableStateOf(cliArgs.guiInitMode != null) }
+    val guiCommands = remember { Mutex() }
+    val savedSourceCredentials = remember { mutableMapOf<String, String>() }
+    // A paused request resolves the current GUI choice when retry/recovery opens
+    // its line. Capturing the initial null selection would pick the first mixer.
+    LaunchedEffect(Unit) {
+        NetworkHandler_v1.restoreRememberedSources(outputMixerProvider = { currentReceiverOutput.value })
+    }
+    // Metrics update much more often than user preferences. Key the save only
+    // on preferences so slider drags settle without a write for every packet.
+    val receiverPreferences = receiverSources.map(ReceiverSourcePreferences::from)
+    LaunchedEffect(receiverPreferences, quitting) {
+        if (quitting) return@LaunchedEffect
+        delay(250)
+        try {
+            settingsSaveMutex.withLock {
+                withContext(Dispatchers.IO) { ReceiverSourceStore.updatePreferences(receiverPreferences) }
+            }
+        } catch (failure: Exception) {
+            if (failure is CancellationException) throw failure
+            settingsWriteError = failure.message ?: failure.javaClass.simpleName
+            DesktopDiagnostics.event("SOURCE_PREFERENCES_SAVE_FAILED", "type=${failure.javaClass.simpleName}")
+        }
+    }
+    LaunchedEffect(receiverSources) {
+        if (!isServer && rtpReceiver.value == null && snapClient.value == null) {
+            isStreaming = DesktopReceiverSessions.hasActiveSources()
+        }
+        savedSourceCredentials.keys.retainAll(receiverSources.map { it.id }.toSet())
+        for (source in receiverSources) {
+            if (!source.connected) continue
+            val key = NetworkHandler_v1.receiverCredential(source.id)?.takeIf { it.isNotBlank() } ?: continue
+            if (savedSourceCredentials[source.id] == key) continue
+            try {
+                if (withContext(Dispatchers.IO) { ReceiverSourceStore.updateCredential(source.id, key) }) {
+                    savedSourceCredentials[source.id] = key
+                }
+            } catch (failure: Exception) {
+                if (failure is CancellationException) throw failure
+                settingsWriteError = failure.message ?: failure.javaClass.simpleName
+            }
+        }
+        val onlyActive = receiverSources.filter { it.connected && !it.paused && !it.blocked }.singleOrNull()
+        NetworkHandler_v1.playbackTargetMs.value = onlyActive?.targetMs
+    }
 
     fun stopSnapcast() {
         snapClient.value?.stop(); snapClient.value = null
@@ -5047,10 +4762,12 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
             val ins  = runCatching { NetworkHandler_v1.findAvailableInputMixers() }.getOrNull()
             if (outs != null && outs.map { it.name } != outputDevices.value.map { it.name }) {
                 outputDevices.value = outs
-                if (selectedOutputDevice == null || outs.none { it.name == selectedOutputDevice?.name }) {
+                if (selectedOutputDevice == null) {
                     selectedOutputDevice = outs.firstOrNull()
                 } else {
-                    selectedOutputDevice = outs.first { it.name == selectedOutputDevice?.name }
+                    // Keep an unavailable explicit choice until it returns or the
+                    // owner selects another device; a retry must not change speakers.
+                    outs.firstOrNull { it.name == selectedOutputDevice?.name }?.let { selectedOutputDevice = it }
                 }
             }
             if (ins != null && ins.map { it.name } != inputDevices.value.map { it.name }) {
@@ -5074,6 +4791,7 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
             .find { it.name.contains("CABLE Input", ignoreCase = true) }
             ?: outputDevices.value.firstOrNull()
         virtualDriverStatus = NetworkHandler_v1.checkVirtualDriverStatus(appSettings.useNativeEngine)
+        audioDevicesEnumerated = true
     }
 
     val useDarkTheme = when (appSettings.theme) {
@@ -5106,9 +4824,26 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
     var trayUnavailableReason by remember { mutableStateOf<String?>(null) }
 
     val performQuit: () -> Unit = {
-        scope.launch {
-            NetworkHandler_v1.stopCurrentStream()
-            exitApplication()
+        if (!quitting) {
+            quitting = true
+            scope.launch {
+                try {
+                    val settings = AllSettings(appSettings, audioSettings, streamingPort, micPort, micRoutingMode.name)
+                    val preferences = receiverSources.map { ReceiverSourcePreferences.from(it).copy(paused = true) }
+                    NetworkHandler_v1.stopCurrentStream()
+                    rtpReceiver.value?.stop()
+                    stopSnapcast()
+                    settingsSaveMutex.withLock {
+                        withContext(Dispatchers.IO) {
+                            SettingsRepository.saveSettings(settings)
+                            ReceiverSourceStore.updatePreferences(preferences)
+                        }
+                    }
+                    exitApplication()
+                } finally {
+                    quitting = false
+                }
+            }
         }
         Unit
     }
@@ -5135,6 +4870,179 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
         windowState.isMinimized = false
     }
 
+    suspend fun stopGuiAudio() {
+        guiSessionGeneration++
+        NetworkHandler_v1.endDeviceDiscovery()
+        NetworkHandler_v1.stopCurrentStream(retainReceiverSources = true)
+        val preferences = DesktopReceiverSessions.sources.value.map(ReceiverSourcePreferences::from)
+        val settings = AllSettings(appSettings, audioSettings, streamingPort, micPort, micRoutingMode.name)
+        settingsSaveMutex.withLock {
+            withContext(Dispatchers.IO) {
+                SettingsRepository.saveSettings(settings)
+                ReceiverSourceStore.updatePreferences(preferences)
+            }
+        }
+        rtpReceiver.value?.stop(); rtpReceiver.value = null
+        stopSnapcast()
+        isStreaming = false
+        connectionStatus = Strings.get("status_inactive")
+    }
+
+    fun discoverForReceiving() {
+        NetworkHandler_v1.beginDeviceDiscovery { hostname, info ->
+            if (info.lastSeen == 0L) discoveredDevices.remove(hostname) else discoveredDevices[hostname] = info
+        }
+    }
+
+    val clientDisconnectKeys = setOf(
+        "status_server_disconnected", "status_server_no_response", "status_handshake_failed",
+        "status_protocol_incompatible", "status_server_silent_maybe_outdated", "status_server_busy",
+        "status_unauthorized", "status_unsupported_format", "status_error_client", "playback_failed"
+    )
+    val clientStatusHandler: (String, Array<out Any>) -> Unit = { key, args ->
+        connectionStatus = if (args.isEmpty()) Strings.get(key) else Strings.get(key, *args)
+        if (key == "status_connected_streaming_from" || key == "status_multicast_streaming") autoAttemptPeer?.let { autoAnnouncedPeer = it }
+        // A failed source owns its retry/block state. Its callback must never
+        // stop the other sources or erase their remembered targets.
+        if (key in clientDisconnectKeys) isStreaming = DesktopReceiverSessions.hasActiveSources()
+    }
+    fun guardedClientStatus(): (String, Array<out Any>) -> Unit {
+        val generation = guiSessionGeneration
+        return { key, args -> if (generation == guiSessionGeneration) clientStatusHandler(key, args) }
+    }
+
+    suspend fun receiveWfas(info: ServerInfo) {
+        val device = selectedOutputDevice
+        if (device == null) {
+            connectionStatus = Strings.get("rtp_rx_need_output")
+            showAndRaise()
+            return
+        }
+        if (isServer || rtpReceiver.value != null || snapClient.value != null) stopGuiAudio()
+        // Connection setup reads network/remote-volume preferences from the
+        // repository. Flush the current UI before the debounced save can lag it.
+        val settings = AllSettings(appSettings, audioSettings, streamingPort, micPort, micRoutingMode.name)
+        settingsSaveMutex.withLock {
+            withContext(Dispatchers.IO) { SettingsRepository.saveSettings(settings) }
+        }
+        isServer = false
+        autoConnectSuspended = false
+        autoAttemptPeer = null; autoAnnouncedPeer = null
+        lastWfasServer = info
+        isStreaming = true
+        NetworkHandler_v1.clientKeyPromptAllowed = true
+        try {
+            NetworkHandler_v1.addReceiverSource(
+                audioSettings, info, device, sendMicrophone, selectedClientMic, micPort.toIntOrNull() ?: 9092,
+                appSettings.connectionSoundEnabled,
+                onAudioFrame = vizSink, onStatusUpdate = guardedClientStatus(),
+                outputMixerProvider = { currentReceiverOutput.value }
+            )
+        } catch (failure: Exception) {
+            if (failure is CancellationException) throw failure
+            isStreaming = DesktopReceiverSessions.hasActiveSources()
+            connectionStatus = Strings.get("receiver_source_action_failed", failure.message ?: failure.javaClass.simpleName)
+        }
+    }
+
+    fun guardedServerStatus(nativeEngine: Boolean): (String, Array<out Any>) -> Unit {
+        val generation = guiSessionGeneration
+        val persistent = cliArgs.persist ?: appSettings.serverPersist
+        return { key, args ->
+            if (generation == guiSessionGeneration) {
+                val error = key == "error_virtual_driver_missing" || key.startsWith("status_error_") ||
+                    (key == "status_capture_unavailable" && !persistent)
+                if (key == "error_virtual_driver_missing") {
+                    virtualDriverStatus = NetworkHandler_v1.checkVirtualDriverStatus(nativeEngine)
+                }
+                if (error || (key == "status_client_disconnected" && !persistent)) {
+                    val status = if (error) Strings.get(key, *args) else Strings.get("status_inactive")
+                    scope.launch { guiCommands.withLock {
+                        if (generation == guiSessionGeneration) {
+                            stopGuiAudio()
+                            connectionStatus = status
+                        }
+                    } }
+                } else connectionStatus = Strings.get(key, *args)
+            }
+        }
+    }
+
+    val startSending: () -> Unit = {
+        scope.launch {
+            guiCommands.withLock {
+                stopGuiAudio()
+                isServer = true
+                autoConnectSuspended = false
+                autoAttemptPeer = null; autoAnnouncedPeer = null
+                if (SecurityMode.requiresKey(appSettings.securityMode) && appSettings.authKey.isBlank()) {
+                    connectionStatus = Strings.get("server_key_required_desc")
+                    showAndRaise()
+                    return@withLock
+                }
+                if (!WfasPolicy.canStartServerWith(appSettings.wfasMode, UsbLink.isReady(), appSettings.rtpEnabled,
+                        appSettings.httpEnabled, appSettings.dlnaEnabled || appSettings.snapcastEnabled)) {
+                    connectionStatus = Strings.get("wfas_no_protocol_desc")
+                    showAndRaise()
+                    return@withLock
+                }
+                isStreaming = true
+                connectionStatus = Strings.get("status_starting_server")
+                isMulticastMode = isMulticastMode || appSettings.rtpEnabled || appSettings.httpEnabled ||
+                    appSettings.dlnaEnabled || appSettings.snapcastEnabled
+                NetworkHandler_v1.configureSecurity(appSettings.securityMode, appSettings.authKey, appSettings.encryptionEnabled)
+                IpcServer.applySecurity(appSettings.securityMode, appSettings.authKey)
+                NetworkHandler_v1.launchServerInstance(
+                    audioSettings, streamingPort.toIntOrNull() ?: 9090, isMulticastMode, serverCapabilities,
+                    micRoutingMode, selectedServerMicOutput, micPort.toIntOrNull() ?: 9092, appSettings.rtpPort.toIntOrNull() ?: 9094,
+                    appSettings.useNativeEngine, selectedMicMixInput,
+                    muteRender = cliArgs.muteRender ?: appSettings.muteRender,
+                    persist = cliArgs.persist ?: appSettings.serverPersist,
+                    dlnaConfig = appSettings.toDlnaConfig(), snapcastConfig = appSettings.toSnapcastConfig(), onAudioFrame = vizSink,
+                    onStatusUpdate = guardedServerStatus(appSettings.useNativeEngine)
+                )
+            }
+        }
+        Unit
+    }
+    val stopAudio: () -> Unit = {
+        scope.launch { guiCommands.withLock {
+            autoConnectSuspended = true
+            autoAttemptPeer = null; autoAnnouncedPeer = null
+            stopGuiAudio()
+            if (!isServer) discoverForReceiving()
+        } }
+        Unit
+    }
+    fun sourceAction(action: () -> Unit) {
+        try { action() } catch (failure: Exception) {
+            if (failure is CancellationException) throw failure
+            connectionStatus = Strings.get("receiver_source_action_failed", failure.message ?: failure.javaClass.simpleName)
+            DesktopDiagnostics.event("SOURCE_ACTION_FAILED", "type=${failure.javaClass.simpleName} detail=${failure.message}")
+        }
+    }
+    fun updateAppSettings(updated: AppSettings) {
+        if (updated.muteRender != appSettings.muteRender && isServer && isStreaming) {
+            scope.launch { guiCommands.withLock {
+                stopGuiAudio()
+                appSettings = updated
+                connectionStatus = Strings.get("sender_playback_restart_required")
+            } }
+        } else appSettings = updated
+    }
+    val restartReceiving: () -> Unit = {
+        scope.launch { guiCommands.withLock {
+            val target = appSettings.activeAutoConnectTargets().firstOrNull()
+            val info = lastWfasServer ?: target?.let { ServerInfo(it.ip, false, it.port ?: 9090) }
+            if (lastWfasServer == null && target != null) NetworkHandler_v1.clientPresharedKey = target.resolveKey().orEmpty()
+            if (info != null) receiveWfas(info) else {
+                stopGuiAudio(); isServer = false; autoConnectSuspended = false
+                discoverForReceiving(); showAndRaise()
+            }
+        } }
+        Unit
+    }
+
     // Se l'avvio era "minimizzato nella tray" ma la tray non si e' materializzata,
     // la finestra torna visibile: meglio una finestra non richiesta che un
     // processo senza interfaccia.
@@ -5149,10 +5057,26 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
         Tray(
             icon = trayIconLive,
             state = trayState,
-            tooltip = if (capturing) "AudioBridge - ${CaptureMonitor.summary()}"
-            else "AudioBridge",
+            tooltip = "${BuildIdentity.title} · $connectionStatus",
             onAction = showAndRaise,
             menu = {
+                Item(text = connectionStatus, enabled = false, onClick = {})
+                Item(text = Strings.get("tray_send"), onClick = startSending)
+                Item(text = Strings.get("tray_receive"), onClick = restartReceiving)
+                Item(text = Strings.get("tray_stop"), onClick = stopAudio)
+                Separator()
+                Item(text = Strings.get("tray_volume", DesktopVolumeScale.percent(
+                    if (isServer) appSettings.senderGain else appSettings.receiverGain,
+                    if (isServer) DesktopVolumeScale.SENDER_MAX else DesktopVolumeScale.RECEIVER_MAX)), enabled = false, onClick = {})
+                Item(text = Strings.get("tray_volume_down"), onClick = {
+                    appSettings = if (isServer) appSettings.copy(senderGain = (appSettings.senderGain - 0.2f).coerceAtLeast(0f))
+                        else appSettings.copy(receiverGain = (appSettings.receiverGain - 0.1f).coerceAtLeast(0f))
+                })
+                Item(text = Strings.get("tray_volume_up"), onClick = {
+                    appSettings = if (isServer) appSettings.copy(senderGain = (appSettings.senderGain + 0.2f).coerceAtMost(2f))
+                        else appSettings.copy(receiverGain = (appSettings.receiverGain + 0.1f).coerceAtMost(1f))
+                })
+                Separator()
                 if (capturing) {
                     Item(text = "${Strings.get("capture_active_title")}: ${CaptureMonitor.summary()}", onClick = showAndRaise)
                     Separator()
@@ -5224,12 +5148,45 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
         state      = windowState,
         visible    = isWindowVisible,
         undecorated = false,
-        title      = "AudioBridge",
+        title      = BuildIdentity.title,
         icon       = trayIcon
     ) {
         // Enforce a minimum window size so content is always reachable on low-res displays.
         LaunchedEffect(Unit) {
             window.minimumSize = java.awt.Dimension(400, 500)
+        }
+        // Restore what the user left behind. Size always applies; the position only
+        // when it still falls on an attached screen, otherwise the default centring wins.
+        LaunchedEffect(Unit) {
+            val stored = WindowGeometryCodec.parse(appSettings.windowGeometry) ?: return@LaunchedEffect
+            runCatching {
+                window.setSize(stored.width, stored.height)
+                val x = stored.x
+                val y = stored.y
+                if (x != null && y != null && WindowGeometryCodec.isOnAnyScreen(x, y)) {
+                    window.setLocation(x, y)
+                }
+            }
+        }
+        LaunchedEffect(windowState) {
+            snapshotFlow { windowState.size to windowState.position }.collectLatest { (size, position) ->
+                // Debounce a drag/resize; the last position of a gesture is the one to keep.
+                delay(800)
+                if (windowState.isMinimized) return@collectLatest
+                if (windowState.placement != WindowPlacement.Floating) return@collectLatest
+                // WindowState values already map 1:1 onto AWT pixels, so they are stored
+                // as-is: converting through LocalDensity would multiply them by the scale
+                // factor and the window would grow on every restart.
+                val width = size.width.value.toInt()
+                val height = size.height.value.toInt()
+                val absolute = position as? WindowPosition.Absolute
+                val x = absolute?.x?.value?.toInt()
+                val y = absolute?.y?.value?.toInt()
+                val encoded = WindowGeometryCodec.format(WindowGeometry(width, height, x, y))
+                if (encoded != appSettings.windowGeometry) {
+                    appSettings = appSettings.copy(windowGeometry = encoded)
+                }
+            }
         }
         LaunchedEffect(
             appSettings.securityMode,
@@ -5282,13 +5239,17 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                 val def = kotlinx.coroutines.CompletableDeferred<Boolean>()
                 authDecision.set(def)
                 authRequestPeer = peer
-                runCatching { kotlinx.coroutines.runBlocking { def.await() } }.getOrDefault(false)
+                try { def.await() } finally {
+                    if (authDecision.compareAndSet(def, null)) authRequestPeer = null
+                }
             }
         }
         var keyRequestWrong by remember { mutableStateOf<Boolean?>(null) }
         val keyDecision = remember { java.util.concurrent.atomic.AtomicReference<kotlinx.coroutines.CompletableDeferred<String?>?>(null) }
+        val keyPromptMutex = remember { Mutex() }
         LaunchedEffect(Unit) {
             NetworkHandler_v1.onKeyRequest = { wrong ->
+                keyPromptMutex.withLock {
                 if (!NetworkHandler_v1.clientKeyPromptAllowed) {
                     AppDebug.log("[CLIENT] key requested but prompting is disabled for this attempt")
                     null
@@ -5296,8 +5257,19 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                     val def = kotlinx.coroutines.CompletableDeferred<String?>()
                     keyDecision.set(def)
                     keyRequestWrong = wrong
-                    runCatching { def.await() }.getOrNull()
+                    try { def.await() } finally {
+                        if (keyDecision.compareAndSet(def, null)) keyRequestWrong = null
+                    }
                 }
+                }
+            }
+        }
+        DisposableEffect(Unit) {
+            onDispose {
+                authDecision.getAndSet(null)?.cancel()
+                keyDecision.getAndSet(null)?.cancel()
+                NetworkHandler_v1.onAuthRequest = null
+                NetworkHandler_v1.onKeyRequest = null
             }
         }
         val customColor = appSettings.customThemeColor?.toULong()?.let { Color(it) }
@@ -5307,7 +5279,8 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
             if (useDarkTheme) darkColorScheme() else lightColorScheme()
         }
 
-        MaterialTheme(colorScheme = currentColorScheme) {
+        val typography = remember(Strings.language) { desktopTypography(Strings.language) }
+        MaterialTheme(colorScheme = currentColorScheme, typography = typography) {
             Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 authRequestPeer?.let { peer ->
                     AlertDialog(
@@ -5354,19 +5327,6 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                         }
                     )
                 }
-                val clientDisconnectKeys = remember {
-                    setOf(
-                        "status_server_disconnected",
-                        "status_server_no_response",
-                        "status_handshake_failed",
-                        "status_protocol_incompatible",
-                        "status_server_silent_maybe_outdated",
-                        "status_server_busy",
-                        "status_unauthorized",
-                        "status_unsupported_format"
-                    )
-                }
-
                 val protocolMismatch by NetworkHandler_v1.protocolMismatch.collectAsState()
                 if (protocolMismatch != null) {
                     val mm = protocolMismatch!!
@@ -5416,28 +5376,9 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                 // che lo ha impostato.
                 val allowKeyPrompt: () -> Unit = { NetworkHandler_v1.clientKeyPromptAllowed = true }
 
-                val clientStatusHandler: (key: String, args: Array<out Any>) -> Unit = { key, args ->
-                    connectionStatus = if (args.isEmpty()) Strings.get(key) else Strings.get(key, *args)
-                    if (key in clientDisconnectKeys) {
-                        scope.launch {
-                            NetworkHandler_v1.stopCurrentStream()
-                            isStreaming = false
-                            connectionStatus = Strings.get("status_inactive")
-                            if (!isServer) {
-                                NetworkHandler_v1.beginDeviceDiscovery { hostname, serverInfo ->
-                                    if (serverInfo.lastSeen == 0L) {
-                                        discoveredDevices.remove(hostname)
-                                    } else {
-                                        discoveredDevices[hostname] = serverInfo
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
                 LaunchedEffect(Unit) {
-                    if (appSettings.autoStartServer && isServer) {
+                    val initialGeneration = guiSessionGeneration
+                    if (cliArgs.guiInitMode == null && appSettings.autoStartServer && isServer) {
                         // Ritardo dichiarato dall'utente: al login la rete spesso
                         // non c'e' ancora, e un server che parte senza indirizzo
                         // e' un server che nessuno trova.
@@ -5449,16 +5390,23 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                         if (appSettings.autoStartRequireNetwork) {
                             val deadline = System.currentTimeMillis() + AUTO_START_NETWORK_TIMEOUT_MS
                             while (System.currentTimeMillis() < deadline &&
-                                NetworkHandler_v1.getLocalIpAddress().isBlank()
+                                NetworkHandler_v1.getLocalIpAddress().isBlank() &&
+                                guiSessionGeneration == initialGeneration && isServer && !quitting
                             ) {
                                 connectionStatus = Strings.get("auto_start_waiting_network")
                                 delay(1000)
                             }
+                            if (quitting || !isServer || guiSessionGeneration != initialGeneration) return@LaunchedEffect
                             if (NetworkHandler_v1.getLocalIpAddress().isBlank()) {
                                 connectionStatus = Strings.get("auto_start_no_network")
                                 return@LaunchedEffect
                             }
                         }
+
+                        awaitDesktopStartupReady(
+                            ready = { Unit.takeIf { audioDevicesEnumerated } },
+                            cancelled = { quitting || !isServer || isStreaming || guiSessionGeneration != initialGeneration }
+                        ) ?: return@LaunchedEffect
 
                         // La sicurezza dell'avvio automatico puo' differire da
                         // quella generale: e' il caso di chi tiene la GUI aperta
@@ -5484,11 +5432,11 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                         AppDebug.log("[AUTOSTART] security=$autoMode encrypted=$autoEncrypt")
 
                         if (appSettings.autoStartVolume >= 0) {
-                            serverVolume = (appSettings.autoStartVolume / 100f).coerceIn(0f, 2f)
+                            appSettings = appSettings.copy(senderGain = (appSettings.autoStartVolume / 100f).coerceIn(0f, 2f))
                         }
 
                         isStreaming = true
-                        connectionStatus = "Auto-starting Server..."
+                        connectionStatus = Strings.get("status_starting_server")
                         val port = streamingPort.toIntOrNull() ?: 9090
                         val mic = micPort.toIntOrNull() ?: 9092
                         val rtp = appSettings.rtpPort.toIntOrNull() ?: 9094
@@ -5504,30 +5452,14 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                             persist = cliArgs.persist ?: appSettings.serverPersist,
                             dlnaConfig = appSettings.toDlnaConfig(),
                             snapcastConfig = appSettings.toSnapcastConfig(),
-                            onAudioFrame = vizSink
-                        ) { key, args ->
-                            if (key == "error_virtual_driver_missing") {
-                                isStreaming = false
-                                virtualDriverStatus = NetworkHandler_v1.checkVirtualDriverStatus(appSettings.useNativeEngine)
-                                connectionStatus = Strings.get("status_inactive")
-                            } else if (key == "status_client_disconnected") {
-                                // --persist: la sessione e' finita, il server no: resta in ascolto.
-                                if (cliArgs.persist ?: appSettings.serverPersist) {
-                                    connectionStatus = Strings.get("status_client_disconnected")
-                                } else scope.launch {
-                                    NetworkHandler_v1.stopCurrentStream()
-                                    isStreaming = false
-                                    connectionStatus = Strings.get("status_inactive")
-                                }
-                            } else {
-                                connectionStatus = if (args.isEmpty()) key else String.format(key, *args)
-                            }
-                        }
+                            onAudioFrame = vizSink,
+                            onStatusUpdate = guardedServerStatus(appSettings.useNativeEngine)
+                        )
                     }
                 }
 
                 LaunchedEffect(Unit) {
-                    if (appSettings.autoConnectClientEnabled) {
+                    if (appSettings.autoConnectClientEnabled && cliArgs.guiInitMode != "server") {
                         isServer = false
                         discoveredDevices.clear(); NetworkHandler_v1.forgetDiscoveredAddresses()
                         NetworkHandler_v1.beginDeviceDiscovery { hostname, serverInfo ->
@@ -5541,103 +5473,104 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                 }
 
                 LaunchedEffect(Unit) {
-                    delay(300)
-                    when (cliArgs.guiInitMode) {
-                        "server" -> {
-                            if (isStreaming) return@LaunchedEffect
-                            isServer = true
-                            isStreaming = true
-                            connectionStatus = "Starting Server..."
+                    if (!guiStartupPending) return@LaunchedEffect
+                    try {
+                        val requestedMode = cliArgs.guiInitMode ?: return@LaunchedEffect
+                        val initialGeneration = guiSessionGeneration
+                        if (isStreaming) return@LaunchedEffect
+                        isServer = requestedMode == "server"
+                        if (requestedMode == "client" && cliArgs.serverIp == null) discoverForReceiving()
+                        val startup = awaitDesktopStartupReady<Pair<Mixer.Info?, ServerInfo?>>(
+                            ready = {
+                                if (!audioDevicesEnumerated) null
+                                else if (requestedMode == "server") Pair(null, null)
+                                else {
+                                    val output = selectedOutputDevice
+                                    val peer = cliArgs.serverIp?.let { ServerInfo(it, false, cliArgs.port) }
+                                        ?: discoveredDevices.values.firstOrNull()
+                                    if (output == null || peer == null) null else Pair(output, peer)
+                                }
+                            },
+                            cancelled = { quitting || isStreaming || guiSessionGeneration != initialGeneration }
+                        ) ?: return@LaunchedEffect
+                        guiCommands.withLock {
+                            if (quitting || isStreaming || guiSessionGeneration != initialGeneration) return@withLock
+                            when (requestedMode) {
+                                "server" -> {
+                                    isServer = true
+                                    isStreaming = true
+                                    connectionStatus = Strings.get("status_starting_server")
 
-                            val port = cliArgs.port
-                            val mic  = cliArgs.micPort
-                            val rtp  = cliArgs.rtpPort
+                                    val port = cliArgs.port
+                                    val mic  = cliArgs.micPort
+                                    val rtp  = cliArgs.rtpPort
 
-                            if (cliArgs.multicast || cliArgs.rtp || cliArgs.http ||
-                                cliArgs.dlna || cliArgs.snapcast
-                            ) isMulticastMode = true
+                                    if (cliArgs.multicast || cliArgs.rtp || cliArgs.http ||
+                                        cliArgs.dlna || cliArgs.snapcast
+                                    ) isMulticastMode = true
 
-                            val protocols = mutableSetOf(StreamingProtocol.WFAS)
-                            if (cliArgs.rtp)  protocols += StreamingProtocol.RTP
-                            if (cliArgs.http) protocols += StreamingProtocol.HTTP
-                            val caps = ServerCapabilities(
-                                protocols  = protocols,
-                                httpPort   = if (cliArgs.http) cliArgs.httpPort else null,
-                                safariMode = cliArgs.httpSafari
-                            )
+                                    val protocols = mutableSetOf(StreamingProtocol.WFAS)
+                                    if (cliArgs.rtp)  protocols += StreamingProtocol.RTP
+                                    if (cliArgs.http) protocols += StreamingProtocol.HTTP
+                                    val caps = ServerCapabilities(
+                                        protocols  = protocols,
+                                        httpPort   = if (cliArgs.http) cliArgs.httpPort else null,
+                                        safariMode = cliArgs.httpSafari
+                                    )
 
-                            val micMode = if (cliArgs.mic) cliArgs.micRouting else micRoutingMode
+                                    val micMode = if (cliArgs.mic) cliArgs.micRouting else micRoutingMode
 
-                            NetworkHandler_v1.launchServerInstance(
-                                audioSettings, port, isMulticastMode, caps,
-                                micMode, selectedServerMicOutput, mic, rtp,
-                                cliArgs.useNativeEngine, selectedMicMixInput,
-                                muteRender = cliArgs.muteRender ?: appSettings.muteRender,
-                                persist = cliArgs.persist ?: appSettings.serverPersist,
-                                dlnaConfig = appSettings.copy(
-                                    dlnaEnabled = cliArgs.dlna || appSettings.dlnaEnabled,
-                                    dlnaPort = if (cliArgs.dlna) cliArgs.dlnaPort.toString() else appSettings.dlnaPort,
-                                    dlnaFormat = if (cliArgs.dlna) cliArgs.dlnaFormat else appSettings.dlnaFormat
-                                ).toDlnaConfig(),
-                                snapcastConfig = appSettings.copy(
-                                    snapcastEnabled = cliArgs.snapcast || appSettings.snapcastEnabled,
-                                    snapcastPort = if (cliArgs.snapcast) cliArgs.snapcastPort.toString() else appSettings.snapcastPort,
-                                    snapcastControlPort = if (cliArgs.snapcast) cliArgs.snapcastControlPort.toString() else appSettings.snapcastControlPort,
-                                    snapcastCodec = if (cliArgs.snapcast) cliArgs.snapcastCodec else appSettings.snapcastCodec,
-                                    snapcastChunkMs = if (cliArgs.snapcast) cliArgs.snapcastChunkMs else appSettings.snapcastChunkMs,
-                                    snapcastBufferMs = if (cliArgs.snapcast) cliArgs.snapcastBufferMs else appSettings.snapcastBufferMs,
-                                    snapcastStreamName = if (cliArgs.snapcast) cliArgs.snapcastStreamName else appSettings.snapcastStreamName
-                                ).toSnapcastConfig(),
-                                onAudioFrame = vizSink
-                            ) { key, args ->
-                                if (key == "error_virtual_driver_missing") {
-                                    isStreaming = false
-                                    virtualDriverStatus = NetworkHandler_v1.checkVirtualDriverStatus(cliArgs.useNativeEngine)
-                                    connectionStatus = Strings.get("status_inactive")
-                                } else if (key == "status_client_disconnected") {
-                                    // --persist: la sessione e' finita, il server no: resta in ascolto.
-                                    if (cliArgs.persist ?: appSettings.serverPersist) {
-                                        connectionStatus = Strings.get("status_client_disconnected")
-                                    } else scope.launch {
-                                        NetworkHandler_v1.stopCurrentStream()
-                                        isStreaming = false
-                                        connectionStatus = Strings.get("status_inactive")
-                                    }
-                                } else {
-                                    connectionStatus = if (args.isEmpty()) key else String.format(key, *args)
+                                    NetworkHandler_v1.launchServerInstance(
+                                        audioSettings, port, isMulticastMode, caps,
+                                        micMode, selectedServerMicOutput, mic, rtp,
+                                        cliArgs.useNativeEngine, selectedMicMixInput,
+                                        muteRender = cliArgs.muteRender ?: appSettings.muteRender,
+                                        persist = cliArgs.persist ?: appSettings.serverPersist,
+                                        dlnaConfig = appSettings.copy(
+                                            dlnaEnabled = cliArgs.dlna || appSettings.dlnaEnabled,
+                                            dlnaPort = if (cliArgs.dlna) cliArgs.dlnaPort.toString() else appSettings.dlnaPort,
+                                            dlnaFormat = if (cliArgs.dlna) cliArgs.dlnaFormat else appSettings.dlnaFormat
+                                        ).toDlnaConfig(),
+                                        snapcastConfig = appSettings.copy(
+                                            snapcastEnabled = cliArgs.snapcast || appSettings.snapcastEnabled,
+                                            snapcastPort = if (cliArgs.snapcast) cliArgs.snapcastPort.toString() else appSettings.snapcastPort,
+                                            snapcastControlPort = if (cliArgs.snapcast) cliArgs.snapcastControlPort.toString() else appSettings.snapcastControlPort,
+                                            snapcastCodec = if (cliArgs.snapcast) cliArgs.snapcastCodec else appSettings.snapcastCodec,
+                                            snapcastChunkMs = if (cliArgs.snapcast) cliArgs.snapcastChunkMs else appSettings.snapcastChunkMs,
+                                            snapcastBufferMs = if (cliArgs.snapcast) cliArgs.snapcastBufferMs else appSettings.snapcastBufferMs,
+                                            snapcastStreamName = if (cliArgs.snapcast) cliArgs.snapcastStreamName else appSettings.snapcastStreamName
+                                        ).toSnapcastConfig(),
+                                        onAudioFrame = vizSink,
+                                        onStatusUpdate = guardedServerStatus(cliArgs.useNativeEngine)
+                                    )
+
+                                    if (cliArgs.volume != null) appSettings = appSettings.copy(senderGain = cliArgs.volume.coerceIn(0f, 2f))
+                                    if (cliArgs.mute)           NetworkHandler_v1.isMicMuted.value = true
+                                }
+
+                                "client" -> {
+                                    isServer = false
+                                    isStreaming = true
+                                    val serverInfo = checkNotNull(startup.second)
+
+                                    connectionStatus = Strings.get("status_contacting_server", serverInfo.ip)
+                                    NetworkHandler_v1.endDeviceDiscovery()
+                                    NetworkHandler_v1.launchClientInstance(
+                                        audioSettings, serverInfo, checkNotNull(startup.first),
+                                        cliArgs.mic, selectedClientMic, cliArgs.micPort,
+                                        appSettings.connectionSoundEnabled,
+                                        appSettings.disconnectionSoundEnabled,
+                                        onAudioFrame = vizSink,
+                                        outputMixerProvider = { currentReceiverOutput.value },
+                                        onStatusUpdate = guardedClientStatus()
+                                    )
+
+                                    if (cliArgs.volume != null) appSettings = appSettings.copy(receiverGain = cliArgs.volume.coerceIn(0f, 1f))
+                                    if (cliArgs.mute)           NetworkHandler_v1.isMicMuted.value = true
                                 }
                             }
-
-                            if (cliArgs.volume != null) NetworkHandler_v1.setServerVolume(cliArgs.volume)
-                            if (cliArgs.mute)           NetworkHandler_v1.isMicMuted.value = true
                         }
-
-                        "client" -> {
-                            if (isStreaming || selectedOutputDevice == null) return@LaunchedEffect
-                            isServer = false
-                            isStreaming = true
-
-                            val serverInfo = if (cliArgs.serverIp != null) {
-                                ServerInfo(ip = cliArgs.serverIp, isMulticast = false, port = cliArgs.port)
-                            } else {
-                                discoveredDevices.values.firstOrNull()
-                            } ?: return@LaunchedEffect
-
-                            connectionStatus = "Connecting to ${serverInfo.ip}..."
-                            NetworkHandler_v1.endDeviceDiscovery()
-                            NetworkHandler_v1.launchClientInstance(
-                                audioSettings, serverInfo, selectedOutputDevice!!,
-                                cliArgs.mic, selectedClientMic, cliArgs.micPort,
-                                appSettings.connectionSoundEnabled,
-                                appSettings.disconnectionSoundEnabled,
-                                onAudioFrame = vizSink,
-                                onStatusUpdate = clientStatusHandler
-                            )
-
-                            if (cliArgs.volume != null) NetworkHandler_v1.setServerVolume(cliArgs.volume)
-                            if (cliArgs.mute)           NetworkHandler_v1.isMicMuted.value = true
-                        }
-                    }
+                    } finally { guiStartupPending = false }
                 }
 
                 LaunchedEffect(isStreaming) {
@@ -5660,14 +5593,14 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                         val currentTime = System.currentTimeMillis()
                         val canReconnect = (currentTime - lastDisconnectTime) >= retryMs
 
-                        if (!isStreaming && canReconnect) {
+                        if (!guiStartupPending && !autoConnectSuspended && !isStreaming && canReconnect) {
                             for (target in targets) {
                                 if (target.ip.isBlank() || isStreaming) continue
 
                                 // Ogni voce puo' avere la sua porta: due server sulla
                                 // stessa rete non sono obbligati a condividerla.
                                 val port = target.port ?: defaultPort
-                                val knownServer = discoveredDevices.values.find { it.ip == target.ip }
+                                val knownServer = DesktopDiscoveredPeer.find(discoveredDevices.values, target.ip, port)
                                 val isOnline = knownServer != null || NetworkHandler_v1.pingServerUnicast(target.ip, port)
                                 if (!isOnline) continue
 
@@ -5684,6 +5617,9 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                                     continue
                                 }
 
+                                val started = guiCommands.withLock {
+                                    if (isServer || isStreaming || autoConnectSuspended) return@withLock false
+                                    stopGuiAudio()
                                 NetworkHandler_v1.clientPresharedKey = storedKey.orEmpty()
                                 NetworkHandler_v1.clientKeyFromInvite = false
                                 NetworkHandler_v1.expectedMcastEpoch = null
@@ -5693,6 +5629,8 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                                     appSettings.autoConnectPromptForKey
 
                                 val targetServer = knownServer ?: ServerInfo(target.ip, false, port, null)
+                                lastWfasServer = targetServer
+                                autoAttemptPeer = target.ip
                                 isStreaming = true
                                 connectionStatus = Strings.get("auto_connect_connecting", target.displayName())
 
@@ -5700,12 +5638,15 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                                 NetworkHandler_v1.launchClientInstance(
                                     audioSettings, targetServer, selectedOutputDevice!!,
                                     sendMicrophone, selectedClientMic, mic,
-                                    appSettings.connectionSoundEnabled,
+                                    appSettings.connectionSoundEnabled && autoAnnouncedPeer != target.ip,
                                     appSettings.disconnectionSoundEnabled,
                                     onAudioFrame = vizSink,
-                                    onStatusUpdate = clientStatusHandler
+                                    outputMixerProvider = { currentReceiverOutput.value },
+                                    onStatusUpdate = guardedClientStatus()
                                 )
-                                break
+                                    true
+                                }
+                                if (started) break
                             }
                         }
                         delay(intervalMs)
@@ -5742,8 +5683,46 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                             streamingPort             = streamingPort,
                             localIp                   = localIp,
                             httpUrl                   = httpUrl,
-                            serverVolume              = serverVolume,
-                            onServerVolumeChange      = { serverVolume = it },
+                            serverVolume              = if (isServer) appSettings.senderGain else appSettings.receiverGain,
+                            onServerVolumeChange      = { gain ->
+                                appSettings = if (isServer) appSettings.copy(senderGain = gain)
+                                    else appSettings.copy(receiverGain = gain)
+                            },
+                            receiverSources           = receiverSources,
+                            onReceiverSourceGain      = { id, gain ->
+                                sourceAction {
+                                    DesktopReceiverSessions.setGain(id, gain)
+                                }
+                            },
+                            onReceiverSourceMute      = { id, muted ->
+                                sourceAction {
+                                    DesktopReceiverSessions.setMuted(id, muted)
+                                }
+                            },
+                            onReceiverSourceLatency   = { id, adaptive, ms ->
+                                sourceAction {
+                                    DesktopReceiverSessions.setLatency(id, adaptive, ms)
+                                }
+                            },
+                            onReceiverSourceRetry     = { id ->
+                                scope.launch { guiCommands.withLock {
+                                    if (isServer) { stopGuiAudio(); isServer = false }
+                                    NetworkHandler_v1.clientKeyPromptAllowed = true
+                                    DesktopReceiverSessions.retry(id)
+                                    ReceiverSourceStore.update(id) { it.copy(paused = false) }
+                                    isStreaming = DesktopReceiverSessions.hasActiveSources()
+                                } }
+                            },
+                            onReceiverSourceRemove    = { id ->
+                                scope.launch { guiCommands.withLock {
+                                    autoConnectSuspended = true
+                                    DesktopReceiverSessions.remove(id)
+                                    lastWfasServer = DesktopReceiverSessions.sources.value.lastOrNull()?.peer
+                                    if (!ReceiverSourceStore.forget(id)) connectionStatus = Strings.get("receiver_source_save_failed")
+                                    isStreaming = DesktopReceiverSessions.hasActiveSources()
+                                } }
+                            },
+                            onReceiverSourceRemotePercent = { id, percent -> DesktopReceiverSessions.setRemoteVolume(id, percent); Unit },
                             isWindowsOS               = isWindowsOS,
                             virtualDriverStatus       = virtualDriverStatus,
                             onDismissPrivacyBanner    = { dontShowAgain ->
@@ -5753,119 +5732,32 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                                 if (dontShowAgain) appSettings = appSettings.copy(hideWindowsRoutingBanner = true)
                             },
                             onConnectManual = { rawIp ->
-                                val ip = NetAddr.normalize(rawIp)
-                                isStreaming = true
-                                connectionStatus = "Detecting mode for ${NetAddr.display(ip)}..."
-                                val port = streamingPort.toIntOrNull() ?: 9090
-                                val mic  = micPort.toIntOrNull() ?: 9092
-
-                                scope.launch {
-                                    // 1. Controllo furbo: l'IP è già stato scoperto in background?
-                                    val knownServer = discoveredDevices.values.find { it.ip == ip }
-
-                                    // 2. Auto-rilevamento: se è sconosciuto, eseguiamo il ping silente
-                                    val isMulti = knownServer?.isMulticast ?: NetworkHandler_v1.probeIsMulticast(ip, port)
-
-                                    val manualServerInfo = ServerInfo(ip, isMulti, port, knownServer?.capabilities, serverAudioSettings = knownServer?.serverAudioSettings)
-                                    allowKeyPrompt()
-                                    NetworkHandler_v1.endDeviceDiscovery()
-                                    NetworkHandler_v1.launchClientInstance(
-                                        audioSettings, manualServerInfo, selectedOutputDevice!!,
-                                        sendMicrophone, selectedClientMic, mic,
-                                        appSettings.connectionSoundEnabled,
-                                        appSettings.disconnectionSoundEnabled,
-                                        onAudioFrame = vizSink,
-                                        onStatusUpdate = clientStatusHandler
-                                    )
-                                }
+                                val (ip, requestedPort) = NetAddr.splitHostPort(rawIp, streamingPort.toIntOrNull() ?: 9090)
+                                scope.launch { guiCommands.withLock {
+                                    connectionStatus = Strings.get("status_detecting_mode", NetAddr.display(ip))
+                                    require(ip.isNotBlank() && requestedPort in 1..65535) { "Invalid source address or port" }
+                                    val port = requestedPort
+                                    val known = DesktopDiscoveredPeer.find(discoveredDevices.values, ip, port)
+                                    val multicast = known?.isMulticast ?: NetworkHandler_v1.probeIsMulticast(ip, port)
+                                    receiveWfas(ServerInfo(ip, multicast, port, known?.capabilities,
+                                        serverAudioSettings = known?.serverAudioSettings))
+                                } }
+                                Unit
                             },
                             onModeChange = { isSrv ->
-                                isServer = isSrv
-                                isStreaming = false
-                                connectionStatus = Strings.get("status_inactive")
-                                discoveredDevices.clear(); NetworkHandler_v1.forgetDiscoveredAddresses() // Svuota SEMPRE al cambio modalità
-
-                                if (!isSrv) {
-                                    NetworkHandler_v1.requestStopCurrentStream()
-                                    NetworkHandler_v1.beginDeviceDiscovery { hostname, serverInfo ->
-                                        if (serverInfo.lastSeen == 0L) {
-                                            discoveredDevices.remove(hostname)
-                                        } else {
-                                            discoveredDevices[hostname] = serverInfo
-                                        }
-                                    }
-                                } else {
-                                    NetworkHandler_v1.endDeviceDiscovery()
-                                }
+                                scope.launch { guiCommands.withLock {
+                                    stopGuiAudio()
+                                    isServer = isSrv
+                                    autoConnectSuspended = false
+                                    autoAttemptPeer = null; autoAnnouncedPeer = null
+                                    discoveredDevices.clear(); NetworkHandler_v1.forgetDiscoveredAddresses()
+                                    if (!isSrv) discoverForReceiving()
+                                } }
+                                Unit
                             },
-                            onStartStreaming = {
-                                isStreaming      = true
-                                connectionStatus = "Starting Server..."
-                                val port = streamingPort.toIntOrNull() ?: 9090
-                                val mic  = micPort.toIntOrNull() ?: 9092
-                                val rtp  = appSettings.rtpPort.toIntOrNull() ?: 9094
-
-                                isMulticastMode = isMulticastMode || appSettings.rtpEnabled ||
-                                        appSettings.httpEnabled || appSettings.dlnaEnabled || appSettings.snapcastEnabled
-
-                                // A previous auto-start may have left its own (auto-start)
-                                // security on the shared handler. A manual start uses the
-                                // current standard settings, so re-apply them here rather
-                                // than inheriting whatever the last start left behind. The
-                                // settings-change effect above only fires when the settings
-                                // themselves change, which is not the case here.
-                                NetworkHandler_v1.configureSecurity(
-                                    appSettings.securityMode, appSettings.authKey, appSettings.encryptionEnabled
-                                )
-                                IpcServer.applySecurity(appSettings.securityMode, appSettings.authKey)
-
-                                NetworkHandler_v1.launchServerInstance(
-                                    audioSettings, port, isMulticastMode, serverCapabilities,
-                                    micRoutingMode, selectedServerMicOutput, mic, rtp,
-                                    appSettings.useNativeEngine, selectedMicMixInput,
-                                    muteRender = cliArgs.muteRender ?: appSettings.muteRender,
-                                    persist = cliArgs.persist ?: appSettings.serverPersist,
-                                    dlnaConfig = appSettings.toDlnaConfig(),
-                                    snapcastConfig = appSettings.toSnapcastConfig(),
-                                    onAudioFrame = vizSink
-                                ) { key, args ->
-                                    if (key == "error_virtual_driver_missing") {
-                                        isStreaming          = false
-                                        virtualDriverStatus  = NetworkHandler_v1.checkVirtualDriverStatus(appSettings.useNativeEngine)
-                                        connectionStatus     = Strings.get("status_inactive")
-                                    } else if (key == "status_client_disconnected") {
-                                        // --persist: la sessione e' finita, il server no: resta in ascolto.
-                                        if (cliArgs.persist ?: appSettings.serverPersist) {
-                                            connectionStatus = Strings.get("status_client_disconnected")
-                                        } else scope.launch {
-                                            NetworkHandler_v1.stopCurrentStream()
-                                            isStreaming = false
-                                            connectionStatus = Strings.get("status_inactive")
-                                        }
-                                    } else {
-                                        connectionStatus = if (args.isEmpty()) key else String.format(key, *args)
-                                    }
-                                }
-                            },
-                            onStopStreaming = {
-                                isStreaming      = false
-                                connectionStatus = Strings.get("status_inactive")
-                                NetworkHandler_v1.requestStopCurrentStream()
-                            },
-                            onConnectToServer = { serverInfo ->
-                                isStreaming = true
-                                val mic = micPort.toIntOrNull() ?: 9092
-                                allowKeyPrompt()
-                                NetworkHandler_v1.endDeviceDiscovery()
-                                NetworkHandler_v1.launchClientInstance(
-                                    audioSettings, serverInfo, selectedOutputDevice!!,
-                                    sendMicrophone, selectedClientMic, mic,
-                                    appSettings.connectionSoundEnabled,
-                                    appSettings.disconnectionSoundEnabled,
-                                    onAudioFrame = vizSink,
-                                    onStatusUpdate = clientStatusHandler
-                                )
-                            },
+                            onStartStreaming = startSending,
+                            onStopStreaming = stopAudio,
+                            onConnectToServer = { info -> scope.launch { guiCommands.withLock { receiveWfas(info) } }; Unit },
                             onRefreshDevices = {
                                 discoveredDevices.clear(); NetworkHandler_v1.forgetDiscoveredAddresses()
                                 NetworkHandler_v1.endDeviceDiscovery()
@@ -5884,7 +5776,7 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                             onSelectedServerMicOutputChange   = { selectedServerMicOutput = it },
                             selectedMicMixInput               = selectedMicMixInput,
                             onMicMixInputSelected             = { selectedMicMixInput = it },
-                            onAppSettingsChange               = { appSettings = it },
+                            onAppSettingsChange               = { updateAppSettings(it) },
                             onOpenSettings                    = { showSettings = true },
                             isMicMuted                        = isMicMuted,
                             onMicMuteToggle                   = { NetworkHandler_v1.isMicMuted.value = !NetworkHandler_v1.isMicMuted.value },
@@ -5921,7 +5813,7 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                                     onPcm = vizSink,
                                     openPlayer = { rate, ch ->
                                         NetworkHandler_v1.openPcmPlaybackSink(
-                                            selectedOutputDevice, rate, ch, audioSettings.latencyMs
+                                            selectedOutputDevice, rate, ch, if (audioSettings.adaptiveLatency) 120 else audioSettings.latencyMs
                                         )
                                     },
                                     preferredInterface = appSettings.networkInterface
@@ -6071,7 +5963,7 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                             audioSettings          = audioSettings,
                             streamingPort          = streamingPort,
                             micPort                = micPort,
-                            onAppSettingsChange    = { appSettings    = it },
+                            onAppSettingsChange    = { updateAppSettings(it) },
                             onAudioSettingsChange  = { audioSettings  = it },
                             onStreamingPortChange  = { streamingPort  = it },
                             onMicPortChange        = { micPort        = it },
@@ -6137,20 +6029,6 @@ fun startGuiApplication(cliArgs: CliArgs) = application {
                                 dismissButton = {
                                     TextButton(onClick = { updateBanner = null }) {
                                         Text(Strings.get("update_later"))
-                                    }
-                                }
-                            )
-                        }
-
-                        versionAhead?.let {
-                            AlertDialog(
-                                onDismissRequest = { versionAhead = null },
-                                icon  = { Icon(Icons.Outlined.EmojiEvents, contentDescription = null) },
-                                title = { Text(Strings.get("update_ahead_title")) },
-                                text  = { Text(Strings.get("update_ahead_body")) },
-                                confirmButton = {
-                                    TextButton(onClick = { versionAhead = null }) {
-                                        Text(Strings.get("close"))
                                     }
                                 }
                             )

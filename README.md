@@ -119,3 +119,11 @@ AudioBridge 早期代码和设计曾参考并演进自 Marco Morosi 的开源 **
 ## License
 
 本项目继续遵循 **European Union Public Licence v1.2 (EUPL v1.2)**。各子项目中的第三方组件仍遵循各自许可证。
+
+## 2.0.1 正式版
+
+Android 与 Windows 统一使用 2.0.1，从同一确定源码经根发布流程构建；下载及升级说明见 [2.0.1 发行说明](docs/releases/2.0.1.md)。包含多源接收、自适应／手动整数延迟、每源音量与可选远端音量同步，以及最新 test21 Android 与 vpn.9 PC 的恢复修正。
+
+正式 Android 包名 `io.github.mu23xr.audiobridge`，独立测试包为 `.test`，开发包为 `.debug`。正式版可与测试版共存，权限和数据各自独立。子目录旧 README 中“测试包统一正式包名”的描述不适用于新的独立测试身份。Windows 正式版同样与测试版配置隔离。
+
+发布包含 Android APK、Windows x64 ZIP／TAR.GZ、统一源码提交、provenance 和 SHA256SUMS。签名沿用 test16／1.3.1 永久身份。正式发布不代表所有厂商设备过夜和所有 VPN 配置均已验收，已知限制与持续跟踪的问题见发行说明。

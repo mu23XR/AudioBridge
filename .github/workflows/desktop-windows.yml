@@ -1,4 +1,4 @@
-name: Build Desktop Windows
+name: Validate Desktop Windows
 
 on:
   workflow_call:
@@ -10,23 +10,40 @@ on:
         type: string
         default: ""
       upload_artifact:
-        description: "Upload portable ZIP when a calling release workflow needs it"
+        description: "Upload the portable ZIP for the calling Android test workflow"
         type: boolean
         default: false
   workflow_dispatch:
-  pull_request:
+    inputs:
+      publish:
+        description: "Publish the explicit Windows preview request after all checks"
+        type: boolean
+        default: false
   push:
     branches: [ "main" ]
     paths:
       - "desktop/**"
       - "WFAS_PROTOCOL.md"
       - ".github/workflows/desktop-windows.yml"
+      - "scripts/desktop_preview.py"
+      - "scripts/test_desktop_preview.py"
+      - "scripts/check-wasapi-lifecycle.ps1"
+      - "docs/releases/desktop-preview.json"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "WFAS_PROTOCOL.md"
+      - ".github/workflows/desktop-windows.yml"
+      - "scripts/desktop_preview.py"
+      - "scripts/test_desktop_preview.py"
+      - "scripts/check-wasapi-lifecycle.ps1"
+      - "docs/releases/desktop-preview.json"
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-windows-${{ github.workflow }}-${{ github.ref }}
+  group: desktop-windows-${{ github.workflow }}-${{ inputs.source_ref || github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -35,28 +52,66 @@ defaults:
 
 jobs:
   windows:
-    env:
-      WFAS_VERSION_NAME: ${{ inputs.version_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
     runs-on: windows-latest
-
+    env:
+      # Reusable workflows inherit the caller's event, including pull_request.
+      WFAS_REUSABLE_BUILD: ${{ inputs.source_ref != '' || inputs.version_name != '' || inputs.upload_artifact }}
+    outputs:
+      source: ${{ steps.preview.outputs.source }}
+      version: ${{ steps.preview.outputs.version }}
+      publish: ${{ steps.preview.outputs.publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.ref }}
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate publication request and clean exact source
+        if: env.WFAS_REUSABLE_BUILD != 'true'
+        id: preview
+        working-directory: .
+        run: python scripts/desktop_preview.py prepare --allow-publish "$env:ALLOW_PUBLISH"
+        env:
+          ALLOW_PUBLISH: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+
+      - name: Resolve reusable Android test version
+        if: env.WFAS_REUSABLE_BUILD == 'true'
+        id: reusable
+        working-directory: .
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version_name }}
+        run: |
+          $version = $env:REQUESTED_VERSION.Trim()
+          if ($version -eq '') {
+            $request = Get-Content docs/releases/build-request.json -Raw | ConvertFrom-Json
+            if ($request.version -isnot [string]) { throw 'Missing Android test version' }
+            $version = $request.version.Trim()
+          }
+          $version = $version -creplace '^v', ''
+          if ($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+-test\.[0-9]+$') {
+            throw "Reusable Desktop builds require MAJOR.MINOR.PATCH-test.N: $version"
+          }
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve reusable source' }
+          "WFAS_VERSION_NAME=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "source=$source" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Check preview verification and publication guards
+        working-directory: .
+        run: python scripts/test_desktop_preview.py
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: "17"
-
-      - name: Resolve requested prerelease version
-        if: github.event_name == 'pull_request' && inputs.source_ref != ''
-        shell: pwsh
-        run: |
-          $request = Get-Content "$env:GITHUB_WORKSPACE/docs/releases/build-request.json" | ConvertFrom-Json
-          "WFAS_VERSION_NAME=$($request.version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -66,14 +121,86 @@ jobs:
       - name: Run Desktop checks
         run: .\gradlew.bat check
 
+      - name: Generate versioned manual before packaging resources
+        run: .\gradlew.bat generateMan
+
       - name: Build Windows portable package
         run: .\gradlew.bat createReleaseDistributable packagePortableArchives
 
-      - name: Upload Windows package
-        if: inputs.upload_artifact || github.event_name == 'workflow_dispatch'
+      - name: Verify Windows preview identity and create checksums
+        if: env.WFAS_REUSABLE_BUILD != 'true'
+        working-directory: .
+        run: python scripts/desktop_preview.py bundle --source "$env:SOURCE_SHA"
+        env:
+          SOURCE_SHA: ${{ steps.preview.outputs.source }}
+
+      - name: Verify reusable test package identity
+        if: env.WFAS_REUSABLE_BUILD == 'true'
+        working-directory: .
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ steps.reusable.outputs.source }}
+        run: |
+          @'
+          import os
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from desktop_preview import check_source, check_tar, check_zip
+          root = Path('.')
+          version = os.environ['WFAS_VERSION_NAME']
+          check_source(root, os.environ['SOURCE_SHA'], generated=True)
+          stem = root / 'desktop/build/packages' / ('AudioBridge-' + version + '-windows-x86_64')
+          check_tar(Path(str(stem) + '.tar.gz'), check_zip(Path(str(stem) + '.zip'), version))
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Reusable test package verification failed' }
+
+      - name: Upload verified Windows preview
+        if: env.WFAS_REUSABLE_BUILD != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioBridge-Desktop-Windows
+          path: out/desktop-release/*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload reusable Windows test package
+        if: env.WFAS_REUSABLE_BUILD == 'true' && inputs.upload_artifact
         uses: actions/upload-artifact@v4
         with:
           name: AudioBridge-Desktop-Windows
           path: desktop/build/packages/*.zip
           retention-days: 1
           if-no-files-found: error
+
+  publish:
+    needs: windows
+    if: needs.windows.outputs.publish == 'true' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.publish))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout verified source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.windows.outputs.source }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Download verified Windows preview
+        uses: actions/download-artifact@v4
+        with:
+          name: AudioBridge-Desktop-Windows
+          path: out/desktop-release
+
+      - name: Verify uploaded assets and publish prerelease
+        run: python scripts/desktop_preview.py publish --source "$SOURCE_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.windows.outputs.source }}

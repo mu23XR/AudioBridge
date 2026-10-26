@@ -77,12 +77,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import java.util.Locale
-
-private fun isItalian(): Boolean = Locale.getDefault().language == "it"
-
-data class Bilingual(val en: String, val it: String) {
-    fun get(): String = if (isItalian()) it else en
+data class Bilingual(val en: String, val it: String, val zh: String? = null) {
+    fun get(): String = if (Strings.language == "zh") zh ?: en else en
 }
 
 enum class ChangelogAccent { PRIMARY, SECONDARY, TERTIARY }
@@ -107,6 +103,86 @@ data class ChangelogEntry(
 object Changelog {
 
     val entries: List<ChangelogEntry> = listOf(
+        ChangelogEntry(
+            version = "2.0.1",
+            date = Bilingual("October 26, 2026", "", "2026 年 10 月 26 日"),
+            headline = Bilingual("A shared stable release for Android and Windows, with receiver and connection recovery improvements.", "",
+                "Android 与 Windows 同步发布正式版，改进音源接收与连接恢复。"),
+            items = listOf(
+                ChangelogItem(Icons.Outlined.SpeakerGroup,
+                    Bilingual("Independent source controls", "", "独立音源控制"),
+                    Bilingual("Control each WFAS source's volume, mute and adaptive or manual buffer target. Windows volume changes now reach queued audio through a short smooth transition.", "",
+                        "分别设置各个 WFAS 音源的音量、静音及自适应或手动缓冲目标。Windows 调节音量时，已有软件积压也会平滑跟随。")),
+                ChangelogItem(Icons.Outlined.Sync,
+                    Bilingual("Saved choices and recovery", "", "保留选择并恢复连接"),
+                    Bilingual("Windows retries preserve each source's latency and use the currently selected output. Startup waits for audio devices, and approval or key entry no longer consumes the next connection reply budget.", "",
+                        "Windows 重试保留独立延迟，并使用当前选择的输出设备。启动连接等待音频设备就绪，授权或密钥输入完成后重新计算回包等待时间。")),
+                ChangelogItem(Icons.Outlined.VpnKey,
+                    Bilingual("VPN reply compatibility", "", "VPN 回包兼容"),
+                    Bilingual("Android and Windows can learn one rewritten UDP reply port during the handshake while retaining source checks after connection.", "",
+                        "Android 与 Windows 可在握手阶段识别一次被改写的 UDP 回包端口，连接建立后继续校验来源。")),
+                ChangelogItem(Icons.Outlined.GraphicEq,
+                    Bilingual("Playback and verification limits", "", "播放改进与验证范围"),
+                    Bilingual("Windows retains the continuity fixes for receive bursts and silence/resume. Short listening passed on the tested tablet-to-Windows setup; overnight, screen-off, other device or VPN combinations and acoustic latency remain unverified.", "",
+                        "Windows 保留突发收包和静音续播的连续性修复。原平板到 Windows 的短时听音已通过；过夜、息屏、其他设备或 VPN 组合及声学延迟仍未验收。"))
+            )
+        ),
+        ChangelogEntry(
+            version = "1.3.1-test.21-vpn.9",
+            date = Bilingual("October 21, 2026", "", "2026 年 10 月 21 日"),
+            headline = Bilingual("Windows receiver and connection repair preview, based on the verified Android test.21 source.", "",
+                "Windows 接收与连接修复预览，以已校验的安卓 test.21 源码为对照。"),
+            items = listOf(
+                ChangelogItem(Icons.Outlined.Sync,
+                    Bilingual("VPN reply ports", "", "VPN 回包端口兼容"),
+                    Bilingual("Learn one rewritten reply port during the handshake, then keep the source endpoint fixed for that connection.", "",
+                        "握手阶段可识别一次被 VPN 改写的回包端口，连接建立后保持来源校验。")),
+                ChangelogItem(Icons.Outlined.GraphicEq,
+                    Bilingual("Continuous playback", "", "连续播放与静音恢复"),
+                    Bilingual("Bounded PCM queues preserve partial writes. Resuming sound after silence does not repay a silence debt by removing real audio.", "",
+                        "播放队列保留短写尾部并限制积压。静音后恢复声音时，不再以静音补偿债务删除真实音频。")),
+                ChangelogItem(Icons.Outlined.Sync,
+                    Bilingual("Connection ownership", "", "连接校验与恢复"),
+                    Bilingual("Validate the selected peer, separate audio activity from heartbeat timing, and keep source recovery independent.", "",
+                        "校验所选发送方，区分有效音频与心跳，各音源独立恢复。")),
+                ChangelogItem(Icons.Outlined.SpeakerGroup,
+                    Bilingual("Source controls", "", "独立音源控制"),
+                    Bilingual("Manage receiver sources and their local gain, mute and buffer target independently. Remote volume is available only when the peer supports it.", "",
+                        "分别控制接收音源的本机增益、静音和缓冲目标。对端支持时才启用远端音量控制。")),
+                ChangelogItem(Icons.Outlined.Terminal,
+                    Bilingual("Diagnostic export", "", "诊断导出"),
+                    Bilingual("Export bounded redacted diagnostics when a fault occurs. This preview still needs listening, hardware and long-session acceptance.", "",
+                        "发生故障时可导出有容量限制且脱敏的诊断。本预览仍需听音、硬件和长时间运行验收。"))
+            )
+        ),
+        ChangelogEntry(
+            version = "1.3.1-test.17",
+            date = Bilingual("October 2026", "", "2026 年 10 月"),
+            headline = Bilingual("The Windows edition now includes the test.17 receive controls and Chinese UI.", "",
+                "Windows 版同步 test.17 接收控制，并加入中文界面。"),
+            items = listOf(
+                ChangelogItem(Icons.Outlined.GraphicEq,
+                    Bilingual("Adaptive or manual latency", "", "自适应或手动延迟"),
+                    Bilingual("Choose an adaptive 20–80 ms receive target or any manual integer from 20 to 400 ms. The target belongs to the receiving device.", "",
+                        "可选择 20–80 ms 自适应目标，或手动设置 20–400 ms 的任意整数。数值属于接收设备，不代表端到端延迟。")),
+                ChangelogItem(Icons.Outlined.Sync,
+                    Bilingual("Playback recovery", "", "播放恢复"),
+                    Bilingual("Output stalls and errors trigger bounded recovery. Persistent failures reconnect with the same target and without another connection beep.", "",
+                        "输出停滞或失败会触发受控恢复。持续失败后保留目标重连，避免重复连接提示音。")),
+                ChangelogItem(Icons.Outlined.Computer,
+                    Bilingual("One tray menu", "", "统一托盘菜单"),
+                    Bilingual("Send, receive, stop and volume controls share one tray icon. Repeating a command restarts that role.", "",
+                        "发送、接收、停止和音量集中在一个托盘图标中。重复命令会重新开始对应模式。")),
+                ChangelogItem(Icons.Outlined.Palette,
+                    Bilingual("Chinese and English", "", "中文与英文"),
+                    Bilingual("Choose the interface language in Appearance; the choice is saved for the next launch.", "",
+                        "在外观设置中选择界面语言，重启后保留选择。")),
+                ChangelogItem(Icons.Outlined.VpnKey,
+                    Bilingual("Independent test channel", "", "独立测试通道"),
+                    Bilingual("Test settings, credentials, IPC and updates are isolated. The bundle includes its own Java runtime.", "",
+                        "测试版独立保存设置、凭据和更新通道，便携包自带 Java 运行时，可与正式版并存。"))
+            )
+        ),
         ChangelogEntry(
             version = "1.2",
             date = Bilingual("August 2026", "Agosto 2026"),
@@ -264,10 +340,10 @@ object Changelog {
     val latest: ChangelogEntry get() = entries.first()
 }
 
-private val whatsNewTitle = Bilingual("What's new", "Novità")
-private val versionHistoryTitle = Bilingual("Version history", "Cronologia versioni")
-private val continueLabel = Bilingual("Continue", "Continua")
-private val closeLabel = Bilingual("Close", "Chiudi")
+private val whatsNewTitle = Bilingual("What's new", "Novità", "更新内容")
+private val versionHistoryTitle = Bilingual("Version history", "Cronologia versioni", "历史版本")
+private val continueLabel = Bilingual("Continue", "Continua", "继续")
+private val closeLabel = Bilingual("Close", "Chiudi", "关闭")
 
 @Composable
 fun ChangelogScreen(

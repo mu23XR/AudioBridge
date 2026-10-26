@@ -1,6 +1,15 @@
 name: Validate Android Native Audio
 
 on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        default: ""
+    outputs:
+      source_sha:
+        description: "Exact integration commit exercised by the strict native suite"
+        value: ${{ jobs.native-audio.outputs.source_sha }}
   workflow_dispatch:
   pull_request:
     paths:
@@ -18,13 +27,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-native-${{ github.ref }}
+  group: android-native-${{ github.workflow }}-${{ inputs.source_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
   native-audio:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     env:
       # A clocked null sink retains the audio path without a physical speaker.
       # Disabling emulator audio would invalidate AudioTrack progress checks.
@@ -39,7 +50,11 @@ jobs:
       - name: Checkout exact tested source
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
           persist-credentials: false
+      - name: Record actual checked-out source
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -89,7 +104,7 @@ jobs:
       - name: Run strict native acceptance and retain failure evidence
         run: |
           python3 scripts/run_android_native.py \
-            --source-commit "$GITHUB_SHA" \
+            --source-commit "${{ steps.source.outputs.sha }}" \
             --emulator "$ANDROID_HOME/emulator/emulator" \
             --adb "$ANDROID_HOME/platform-tools/adb" \
             --aapt2 "$ANDROID_HOME/build-tools/36.0.0/aapt2"
@@ -98,7 +113,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-native-api35-${{ github.sha }}-${{ github.run_attempt }}
+          name: android-native-api35-${{ steps.source.outputs.sha }}-${{ github.run_attempt }}
           path: out/android-native/
           if-no-files-found: warn
           retention-days: 14
