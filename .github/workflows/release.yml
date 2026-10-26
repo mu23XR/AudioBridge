@@ -218,4 +218,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/stable_release.py publish --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --output out/stable-release
-

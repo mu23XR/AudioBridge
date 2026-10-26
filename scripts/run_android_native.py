@@ -12,11 +12,13 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 
 
@@ -38,6 +40,78 @@ CLASSES = {
     PREFIX + "DiagnosticShellExportDeviceTest": 1,
 }
 EXPECTED_TESTS = sum(CLASSES.values())
+PULSE_SINK = "audiobridge_native"
+
+
+def validate_pulse_environment(environment, uid, stat_path=os.stat):
+    """Record only routing metadata; never inspect or export authentication cookies."""
+    server = environment.get("PULSE_SERVER", "")
+    if not server.startswith("unix:") or not PurePosixPath(server[5:]).is_absolute():
+        raise RuntimeError("Native audio requires an explicit local Unix PULSE_SERVER")
+    socket = PurePosixPath(server[5:])
+    runtime = environment.get("XDG_RUNTIME_DIR", "")
+    if runtime != str(socket.parent.parent) or environment.get("QEMU_PA_SERVER") != server:
+        raise RuntimeError("PulseAudio/QEMU server and runtime paths differ")
+    if environment.get("PULSE_SINK") != PULSE_SINK:
+        raise RuntimeError("Native audio requires the owned clocked sink")
+    socket_info, runtime_info = stat_path(str(socket)), stat_path(runtime)
+    if not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != uid:
+        raise RuntimeError("PulseAudio socket is absent or owned by another user")
+    if not stat.S_ISDIR(runtime_info.st_mode) or runtime_info.st_uid != uid or runtime_info.st_mode & 0o077:
+        raise RuntimeError("PulseAudio runtime directory must belong privately to the runner")
+    return {"server": server, "runtimeDirectory": runtime, "uid": uid, "sink": PULSE_SINK}
+
+
+def validate_emulator_audio_log(output):
+    if re.search(r"Could not init [`']pa['`] audio driver|Failed to initialize PA context", output, re.IGNORECASE):
+        raise RuntimeError("Emulator failed to initialize PulseAudio; native audio timing is invalid")
+
+
+def process_parent(pid):
+    try:
+        value = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (FileNotFoundError, ProcessLookupError):
+        return None  # A short-lived emulator helper may exit between samples.
+    tail = value.rpartition(") ")[2].split()
+    if len(tail) < 2 or not tail[1].isdigit():
+        raise RuntimeError(f"Malformed process ancestry for PID {pid}")
+    return int(tail[1])
+
+
+def process_is_owned(pid, owner, parent_of=process_parent):
+    visited = set()
+    while pid is not None and pid > 1:
+        if pid == owner:
+            return True
+        if pid in visited or len(visited) >= 64:
+            raise RuntimeError("Invalid emulator process ancestry")
+        visited.add(pid)
+        pid = parent_of(pid)
+    return False
+
+
+def owned_active_streams(inputs, sink_index, owner_pid, parent_of=process_parent):
+    if not isinstance(inputs, list):
+        raise RuntimeError("pactl did not return a sink-input list")
+    found = []
+    for entry in inputs:
+        if entry.get("sink") != sink_index or entry.get("corked") is not False:
+            continue
+        pid = str(entry.get("properties", {}).get("application.process.id", ""))
+        if not pid:
+            continue
+        if not pid.isdigit():
+            raise RuntimeError("pactl returned an invalid client PID")
+        if process_is_owned(int(pid), owner_pid, parent_of):
+            found.append({"pid": int(pid), "inputIndex": entry["index"], "sinkIndex": sink_index})
+    return found
+
+
+def validate_live_audio(evidence):
+    if evidence["errors"]:
+        raise RuntimeError("Live PulseAudio monitor failed: " + "; ".join(evidence["errors"]))
+    if not evidence["activeSamples"]:
+        raise RuntimeError("No active owned-emulator stream reached the clocked sink during instrumentation")
 
 
 def validate_instrumentation(output: str) -> dict[str, int]:
@@ -85,6 +159,7 @@ class Acceptance:
         self.emulator: subprocess.Popen[bytes] | None = None
         self.emulator_log = None
         self.connected = False
+        self.pulse_sink_index = None
 
     def run(self, label: str, command: list[str], timeout: int = 30,
             required: bool = True, binary: bool = False) -> bytes:
@@ -116,6 +191,8 @@ class Acceptance:
         if not re.fullmatch(r"[0-9a-f]{40}", self.args.source_commit):
             raise RuntimeError("A full exact source commit is required")
         self.output.mkdir(parents=True, exist_ok=False)
+        audio_environment = validate_pulse_environment(os.environ, os.getuid())
+        (self.output / "audio-environment.json").write_text(json.dumps(audio_environment, indent=2) + "\n", encoding="utf-8")
         source = self.run("git-head", ["git", "rev-parse", "HEAD"]).decode().strip()
         if source != self.args.source_commit:
             raise RuntimeError("Checked-out source differs from the requested tested commit")
@@ -142,6 +219,11 @@ class Acceptance:
         sinks = self.run("pulse-before", ["pactl", "list", "short", "sinks"]).decode()
         if not any("audiobridge_native" in line and "module-null-sink" in line for line in sinks.splitlines()):
             raise RuntimeError("The clocked PulseAudio null output is unavailable")
+        sink_info = json.loads(self.run("pulse-sinks-before", ["pactl", "-f", "json", "list", "sinks"]))
+        targets = [sink for sink in sink_info if sink.get("name") == PULSE_SINK]
+        if len(targets) != 1 or type(targets[0].get("index")) is not int:
+            raise RuntimeError("The owned PulseAudio sink has no unambiguous index")
+        self.pulse_sink_index = targets[0]["index"]
         self.run("host-memory-before", ["free", "-m"])
 
     def boot(self) -> None:
@@ -174,14 +256,65 @@ class Acceptance:
         if not avd_name or avd_name[0].strip() != AVD:
             raise RuntimeError("Emulator AVD ownership guard failed")
         self.adb("android-build", "shell", "getprop", "ro.build.fingerprint")
+        self.check_audio_log()
+
+    def check_audio_log(self):
+        path = self.output / "emulator.txt"
+        if path.exists():
+            validate_emulator_audio_log(path.read_text(encoding="utf-8", errors="replace"))
+
+    def with_live_audio(self, action, interval=1.0):
+        """Observe the owned emulator while fixtures run, not after outputs close."""
+        if interval <= 0:
+            raise ValueError("Audio monitor interval must be positive")
+        stop = threading.Event()
+        started = time.monotonic()
+        evidence = {"emulatorPid": self.emulator.pid, "sink": PULSE_SINK, "sinkIndex": self.pulse_sink_index,
+                    "phase": "instrumentation", "activeSamples": 0, "streams": [], "errors": []}
+
+        def sample():
+            try:
+                # Delay the first sample until action has entered instrumentation.
+                # A boot-time client observed before action starts is no evidence.
+                while not stop.wait(interval):
+                    result = subprocess.run(["pactl", "-f", "json", "list", "sink-inputs"],
+                                            capture_output=True, timeout=3, check=True)
+                    streams = owned_active_streams(json.loads(result.stdout), self.pulse_sink_index, self.emulator.pid)
+                    evidence["activeSamples"] += bool(streams)
+                    if streams:
+                        at_ms = round((time.monotonic() - started) * 1000)
+                        evidence.setdefault("firstActiveAfterMs", at_ms)
+                        evidence["lastActiveAfterMs"] = at_ms
+                    for stream in streams:
+                        if stream not in evidence["streams"]:
+                            if len(evidence["streams"]) >= 64:
+                                raise RuntimeError("Unexpected number of emulator audio streams")
+                            evidence["streams"].append(stream)
+            except Exception as failure:
+                evidence["errors"].append(f"{type(failure).__name__}: {failure}")
+
+        monitor = threading.Thread(target=sample, name="native-pulse-monitor")
+        monitor.start()
+        try:
+            result = action()
+        finally:
+            stop.set()
+            monitor.join(timeout=5)
+            (self.output / "audio-path-live.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            if monitor.is_alive():
+                raise RuntimeError("Live PulseAudio monitor did not stop")
+        validate_live_audio(evidence)
+        self.check_audio_log()
+        return result
 
     def test(self) -> None:
         self.adb("install-debug", "install", "-r", "-t", str(ROOT / "android/app/build/outputs/apk/debug/app-debug.apk"), timeout=90)
         self.adb("install-tests", "install", "-r", "-t", str(ROOT / "android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"), timeout=90)
         self.adb("notifications", "shell", "pm", "grant", PACKAGE, "android.permission.POST_NOTIFICATIONS")
-        output = self.adb("instrumentation", "shell", "am", "instrument", "-w", "-r",
-                          "-e", "allowPlayoutFixture", "true", "-e", "class", ",".join(CLASSES),
-                          RUNNER, timeout=360).decode("utf-8", errors="replace")
+        output = self.with_live_audio(lambda: self.adb(
+            "instrumentation", "shell", "am", "instrument", "-w", "-r",
+            "-e", "allowPlayoutFixture", "true", "-e", "class", ",".join(CLASSES), RUNNER, timeout=360)
+        ).decode("utf-8", errors="replace")
         counts = validate_instrumentation(output)
         (self.output / "acceptance.json").write_text(json.dumps({"stage": "instrumentation", "status": "passed", "tests": counts}, indent=2) + "\n", encoding="utf-8")
         print(f"Native acceptance passed: {EXPECTED_TESTS} tests, zero skipped")
@@ -248,9 +381,10 @@ def main() -> int:
         finally:
             try:
                 acceptance.close()
+                acceptance.check_audio_log()
             except Exception as failure:
-                print(f"Owned emulator cleanup failed: {failure}", file=sys.stderr)
-                failures.append(f"Owned emulator cleanup: {failure}")
+                print(f"Owned emulator cleanup/audio validation failed: {failure}", file=sys.stderr)
+                failures.append(f"Owned emulator cleanup/audio validation: {failure}")
         if acceptance.output.exists():
             summary = {"status": "failed" if failures else "passed",
                        "sourceCommit": acceptance.args.source_commit,

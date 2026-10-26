@@ -8,7 +8,7 @@ The authorized release integrates Android source 6a41f957a72ab2615f4a0be3574f8b4
 
 Both platforms use version 2.0.1 and WFAS v2. Android release package is io.github.mu23xr.audiobridge; the independent preview package remains .test. Windows stable and preview configuration remain separate. Migration and known limitations are documented in [2.0.1 notes](releases/2.0.1.md).
 
-The root release workflow requires Android unit tests, lint, strict native audio acceptance, Windows checks and governance on the same integration commit. Actual package identities, source manifests and checksums must match, and uploaded assets must be downloaded and verified before stable/latest publication. Publication is pending those CI gates; no successful release is claimed here.
+The root release workflow requires Android unit tests, lint, strict native audio acceptance, Windows checks and governance on the same integration commit. Actual package identities, source manifests and checksums must match, and uploaded assets must be downloaded and verified before stable/latest publication. Publication is pending those CI gates; no successful release is claimed here. The initial native run exposed an invalid CI audio environment and failed a test-producer timing contract. The CI runner now explicitly binds the verified PulseAudio Unix server and requires an owned emulator stream during instrumentation. A new candidate must pass all gates before publication; Android and Windows product code are unchanged.
 
 Open runtime and security issues remain in the [issue tracker](https://github.com/mu23XR/AudioBridge/issues). Compilation and synthetic tests do not close real-device, overnight or network-configuration issues. Existing published tags/assets remain immutable.
 

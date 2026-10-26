@@ -1,6 +1,13 @@
 import importlib.util
+import json
 from pathlib import Path
+import stat
+import subprocess
+import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -76,6 +83,96 @@ class AndroidNativeResultTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 with self.assertRaisesRegex(RuntimeError, "runner failure"):
                     native.validate_instrumentation(self.output() + marker + "\n")
+
+
+class AndroidNativeAudioEnvironmentTest(unittest.TestCase):
+    def setUp(self):
+        self.environment = {"PULSE_SERVER": "unix:/run/user/1001/pulse/native",
+                            "QEMU_PA_SERVER": "unix:/run/user/1001/pulse/native",
+                            "XDG_RUNTIME_DIR": "/run/user/1001", "PULSE_SINK": "audiobridge_native"}
+        self.metadata = {"/run/user/1001/pulse/native": SimpleNamespace(st_mode=stat.S_IFSOCK | 0o600, st_uid=1001),
+                         "/run/user/1001": SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=1001)}
+        self.stream = {"index": 3, "sink": 1, "corked": False, "properties": {"application.process.id": "42"}}
+
+    def test_explicit_owned_socket_and_private_runtime_are_required(self):
+        record = native.validate_pulse_environment(self.environment, 1001, self.metadata.__getitem__)
+        self.assertEqual(record["server"], self.environment["PULSE_SERVER"])
+        for key, value in (("PULSE_SERVER", "tcp:localhost"), ("QEMU_PA_SERVER", ""),
+                           ("XDG_RUNTIME_DIR", "/tmp/another-home"), ("PULSE_SINK", "another-sink")):
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                native.validate_pulse_environment({**self.environment, key: value}, 1001, self.metadata.__getitem__)
+        for key, value in (("/run/user/1001/pulse/native", SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=1001)),
+                           ("/run/user/1001/pulse/native", SimpleNamespace(st_mode=stat.S_IFSOCK | 0o600, st_uid=0)),
+                           ("/run/user/1001", SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_uid=1001))):
+            metadata = {**self.metadata, key: value}
+            with self.subTest(metadata=key), self.assertRaises(RuntimeError):
+                native.validate_pulse_environment(self.environment, 1001, metadata.__getitem__)
+
+    def test_init_failure_is_rejected_even_if_tests_or_cleanup_otherwise_pass(self):
+        native.validate_emulator_audio_log("emulator booted; AudioTrack advanced")
+        for marker in ("Could not init `pa' audio driver", "pulseaudio: Failed to initialize PA context"):
+            with self.assertRaisesRegex(RuntimeError, "failed to initialize"):
+                native.validate_emulator_audio_log("OK (12 tests)\n" + marker)
+
+    def test_only_owned_uncorked_stream_on_exact_sink_counts(self):
+        parents = {42: 30, 30: 10, 11: 1}
+        expected = [{"pid": 42, "inputIndex": 3, "sinkIndex": 1}]
+        self.assertEqual(expected, native.owned_active_streams([self.stream], 1, 10, parents.get))
+        for stream in ({**self.stream, "sink": 2}, {**self.stream, "corked": True},
+                       {**self.stream, "properties": {"application.process.id": "11"}},
+                       {**self.stream, "properties": {"application.process.id": "99"}}):
+            self.assertEqual([], native.owned_active_streams([stream], 1, 10, parents.get))
+        with self.assertRaises(PermissionError):
+            native.owned_active_streams([self.stream], 1, 10, lambda _: (_ for _ in ()).throw(PermissionError("proc denied")))
+        with self.assertRaisesRegex(RuntimeError, "ancestry"):
+            native.owned_active_streams([self.stream], 1, 10, lambda _: 42)
+
+    def test_monitor_collects_active_evidence_while_action_runs_and_joins_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            acceptance = native.Acceptance(SimpleNamespace())
+            acceptance.output = Path(directory)
+            acceptance.emulator = SimpleNamespace(pid=42)
+            acceptance.pulse_sink_index = 1
+            sampled = threading.Event()
+            in_action = threading.Event()
+
+            def pactl(*args, **kwargs):
+                self.assertTrue(in_action.is_set(), "Sample ran before instrumentation action")
+                sampled.set()
+                return subprocess.CompletedProcess(args[0], 0, json.dumps([self.stream]).encode(), b"")
+
+            def fixtures():
+                in_action.set()
+                self.assertTrue(sampled.wait(1), "Monitor never overlapped instrumentation")
+                return b"instrumentation result"
+
+            with patch.object(native.subprocess, "run", side_effect=pactl):
+                self.assertEqual(b"instrumentation result", acceptance.with_live_audio(fixtures, interval=0.01))
+                sampled.clear()
+                with self.assertRaisesRegex(ValueError, "fixture failed"):
+                    acceptance.with_live_audio(lambda: (_ for _ in ()).throw(ValueError("fixture failed")), interval=0.01)
+            self.assertFalse(any(t.name == "native-pulse-monitor" for t in threading.enumerate()))
+            record = json.loads((Path(directory) / "audio-path-live.json").read_text(encoding="utf-8"))
+            self.assertEqual([], record["errors"])
+
+    def test_missing_active_path_and_monitor_errors_cannot_be_green(self):
+        for evidence in ({"activeSamples": 0, "errors": []}, {"activeSamples": 1, "errors": ["pactl failed"]}):
+            with self.assertRaises(RuntimeError):
+                native.validate_live_audio(evidence)
+        with tempfile.TemporaryDirectory() as directory:
+            acceptance = native.Acceptance(SimpleNamespace())
+            acceptance.output = Path(directory)
+            acceptance.emulator = SimpleNamespace(pid=42)
+            acceptance.pulse_sink_index = 1
+            sampled = threading.Event()
+
+            def invalid(*args, **kwargs):
+                sampled.set()
+                return subprocess.CompletedProcess(args[0], 0, b"invalid JSON", b"")
+
+            with patch.object(native.subprocess, "run", side_effect=invalid), self.assertRaisesRegex(RuntimeError, "monitor failed"):
+                acceptance.with_live_audio(lambda: sampled.wait(1), interval=0.01)
+            self.assertFalse(any(t.name == "native-pulse-monitor" for t in threading.enumerate()))
 
 
 if __name__ == "__main__":

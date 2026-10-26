@@ -92,8 +92,20 @@ jobs:
           pactl load-module module-null-sink sink_name=audiobridge_native rate=48000 channels=2
           pactl set-default-sink audiobridge_native
           pactl set-default-source audiobridge_native.monitor
-          pactl info
-          pactl list short sinks
+          # Bind the emulator to the daemon that pactl actually reached. Its
+          # bundled libpulse must not infer a different per-user runtime path.
+          PULSE_SOCKET=$(LC_ALL=C pactl info | sed -n 's/^Server String: //p')
+          PULSE_SOCKET=${PULSE_SOCKET#unix:}
+          test -S "$PULSE_SOCKET"
+          PULSE_RUNTIME=$(dirname "$(dirname "$PULSE_SOCKET")")
+          test "$(stat -c %u "$PULSE_SOCKET")" = "$(id -u)"
+          test "$(stat -c %u "$PULSE_RUNTIME")" = "$(id -u)"
+          export PULSE_SERVER="unix:$PULSE_SOCKET"
+          export QEMU_PA_SERVER="$PULSE_SERVER"
+          export XDG_RUNTIME_DIR="$PULSE_RUNTIME"
+          pactl --server="$PULSE_SERVER" list short sinks
+          printf 'PULSE_SERVER=%s\nQEMU_PA_SERVER=%s\nXDG_RUNTIME_DIR=%s\n' \
+            "$PULSE_SERVER" "$QEMU_PA_SERVER" "$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
 
       - name: Build debug application and instrumentation only
         working-directory: android
