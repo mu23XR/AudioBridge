@@ -35,7 +35,8 @@ env:
 
 concurrency:
   group: stable-release-${{ github.ref }}
-  cancel-in-progress: false
+  # A new PR head supersedes an older authorized release candidate.
+  cancel-in-progress: true
 
 jobs:
   meta:
@@ -217,3 +218,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/stable_release.py publish --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --output out/stable-release
+
