@@ -20,6 +20,7 @@ internal object DesktopReceiverLifecycleChecks {
     fun runChecks() = runBlocking {
         DesktopReceiverSessions.stopAllAndJoin()
         try {
+            DesktopAudioInitializationChecks.runChecks()
             foreignPeerCannotActivateOrStopTheReceiver()
             multipleSourcesAndRetryRemainIndependent()
             cancelledOpenClosesItsReturnedLine()
@@ -187,7 +188,9 @@ internal object DesktopReceiverLifecycleChecks {
             await("Playback failures did not reach their separate retry budget", 7_000) {
                 DesktopReceiverSessions.sources.value.singleOrNull { it.id == id }?.needsAttention == true
             }
-            check(opens.get() == 3)
+            check(opens.get() == 3) {
+                "Playback retry budget stopped after ${opens.get()} opens: ${DesktopReceiverSessions.sources.value.single { it.id == id }}"
+            }
             check(DesktopReceiverSessions.sources.value.single { it.id == id }.status.contains("Audio output"))
             output.peak.set(0)
             await("Failed source reduced a healthy source's gain") { output.peak.get() >= 750 }

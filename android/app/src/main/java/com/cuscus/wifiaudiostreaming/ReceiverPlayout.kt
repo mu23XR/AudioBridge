@@ -185,7 +185,10 @@ internal class ReceiverPlayout(
                                 // the fade; retrying a tail never scales it twice.
                                 if (outputCopy.size < length) outputCopy = ByteArray(length)
                                 bytes.copyInto(outputCopy, 0, offset, offset + length)
-                                val accepted = governor.writePcm(outputCopy, 0, length) {
+                                // Recovery was checked before admission for this
+                                // batch, including when admission is full. Do not
+                                // repeat its native head queries for every packet.
+                                val accepted = governor.writePcm(outputCopy, 0, length, recoverStall = false) {
                                     ramp.applyInPlace(outputCopy, 0, length)
                                 }
                                 ramp.acceptedBytes(accepted)

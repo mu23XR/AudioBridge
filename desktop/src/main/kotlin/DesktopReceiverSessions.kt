@@ -665,15 +665,22 @@ internal object DesktopAudioInitialization {
         var abandoned = false
         var offered: T? = null
         val future = CompletableFuture<T>()
+        fun reportCleanupFailure(failure: Throwable) {
+            try { onCleanupFailure(failure) }
+            catch (reportFailure: Throwable) {
+                if (reportFailure !== failure) failure.addSuppressed(reportFailure)
+            }
+            AppDebug.log("[SOURCE] Audio output initialization cleanup failed: ${failure.javaClass.simpleName}")
+        }
         fun closeUnclaimed(line: T) {
             try { line.close() }
             catch (failure: Throwable) {
-                onCleanupFailure(failure)
-                AppDebug.log("[SOURCE] Unclaimed audio output cleanup failed: ${failure.javaClass.simpleName}")
+                reportCleanupFailure(failure)
                 throw failure
             }
         }
         Thread({
+            var failure: Throwable? = null
             try {
                 val line = operation()
                 val release = synchronized(ownership) {
@@ -683,8 +690,20 @@ internal object DesktopAudioInitialization {
                     }
                 }
                 if (release) closeUnclaimed(line)
-            } catch (problem: Throwable) { future.completeExceptionally(problem) }
-            finally { onFinished() }
+            } catch (problem: Throwable) { failure = problem }
+            finally {
+                try { onFinished() }
+                catch (problem: Throwable) {
+                    reportCleanupFailure(problem)
+                    val original = failure
+                    if (original == null) failure = problem
+                    else if (original !== problem) original.addSuppressed(problem)
+                }
+                // Failure permits the receiver to retry, so first release this
+                // initialization's ownership. Successful output handoff above
+                // keeps its original ordering and the caller owns that line.
+                failure?.let { future.completeExceptionally(it) }
+            }
         }, "wfas-output-open").apply { isDaemon = true; start() }
         try {
             val line = future.get(timeoutMs, TimeUnit.MILLISECONDS)

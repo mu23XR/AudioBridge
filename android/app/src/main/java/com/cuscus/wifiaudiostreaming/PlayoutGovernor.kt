@@ -161,7 +161,9 @@ class PlayoutGovernor internal constructor(
         val head = playedFrames()
         val now = nowMs()
         if (lastProgressHead >= 0 && head > lastProgressHead) failedLocalRecoveries = 0
-        if (head != lastProgressHead || bufferedFrames() == 0L) {
+        // Reuse this observation: another native head query adds work without
+        // making the progress/queued-state decision internally more consistent.
+        if (head != lastProgressHead || framesWritten <= head) {
             lastProgressHead = head
             lastProgressAt = now
         } else if (now - lastProgressAt >= 500L) {

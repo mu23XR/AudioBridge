@@ -137,6 +137,22 @@ The artifact tool uses only Python's standard library. Run its mismatch/clean-tr
 tests with `python -m unittest discover -s scripts/tests -v`. These tests do not
 sign/build APKs or establish acoustic quality.
 
+### 2.0.1 follow-up regressions
+
+DesktopAudioInitializationChecks holds the initialization-accounting callback
+with a latch: an open failure must not escape while that owner remains active.
+Successful delivery retains its original ordering; timeout/late-close, callback
+failure and the independent three-attempt lifecycle budget remain covered.
+
+ReceiverDrainOverheadTest exercises the real PCM queue, drain pump and governor
+against a bounded-cost virtual playback-head getter. It checks single-observation
+recovery decisions and the throughput effect of redundant per-packet health
+queries. This deterministic model does not identify the cause of a real host
+scheduling pause. The unchanged twelve-method native suite must still meet its
+60ms FIFO, target-plus90ms total queue, immediate resume/progress and100ms loss
+limits using a verified active native audio path. Do not widen these bounds or
+replace a retained failed run with a later passing result.
+
 1. Start a Shizuku SEND/RECEIVE session.
 2. Stop all media playback on the sender without pressing OFF.
 3. Leave the source silent long enough to cross the old 30-second timeout.
