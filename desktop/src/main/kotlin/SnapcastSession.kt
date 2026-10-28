@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -342,7 +342,7 @@ class SnapcastSessionManager(
 
     private fun mdnsInstanceName(): String {
         val base = hostName.filter { it.isLetterOrDigit() || it == '-' || it == ' ' }.trim()
-        return if (base.isEmpty()) "WiFi Audio Streaming" else base
+        return if (base.isEmpty()) "AudioBridge" else base
     }
 
     private fun localMacAddress(): String = runCatching {

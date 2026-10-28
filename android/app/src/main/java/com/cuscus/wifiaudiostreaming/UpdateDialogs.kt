@@ -12,7 +12,7 @@ import androidx.compose.ui.res.stringResource
 
 object DownloadLinks {
     const val GITHUB_RELEASES =
-        "https://github.com/mu-23/AudioBridge/releases"
+        "https://github.com/mu23XR/AudioBridge/releases"
 }
 
 @Composable
@@ -31,7 +31,7 @@ fun UpdateAvailableDialog(
         toVersion = latest,
         confirmLabel = stringResource(R.string.update_dialog_github),
         confirmIcon = Icons.Outlined.Code,
-        onConfirm = { onOpenUrl(DownloadLinks.GITHUB_RELEASES) },
+        onConfirm = { onOpenUrl("${DownloadLinks.GITHUB_RELEASES}/tag/v$latest") },
         dismissLabel = stringResource(R.string.update_dialog_later),
         onDismiss = onDismiss
     )
@@ -53,7 +53,7 @@ fun UpdateResultDialog(
             toVersion = result.latest,
             confirmLabel = stringResource(R.string.update_dialog_github),
             confirmIcon = Icons.Outlined.Code,
-            onConfirm = { onUpdate(DownloadLinks.GITHUB_RELEASES) },
+            onConfirm = { onUpdate(result.url) },
             dismissLabel = stringResource(R.string.update_dialog_close),
             onDismiss = onDismiss
         )

@@ -107,7 +107,6 @@ class MainActivity : AppCompatActivity() {
     private val pendingConnectIp = mutableStateOf<String?>(null)
     private val pendingStartServer = mutableStateOf(false)
     private val pendingStopStreaming = mutableStateOf(false)
-    private val forceDonation = mutableStateOf(false)
 
     @RequiresApi(Build.VERSION_CODES.O)
     private val mediaProjectionLauncher =
@@ -332,54 +331,6 @@ class MainActivity : AppCompatActivity() {
                                     )
                                 }
 
-                                var showDonation by remember { mutableStateOf(false) }
-                                LaunchedEffect(Unit) {
-                                    val store = SettingsDataStore(applicationContext)
-                                    if (!store.donationSupported() &&
-                                        store.isDonationQualified() &&
-                                        System.currentTimeMillis() >= store.donationSnoozeUntil()
-                                    ) {
-                                        showDonation = true
-                                    }
-                                }
-                                if (showDonation || forceDonation.value) {
-                                    val close: () -> Unit = {
-                                        showDonation = false
-                                        forceDonation.value = false
-                                    }
-                                    ExpressiveDonationDialog(
-                                        onSupport = {
-                                            close()
-                                            startActivity(
-                                                Intent(Intent.ACTION_VIEW, Uri.parse("https://ko-fi.com/marcomorosi"))
-                                            )
-                                            lifecycleScope.launch {
-                                                SettingsDataStore(applicationContext).setDonationSupported(true)
-                                            }
-                                        },
-                                        onSnooze30 = {
-                                            close()
-                                            lifecycleScope.launch {
-                                                val s = SettingsDataStore(applicationContext)
-                                                s.setDonationDismissCount(4)
-                                                s.setDonationQualified(false)
-                                                s.setDonationSnoozeUntil(System.currentTimeMillis() + 30L * 24 * 60 * 60 * 1000)
-                                            }
-                                        },
-                                        onLater = {
-                                            close()
-                                            lifecycleScope.launch {
-                                                val s = SettingsDataStore(applicationContext)
-                                                val c = s.donationDismissCount() + 1
-                                                s.setDonationDismissCount(c)
-                                                s.setDonationQualified(false)
-                                                s.setDonationSnoozeUntil(
-                                                    System.currentTimeMillis() + s.donationBackoffDays(c) * 24 * 60 * 60 * 1000
-                                                )
-                                            }
-                                        }
-                                    )
-                                }
                             } else {
                                 OnboardingScreen(
                                     onOnboardingFinished = {
@@ -541,7 +492,10 @@ class MainActivity : AppCompatActivity() {
                     sampleRate = params.sampleRate,
                     channels = if (params.channelConfig.equals("STEREO", ignoreCase = true)) 2 else 1,
                     packetBytes = settings?.maxPayloadBytes ?: 512,
-                    keepPlayingOnDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                    keepPlayingOnDevice = SenderPlaybackPolicy.keepPlayingOnDevice(
+                        settings?.senderLocalPlayback, Build.VERSION.SDK_INT
+                    ),
+                    requireLocalPlayback = settings?.senderLocalPlayback == true,
                     networkInterfaceName = params.networkInterface,
                     persistAfterClient = true
                 )
@@ -658,37 +612,18 @@ class MainActivity : AppCompatActivity() {
                 onUpdate = {
                     val intent = Intent(
                         Intent.ACTION_VIEW,
-                        Uri.parse("https://github.com/mu-23/AudioBridge/releases")
+                        Uri.parse("https://github.com/mu23XR/AudioBridge/releases")
                     )
                     runCatching { context.startActivity(intent) }
                     viewModel.clearProtocolMismatch()
                 },
                 onGithub = {
-                    val updateUrl = if (mismatch.localVersion < mismatch.remoteVersion)
-                        "https://github.com/mu-23/AudioBridge/releases"
-                    else
-                        "https://github.com/marcomorosi06/WiFiAudioStreaming-Desktop/releases"
+                    val updateUrl = "https://github.com/mu23XR/AudioBridge/releases"
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(updateUrl))
                     runCatching { context.startActivity(intent) }
                     viewModel.clearProtocolMismatch()
                 },
                 onDismiss = { viewModel.clearProtocolMismatch() }
-            )
-        }
-
-        val unresponsiveServer by viewModel.unresponsiveServer.collectAsStateWithLifecycle()
-        unresponsiveServer?.let { peerName ->
-            UnresponsiveServerDialog(
-                peerName = peerName,
-                onUpdate = {
-                    val intent = Intent(
-                        Intent.ACTION_VIEW,
-                        Uri.parse("https://github.com/mu-23/AudioBridge/releases")
-                    )
-                    runCatching { context.startActivity(intent) }
-                    viewModel.clearUnresponsiveServer()
-                },
-                onDismiss = { viewModel.clearUnresponsiveServer() }
             )
         }
 
@@ -780,11 +715,7 @@ class MainActivity : AppCompatActivity() {
                 currentSettings.autoConnectEnabled &&
                 selectedRole == RoleSelectionGate.Role.RECEIVER
             ) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(autoConnectIntent)
-                } else {
-                    context.startService(autoConnectIntent)
-                }
+                AutoConnectService.startSafely(context)
             } else {
                 context.stopService(autoConnectIntent)
             }
@@ -898,6 +829,7 @@ class MainActivity : AppCompatActivity() {
             onChannelConfigChange = viewModel::setChannelConfig,
             onBufferSizeChange = viewModel::setBufferSize,
             onAdvancedAudioChange = viewModel::setAdvancedAudio,
+            onAdaptiveLatencyChange = viewModel::setAdaptiveLatency,
             onSecurityChange = viewModel::setSecurity,
             onStreamingPortChange = viewModel::setStreamingPort,
             onMicPortChange = viewModel::setMicPort,
@@ -922,13 +854,6 @@ class MainActivity : AppCompatActivity() {
             onBlackoutOutlinedChange = viewModel::setBlackoutOutlinedUi,
             onDeveloperModeChange = viewModel::setDeveloperMode,
             onNoiseReductionChange = viewModel::setNoiseReduction,
-            onShowDonation = {
-                showSettingsScreen.value = false
-                lifecycleScope.launch {
-                    SettingsDataStore(applicationContext).resetDonationPrompt()
-                    forceDonation.value = true
-                }
-            },
             onOpenScripting = { showScriptingScreen.value = true },
             onAutoUpdateCheckChange = viewModel::setAutoUpdateCheckEnabled,
             onCheckForUpdates = viewModel::checkForUpdatesManual,
@@ -958,9 +883,11 @@ class MainActivity : AppCompatActivity() {
             onDispose { NetworkManager.keyPromptEnabled = false }
         }
         val keyRequest by NetworkManager.pendingKeyRequest.collectAsStateWithLifecycle()
+        val keySource by NetworkManager.pendingKeySource.collectAsStateWithLifecycle()
         keyRequest?.let { wrong ->
             ExpressiveKeyRequestDialog(
                 wrong = wrong,
+                source = keySource,
                 onSubmit = { key -> NetworkManager.submitKey(key) },
                 onCancel = { NetworkManager.submitKey(null) }
             )
@@ -1123,14 +1050,18 @@ class MainActivity : AppCompatActivity() {
         requestServerStart(ScriptExecutor.resolveServerParams(settings, command))
     }
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (NetworkManager.isServerStreaming && !ShizukuAudioBridgeManager.isActive()) {
+        if (SenderPlaybackPolicy.interceptHardwareVolume(
+                NetworkManager.isServerStreaming,
+                ShizukuAudioBridgeManager.isActive(),
+                ShizukuAudioBridgeManager.keepsLocalPlayback()
+            )) {
             when (keyCode) {
                 KeyEvent.KEYCODE_VOLUME_UP -> {
-                    NetworkManager.serverVolume.value = (NetworkManager.serverVolume.value + 0.1f).coerceAtMost(2.0f)
+                    NetworkManager.setServerVolume((NetworkManager.serverVolume.value + 0.1f).coerceAtMost(2.0f))
                     return true // Consuma l'evento: impedisce al sistema di alzare il suo audio!
                 }
                 KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                    NetworkManager.serverVolume.value = (NetworkManager.serverVolume.value - 0.1f).coerceAtLeast(0.0f)
+                    NetworkManager.setServerVolume((NetworkManager.serverVolume.value - 0.1f).coerceAtLeast(0.0f))
                     return true
                 }
             }
@@ -1139,8 +1070,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        if (NetworkManager.isServerStreaming &&
-            !ShizukuAudioBridgeManager.isActive() &&
+        if (SenderPlaybackPolicy.interceptHardwareVolume(
+                NetworkManager.isServerStreaming,
+                ShizukuAudioBridgeManager.isActive(),
+                ShizukuAudioBridgeManager.keepsLocalPlayback()
+            ) &&
             (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
             return true // Consuma l'evento: previene il classico "BEEP" di sistema al rilascio del tasto
         }
@@ -1195,26 +1129,6 @@ fun ProtocolMismatchDialog(
         secondaryLabel = stringResource(R.string.protocol_incompatible_github),
         secondaryIcon = Icons.Outlined.Code,
         onSecondary = onGithub,
-        onDismiss = onDismiss
-    )
-}
-
-@Composable
-fun UnresponsiveServerDialog(
-    peerName: String,
-    onUpdate: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    ExpressiveVersionDialog(
-        icon = Icons.Outlined.SyncProblem,
-        accent = MaterialTheme.colorScheme.error,
-        title = stringResource(R.string.server_silent_title),
-        body = stringResource(R.string.server_silent_body, peerName),
-        fromVersion = null,
-        toVersion = null,
-        confirmLabel = stringResource(R.string.protocol_incompatible_website),
-        dismissLabel = stringResource(R.string.close),
-        onConfirm = onUpdate,
         onDismiss = onDismiss
     )
 }

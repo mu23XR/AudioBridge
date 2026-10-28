@@ -11,5 +11,6 @@
 -->
 <full-backup-content>
     <exclude domain="sharedpref" path="wfas_secrets.xml" />
+    <exclude domain="sharedpref" path="wfas_receiver_credentials.xml" />
     <exclude domain="file" path="datastore/" />
 </full-backup-content>

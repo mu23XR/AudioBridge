@@ -18,6 +18,7 @@
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.AtomicMoveNotSupportedException
 
 class ConfigException(message: String) : Exception(message)
 
@@ -40,10 +41,12 @@ class CfgField(
 )
 
 object ConfigManager {
+    internal fun parseJson(text: String): Any? = Json.parse(text)
+    internal fun writeJson(value: Any?): String = Json.write(value)
 
     val DEFAULTS: AllSettings = AllSettings(
         app = AppSettings(),
-        audio = AudioSettings_V1(48000f, 16, 2, 512, 120, 1390),
+        audio = AudioSettings_V1(48000f, 16, 2, 512),
         streamingPort = "9090",
         micPort = "9092",
         micRoutingMode = "OFF"
@@ -65,7 +68,9 @@ object ConfigManager {
         CfgField("audio.bufferSize", CfgKind.INT, emptyList(), "Capture buffer size in bytes",
             { it.audio.bufferSize }, { s, v -> audioCopy(s) { copy(bufferSize = coerceInt("audio.bufferSize", v, min = 1)) } }),
         CfgField("audio.latencyMs", CfgKind.INT, emptyList(), "Target playout latency in milliseconds",
-            { it.audio.latencyMs }, { s, v -> audioCopy(s) { copy(latencyMs = coerceInt("audio.latencyMs", v, min = 0, max = 5000)) } }),
+            { it.audio.latencyMs }, { s, v -> audioCopy(s) { copy(latencyMs = coerceInt("audio.latencyMs", v, min = 20, max = 400)) } }),
+        CfgField("audio.adaptiveLatency", CfgKind.BOOL, emptyList(), "WFAS receiver adjusts its local target between 20 and 80 ms",
+            { it.audio.adaptiveLatency }, { s, v -> audioCopy(s) { copy(adaptiveLatency = coerceBool("audio.adaptiveLatency", v)) } }),
         CfgField("audio.maxPayloadBytes", CfgKind.INT, emptyList(), "Max PCM bytes per packet (MTU bound)",
             { it.audio.maxPayloadBytes }, { s, v -> audioCopy(s) { copy(maxPayloadBytes = coerceInt("audio.maxPayloadBytes", v, min = 64, max = 65000)) } }),
 
@@ -136,6 +141,14 @@ object ConfigManager {
             { it.app.snapcastStreamName }, { s, v -> appCopy(s) { copy(snapcastStreamName = coerceString("server.snapcastStreamName", v)) } }),
         CfgField("server.muteRender", CfgKind.BOOL, emptyList(), "Mute this machine's speakers while the server captures them (--no-mute-render turns it off for one run)",
             { it.app.muteRender }, { s, v -> appCopy(s) { copy(muteRender = coerceBool("server.muteRender", v)) } }),
+        CfgField("server.gain", CfgKind.FLOAT, emptyList(), "Remembered sender DSP gain, 0-2; displayed 0-100 percent with 50 percent at unity",
+            { it.app.senderGain }, { s, v -> appCopy(s) { copy(senderGain = coerceFloat("server.gain", v, 0f, 2f)) } }),
+        CfgField("receiver.gain", CfgKind.FLOAT, emptyList(), "Remembered receiver-local master gain, 0-1; independent of remote sender volume",
+            { it.app.receiverGain }, { s, v -> appCopy(s) { copy(receiverGain = coerceFloat("receiver.gain", v, 0f, 1f)) } }),
+        CfgField("receiver.remoteVolumeSync", CfgKind.BOOL, emptyList(), "Enable acknowledged remote sender volume controls when the peer supports them",
+            { it.app.remoteVolumeSyncEnabled }, { s, v -> appCopy(s) { copy(remoteVolumeSyncEnabled = coerceBool("receiver.remoteVolumeSync", v)) } }),
+        CfgField("receiver.sources", CfgKind.STRING_LIST, emptyList(), "Remembered independent receiver sources; metadata only, no authentication keys",
+            { it.app.receiverSources }, { s, v -> appCopy(s) { copy(receiverSources = coerceStringList("receiver.sources", v)) } }),
         CfgField("server.persist", CfgKind.BOOL, emptyList(), "Keep a unicast server waiting for the next client instead of exiting when one disconnects",
             { it.app.serverPersist }, { s, v -> appCopy(s) { copy(serverPersist = coerceBool("server.persist", v)) } }),
         CfgField("server.autoStartServer", CfgKind.BOOL, emptyList(), "Start server automatically on launch",
@@ -172,8 +185,13 @@ object ConfigManager {
 
         CfgField("app.theme", CfgKind.ENUM, listOf("Light", "Dark", "System"), "UI theme",
             { it.app.theme.name }, { s, v -> appCopy(s) { copy(theme = Theme.valueOf(coerceEnum("app.theme", v, listOf("Light", "Dark", "System")))) } }),
+        CfgField("app.language", CfgKind.ENUM, listOf("system", "zh", "en"), "UI language",
+            { it.app.language }, { s, v -> appCopy(s) { copy(language = coerceEnum("app.language", v, listOf("system", "zh", "en"))) } }),
         CfgField("app.customThemeColor", CfgKind.COLOR, emptyList(), "Seed color as #RRGGBB or #AARRGGBB, or null",
             { it.app.customThemeColor?.let { c -> colorLongToString(c) } }, { s, v -> appCopy(s) { copy(customThemeColor = parseColor("app.customThemeColor", v)) } }),
+        CfgField("app.windowGeometry", CfgKind.STRING, emptyList(),
+            "Last floating window size and position as WxH or WxH+X+Y (physical pixels); empty uses 600x800",
+            { it.app.windowGeometry }, { s, v -> appCopy(s) { copy(windowGeometry = coerceString("app.windowGeometry", v)) } }),
         CfgField("app.launchAtStartup", CfgKind.BOOL, emptyList(), "Launch app at OS login",
             { it.app.launchAtStartup }, { s, v -> appCopy(s) { copy(launchAtStartup = coerceBool("app.launchAtStartup", v)) } }),
         CfgField("app.autoConnectClientEnabled", CfgKind.BOOL, emptyList(), "Client auto-connects on launch",
@@ -225,11 +243,11 @@ object ConfigManager {
 
     fun exists(): Boolean = ConfigPaths.configFile().exists()
 
-    fun loadOrNull(): AllSettings? {
+    fun loadOrNull(): AllSettings? = synchronized(settingsPersistenceLock) {
         val file = ConfigPaths.configFile()
-        if (!file.exists()) return null
+        if (!file.exists()) return@synchronized null
         val text = try { file.readText() } catch (e: Exception) { throw ConfigException("cannot read ${file.path}: ${e.message}") }
-        return deserialize(text)
+        deserialize(text)
     }
 
     fun load(): AllSettings = loadOrNull() ?: DEFAULTS
@@ -247,6 +265,12 @@ object ConfigManager {
             }
         }
         var result = DEFAULTS
+        // Old files described only a manual target. Do not switch existing users to adaptive.
+        if ("audio.latencyms" in flat && "audio.adaptivelatency" !in flat) {
+            val old = coerceInt("audio.latencyMs", flat["audio.latencyms"], min = 0, max = 5000)
+            flat["audio.latencyms"] = old.coerceIn(20, 400)
+            result = result.copy(audio = result.audio.copy(adaptiveLatency = false))
+        }
         for (field in fields) {
             val raw = flat[field.key.lowercase()] ?: continue
             result = try { field.setter(result, raw) } catch (e: ConfigException) { throw e } catch (e: Exception) {
@@ -282,23 +306,24 @@ object ConfigManager {
         return sb.toString()
     }
 
-    fun save(settings: AllSettings) {
+    fun save(settings: AllSettings): Unit = synchronized(settingsPersistenceLock) {
         val file = ConfigPaths.configFile()
-        val dir = file.parentFile
-        if (dir != null && !dir.exists()) dir.mkdirs()
+        val dir = file.absoluteFile.parentFile
+        if (!dir.isDirectory && !dir.mkdirs()) throw ConfigException("cannot create configuration directory ${dir.path}")
         // I segreti vivono nella custodia dell'OS, mai in questo file.
         val text = serializeRedacted(settings)
-        val tmp = File(file.parentFile ?: File("."), file.name + ".tmp")
-        tmp.writeText(text)
+        val tmp = Files.createTempFile(dir.toPath(), file.name + ".", ".tmp")
         try {
-            Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        } catch (_: Exception) {
+            Files.writeString(tmp, text, Charsets.UTF_8)
             try {
-                Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            } catch (_: Exception) {
-                file.writeText(text)
-                tmp.delete()
+                Files.move(tmp, file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(tmp, file.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
+        } catch (e: Exception) {
+            throw ConfigException("cannot save configuration ${file.path}: ${e.message}")
+        } finally {
+            Files.deleteIfExists(tmp)
         }
     }
 
@@ -360,7 +385,7 @@ object ConfigManager {
             is String -> v.trim().toFloatOrNull() ?: throw ConfigException("$key must be a number (got '$v')")
             else -> throw ConfigException("$key must be a number")
         }
-        if (n < min || n > max) throw ConfigException("$key must be between ${min.toInt()} and ${max.toInt()} (got ${n.toInt()})")
+        if (!n.isFinite() || n < min || n > max) throw ConfigException("$key must be a finite number between $min and $max (got $n)")
         return n
     }
 
@@ -453,6 +478,7 @@ private object Json {
         is String  -> str(v)
         is Boolean -> v.toString()
         is Number  -> numToStr(v)
+        is Map<*, *> -> "{" + v.entries.joinToString(", ") { str(it.key.toString()) + ": " + write(it.value) } + "}"
         is List<*> -> "[" + v.joinToString(", ") { write(it) } + "]"
         else       -> str(v.toString())
     }

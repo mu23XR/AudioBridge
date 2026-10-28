@@ -146,7 +146,8 @@ object ConfigCli {
             ?: throw ConfigException("unknown key '$key'. Run 'wfas config list' to see all keys.")
         val current = SettingsRepository.loadSettings()
         val updated = ConfigManager.withSet(current, field.key, value)
-        SettingsRepository.saveSettings(updated)
+        if (field.key == "receiver.sources") SettingsRepository.updateReceiverSources { updated.app.receiverSources }
+        else SettingsRepository.saveSettings(updated)
         if (json) println("{\"status\": \"ok\", \"key\": \"${jsonEscape(field.key)}\", \"value\": ${jsonValue(field, updated, reveal)}}")
         else println("${field.key} = ${ConfigManager.display(updated, field, reveal)}")
         // Il valore e' appena stato battuto sulla riga di comando, quindi e'
@@ -157,7 +158,7 @@ object ConfigCli {
     }
 
     private fun doReset(json: Boolean) {
-        SettingsRepository.saveSettings(ConfigManager.DEFAULTS)
+        SettingsRepository.replaceAllSettings(ConfigManager.DEFAULTS)
         if (json) println("{\"status\": \"ok\", \"reset\": true, \"path\": \"${jsonEscape(ConfigPaths.configFile().path)}\"}")
         else println("Configuration reset to defaults: ${ConfigPaths.configFile().path}")
     }
@@ -229,7 +230,7 @@ object ConfigCli {
         if (!file.exists()) throw ConfigException("file not found: $path")
         val text = try { file.readText() } catch (e: Exception) { throw ConfigException("cannot read $path: ${e.message}") }
         val imported = ConfigManager.deserialize(text)
-        SettingsRepository.saveSettings(imported)
+        SettingsRepository.replaceAllSettings(imported)
         if (json) println("{\"status\": \"ok\", \"imported\": \"${jsonEscape(file.path)}\", \"path\": \"${jsonEscape(ConfigPaths.configFile().path)}\"}")
         else System.err.println("Imported configuration from ${file.path} into ${ConfigPaths.configFile().path}")
     }

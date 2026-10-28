@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sender_playback_mode_title">发送端播放方式</string>
+    <string name="sender_playback_mode_description">选择采集声音的播放位置。保存后在下一次发送时生效。</string>
+    <string name="sender_playback_stop_to_change">请先停止发送，再切换播放方式。</string>
+    <string name="sender_playback_local">允许本机播放</string>
+    <string name="sender_playback_local_description">保留本机声音。音量键控制本机媒体音量，发送音量单独调整。需要 Android 13 或更新版本，以及支持的采集路由。</string>
+    <string name="sender_playback_remote">仅远程播放</string>
+    <string name="sender_playback_remote_description">本机不播放采集声音，音量键控制发送音量。</string>
+    <string name="sender_playback_hardware_limit">其他媒体应用或部分系统可能在后台接管音量键。始终可以通过 AudioBridge 页面或通知调整发送音量。</string>
+    <string name="sender_playback_save_failed">发送端播放方式保存失败，请重试。</string>
+    <string name="sender_local_playback_unavailable">当前采集路由不支持所选的本机播放方式。已停止发送，请选择“仅远程播放”后再开始。</string>
+    <string name="sender_volume_keys_unavailable">实体音量键控制不可用，请通过 AudioBridge 页面或通知调整发送音量。</string>
+</resources>

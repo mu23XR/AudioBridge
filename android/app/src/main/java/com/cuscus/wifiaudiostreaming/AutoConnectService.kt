@@ -19,11 +19,13 @@ package com.cuscus.wifiaudiostreaming
 
 import android.annotation.SuppressLint
 import android.app.Service
+import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import com.cuscus.wifiaudiostreaming.data.AutoConnectEntry
 import com.cuscus.wifiaudiostreaming.data.SecretStore
 import com.cuscus.wifiaudiostreaming.data.SettingsDataStore
@@ -51,6 +53,7 @@ class AutoConnectService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var isConnecting = false
     private var listenJob: Job? = null
+    private var foregroundReady = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -62,14 +65,21 @@ class AutoConnectService : Service() {
 
         val notification = buildNotification(getString(R.string.auto_connect_listening), false)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NotificationCenter.ID_AUTO_CONNECT,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
-        } else {
-            startForeground(NotificationCenter.ID_AUTO_CONNECT, notification)
+        RuntimeDiagnostics.event("AUTO_CONNECT_CREATE", critical = true)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NotificationCenter.ID_AUTO_CONNECT, notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(NotificationCenter.ID_AUTO_CONNECT, notification)
+            }
+            foregroundReady = true
+        } catch (error: RuntimeException) {
+            if (Build.VERSION.SDK_INT < 31 || error !is ForegroundServiceStartNotAllowedException) throw error
+            RuntimeDiagnostics.event("AUTO_CONNECT_FOREGROUND_REJECTED", error.message.orEmpty(), true)
+            Log.e("AutoConnect", "Foreground discovery is unavailable; waiting for explicit foreground restart", error)
+            stopSelf()
+            return
         }
 
         serviceScope.launch {
@@ -97,6 +107,10 @@ class AutoConnectService : Service() {
 
     @SuppressLint("MissingPermission")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!foregroundReady) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (
             StreamingActionReceiver.wasRecentlyTaskRemoved(this) ||
             !RoleSelectionGate.isReceiverSelected()
@@ -126,7 +140,14 @@ class AutoConnectService : Service() {
                     return@launch
                 }
 
-                if (NetworkManager.isStreamingCurrent.value || isConnecting) {
+                if (NetworkManager.isStreamingCurrent.value) {
+                    // A live media session already owns reconnect/discovery.
+                    // Keeping a second dataSync FGS idle consumes its six-hour budget.
+                    RuntimeDiagnostics.event("AUTO_CONNECT_HANDOFF_COMPLETE", critical = true)
+                    stopSelf()
+                    return@launch
+                }
+                if (isConnecting) {
                     delay(2000)
                     continue
                 }
@@ -274,12 +295,14 @@ class AutoConnectService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        RuntimeDiagnostics.event("AUTO_CONNECT_TASK_REMOVED", critical = true)
         StreamingActionReceiver.handleTaskRemoved(this)
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        RuntimeDiagnostics.event("AUTO_CONNECT_DESTROY", "foregroundReady=$foregroundReady", true)
         Log.d("AutoConnect", "Servizio distrutto.")
         serviceScope.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -287,10 +310,38 @@ class AutoConnectService : Service() {
         super.onDestroy()
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // A timed-out dataSync service is no longer foreground. Stop promptly;
+        // do not tear down the separate mediaPlayback service or clear user intent.
+        foregroundReady = false
+        RuntimeDiagnostics.event("AUTO_CONNECT_TIMEOUT", "startId=$startId type=$fgsType", true)
+        serviceScope.cancel()
+        if (!NetworkManager.isStreamingCurrent.value) {
+            NetworkManager.connectionStatus.value = getString(R.string.auto_connect_unavailable)
+        }
+        stopSelf()
+    }
+
     private fun buildNotification(statusText: String, streaming: Boolean) =
         NotificationCenter.autoConnectNotification(this, statusText, streaming)
 
-    private companion object {
+    companion object {
         const val UPDATE_THROTTLE_MS = 500L
+
+        fun startSafely(context: Context): Boolean {
+            val intent = Intent(context, AutoConnectService::class.java)
+            return try {
+                if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+                else context.startService(intent)
+                true
+            } catch (error: RuntimeException) {
+                if (Build.VERSION.SDK_INT < 31 || error !is ForegroundServiceStartNotAllowedException) throw error
+                RuntimeDiagnostics.event("AUTO_CONNECT_START_REJECTED", error.message.orEmpty(), true)
+                if (!NetworkManager.isStreamingCurrent.value) {
+                    NetworkManager.connectionStatus.value = context.getString(R.string.auto_connect_unavailable)
+                }
+                false
+            }
+        }
     }
 }

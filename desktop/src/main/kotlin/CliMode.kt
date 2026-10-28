@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -217,7 +217,7 @@ private fun buildSdp(args: CliArgs, serverIp: String, audio: AudioSettings_V1): 
     return buildString {
         appendLine("v=0")
         appendLine("o=- $sessionId $sessionId IN IP4 $serverIp")
-        appendLine("s=WiFi Audio Streaming")
+        appendLine("s=AudioBridge")
         appendLine("i=WFAS RTP stream -wfas.app")
         if (args.multicast)
             appendLine("c=IN IP4 $destIp$ttl")
@@ -361,11 +361,11 @@ private fun printCliWelcome() {
     val line = "-".repeat(w)
     println()
     println(bold("  +$line+"))
-    println(bold("  |") + "  " + bold("WiFi Audio Streaming") + " - " + Strings.get("cli_welcome_thanks") + "  " + bold("|"))
+    println(bold("  |") + "  " + bold("AudioBridge") + " - " + Strings.get("cli_welcome_thanks") + "  " + bold("|"))
     println(bold("  |") + " ".repeat(w) + bold("|"))
     println(bold("  |") + "  " + cyan("Android app:") + "  " + bold("|"))
-    println(bold("  |") + "  " + dim("https://github.com/marcomorosi06/") + "      " + bold("|"))
-    println(bold("  |") + "  " + dim("WiFiAudioStreaming-Android/releases") + "    " + bold("|"))
+    println(bold("  |") + "  " + dim("https://github.com/mu23XR/AudioBridge") + "      " + bold("|"))
+    println(bold("  |") + "  " + dim("AudioBridge-Android/releases") + "    " + bold("|"))
     println(bold("  |") + " ".repeat(w) + bold("|"))
     println(bold("  |") + "  " + Strings.get("cli_welcome_path_tip") + "  " + bold("|"))
     println(bold("  |") + "  " + dim(Strings.get("cli_welcome_path_how")) + "  " + bold("|"))
@@ -411,7 +411,7 @@ fun runCli(rawArgs: CliArgs) {
     val stored = SettingsRepository.loadSettings()
     val args = resolveAuthKey(rawArgs, stored)
     val settings = args.latency
-        ?.let { stored.copy(audio = stored.audio.copy(latencyMs = it)) }
+        ?.let { stored.copy(audio = stored.audio.copy(latencyMs = it, adaptiveLatency = false)) }
         ?: stored
     PairCli.applyInviteToNetwork(args)
 
@@ -634,7 +634,7 @@ private suspend fun runCliServer(rawArgs: CliArgs, settings: AllSettings) {
         )
     } else if (!args.viz) {
         out("", args)
-        out(bold("  WiFi Audio Streaming") + "  - server mode", args)
+        out(bold("  AudioBridge") + "  - server mode", args)
         out("  ${dim("IP")}      ${cyan(NetAddr.hostPort(serverIp, args.port))}", args)
         out("  ${dim("Multicast")} ${if (args.multicast) green("enabled") else dim("disabled")}", args)
         if (args.rtp)  out("  ${dim("RTP")}     port ${args.rtpPort}", args)
@@ -841,7 +841,7 @@ private suspend fun runCliClient(args: CliArgs, settings: AllSettings) {
         jsonLine("event" to "client_connecting", "pid" to ProcessHandle.current().pid(), "server" to serverInfo.ip, "port" to serverInfo.port)
     } else if (!args.viz) {
         out("", args)
-        out(bold("  WiFi Audio Streaming") + "  - client mode", args)
+        out(bold("  AudioBridge") + "  - client mode", args)
         out("  ${dim("Connecting to")}  ${cyan(serverInfo.ip)}:${serverInfo.port}", args)
         out("  ${dim("Output")}         ${outputDevice.name}", args)
         if (args.sendMic) out("  ${dim("Mic")}            ${micInput?.name ?: "default"}", args)
@@ -1125,7 +1125,7 @@ private fun emitDiscover(args: CliArgs, host: String, info: ServerInfo) {
 
 private suspend fun runCliDiscover(args: CliArgs) {
     if (!args.json && !args.quiet) {
-        out(bold("  WiFi Audio Streaming") + "  - discover mode", args)
+        out(bold("  AudioBridge") + "  - discover mode", args)
         out("  ${dim(if (args.watch) "Scanning... (Ctrl+C to stop)" else "Scanning network (5s)...")}", args)
         out("", args)
     }
@@ -1203,7 +1203,7 @@ private suspend fun runCliRtp(args: CliArgs, settings: AllSettings) {
         kotlin.system.exitProcess(ExitCode.RESOURCE_ERROR)
     }
 
-    val latencyMs = args.latency ?: settings.audio.latencyMs
+    val latencyMs = args.latency ?: if (settings.audio.adaptiveLatency) 120 else settings.audio.latencyMs
     if (args.volume != null) NetworkHandler_v1.setClientVolume(args.volume)
     var muted = args.mute
     if (muted) NetworkHandler_v1.setClientVolume(0f)
@@ -1221,7 +1221,7 @@ private suspend fun runCliRtp(args: CliArgs, settings: AllSettings) {
         )
     } else if (!args.viz) {
         out("", args)
-        out(bold("  WiFi Audio Streaming") + "  - RTP receive", args)
+        out(bold("  AudioBridge") + "  - RTP receive", args)
         out("  ${dim("Source")}   ${cyan(where)} ${dim(if (source.isMulticast) "multicast" else "unicast")}", args)
         out("  ${dim("Format")}   ${source.formatSummary()}", args)
         out("  ${dim("Path")}     " + (if (source.isNativePcm) green("native L16") else yellow("FFmpeg")), args)
@@ -1443,7 +1443,7 @@ private suspend fun runCliSnapcast(args: CliArgs, settings: AllSettings) {
         )
     } else if (!args.viz && !useMixer) {
         out("", args)
-        out(bold("  WiFi Audio Streaming") + "  - Snapcast client", args)
+        out(bold("  AudioBridge") + "  - Snapcast client", args)
         out("  ${dim("Server")}   ${cyan(server.host)} ${dim("audio")} ${server.streamPort} ${dim("control")} ${server.controlPort}", args)
         out("  ${dim("As")}       $clientName ${dim(clientId)}", args)
         out("  ${dim("Output")}   ${outputDevice?.name ?: "(not playing)"}", args)

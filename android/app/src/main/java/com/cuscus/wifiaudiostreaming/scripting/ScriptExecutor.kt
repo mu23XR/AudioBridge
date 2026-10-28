@@ -213,29 +213,24 @@ object ScriptExecutor {
 
         NetworkManager.connectionStatus.value = "Detecting mode for $ip..."
         val known = NetworkManager.discoveredDevices.value.values.find { it.ip == ip }
-        val isMulti = known?.isMulticast ?: NetworkManager.probeIsMulticast(ip, port)
+        val isMulti = known?.isMulticast ?: NetworkManager.probeIsMulticast(ip, port, context,
+            command.str(ScriptParams.IFACE) ?: settings.networkInterface)
+            ?: throw IllegalStateException("Transmission mode could not be verified")
         val serverInfo = ServerInfo(ip = ip, isMulticast = isMulti, port = port)
 
-        NetworkManager.clientPresharedKey = command.str(ScriptParams.AUTHKEY) ?: ""
-
-        context.startService(Intent(context, ClientService::class.java))
-        NetworkManager.isStreamingCurrent.value = true
-        NetworkManager.startClient(
-            context = context.applicationContext,
-            serverInfo = serverInfo,
-            sampleRate = command.sampleRate() ?: settings.sampleRate,
-            channelConfig = command.channels() ?: settings.channelConfig,
-            bufferSize = command.buffer() ?: settings.bufferSize,
-            sendMicrophone = clientMic,
-            micPort = command.bindPort(ScriptParams.MICPORT) ?: settings.micPort,
-            networkInterfaceName = command.str(ScriptParams.IFACE) ?: settings.networkInterface,
-            connectionSoundEnabled = command.bool(ScriptParams.CONNSOUND) ?: settings.connectionSoundEnabled,
-            disconnectionSoundEnabled = command.bool(ScriptParams.DISCSOUND) ?: settings.disconnectionSoundEnabled,
-            onServerDisconnected = {
-                NetworkManager.isStreamingCurrent.value = false
-                context.stopService(Intent(context, ClientService::class.java))
-            }
-        )
+        ClientSessionController.connect(context.applicationContext, serverInfo,
+            presharedKey = command.str(ScriptParams.AUTHKEY),
+            keyFromInvite = false,
+            settingsOverride = settings.copy(
+                sampleRate = command.sampleRate() ?: settings.sampleRate,
+                channelConfig = command.channels() ?: settings.channelConfig,
+                bufferSize = command.buffer() ?: settings.bufferSize,
+                sendClientMicrophone = clientMic,
+                micPort = command.bindPort(ScriptParams.MICPORT) ?: settings.micPort,
+                networkInterface = command.str(ScriptParams.IFACE) ?: settings.networkInterface,
+                connectionSoundEnabled = command.bool(ScriptParams.CONNSOUND) ?: settings.connectionSoundEnabled,
+                disconnectionSoundEnabled = command.bool(ScriptParams.DISCSOUND) ?: settings.disconnectionSoundEnabled
+            ))
     }
 
     suspend fun applySet(context: Context, command: ScriptCommand) {

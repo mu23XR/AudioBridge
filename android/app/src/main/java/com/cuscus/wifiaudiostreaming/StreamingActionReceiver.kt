@@ -17,7 +17,8 @@
 
 package com.cuscus.wifiaudiostreaming
 
-import android.app.ActivityManager
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
+
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -40,15 +41,15 @@ class StreamingActionReceiver : BroadcastReceiver() {
                 context,
                 VolumeOverlayController.MODE_CLIENT
             )
-            ACTION_MODE_SEND -> RuntimeModeController.startSender(context)
-            ACTION_MODE_RECEIVE -> RuntimeModeController.selectReceiver(context)
+            ACTION_MODE_SEND -> RuntimeModeController.restartSender(context)
+            ACTION_MODE_RECEIVE -> RuntimeModeController.restartReceiver(context)
             ACTION_MODE_OFF -> RuntimeModeController.selectOff(context)
         }
     }
 
     private fun shiftServerVolume(delta: Float) {
-        NetworkManager.serverVolume.value =
-            NotificationCenter.nudgeVolume(NetworkManager.serverVolume.value, delta)
+        NetworkManager.setServerVolume(
+            NotificationCenter.nudgeVolume(NetworkManager.serverVolume.value, delta))
     }
 
     private fun shiftClientVolume(delta: Float) {
@@ -85,6 +86,7 @@ class StreamingActionReceiver : BroadcastReceiver() {
         private var lastTaskRemovalStopElapsed = 0L
 
         fun handleTaskRemoved(context: Context) {
+            RuntimeDiagnostics.event("TASK_REMOVED", critical = true)
             val nowElapsed = SystemClock.elapsedRealtime()
             synchronized(this) {
                 if (nowElapsed - lastTaskRemovalStopElapsed < TASK_REMOVAL_DEBOUNCE_MS) {
@@ -115,18 +117,11 @@ class StreamingActionReceiver : BroadcastReceiver() {
         fun handleStoppedWithTask(context: Context) {
             val app = context.applicationContext
             if (RuntimeModeController.isSwitchingOff()) return
-
-            val taskGone = runCatching {
-                val am = app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-                am.appTasks.isEmpty()
-            }.getOrDefault(false)
-
-            if (!taskGone) return
-
-            markTaskRemoved(app)
             RoleSelectionGate.initialize(app)
-            RoleSelectionGate.selectOff(app)
-            RuntimeModeController.selectOff(app, keepControlNotification = false)
+            // onDestroy also follows system service recreation. An absent recent
+            // task does not prove a user stop; only Stop/onTaskRemoved owns OFF.
+            RuntimeDiagnostics.event("HOST_DESTROY_KEEP_INTENT",
+                "role=${RoleSelectionGate.role.value}", critical = true)
         }
 
         fun clearTaskRemovedStop(context: Context) {

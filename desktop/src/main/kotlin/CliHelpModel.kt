@@ -62,9 +62,9 @@ object CliHelpModel {
     )
 
     val LINKS: List<Pair<String, String>> = listOf(
-        "Desktop source"   to "https://github.com/marcomorosi06/WiFiAudioStreaming-Desktop",
-        "Android app"      to "https://github.com/marcomorosi06/WiFiAudioStreaming-Android",
-        "WFAS v2 protocol" to "https://github.com/marcomorosi06/wfas-protocol"
+        "Desktop source"   to "https://github.com/mu23XR/AudioBridge",
+        "Android app"      to "https://github.com/mu23XR/AudioBridge",
+        "WFAS v2 protocol" to "https://github.com/mu23XR/AudioBridge/blob/main/WFAS_PROTOCOL.md"
     )
 
     private val START = HelpTopic(
@@ -348,10 +348,10 @@ object CliHelpModel {
                     HelpEntry(
                         syntax = "--latency <ms>",
                         brief = "Jitter buffer used on the Wi-Fi link.",
-                        default = "120, range 0-5000",
+                        default = "adaptive WFAS target; manual range 20-400",
                         tokens = listOf("--latency"),
                         detail = "Larger values survive a noisier network, smaller ones cut the delay. " +
-                                "The USB buffer is separate and is set by --usb-latency. Persists as " +
+                                "This explicit value selects manual latency for the current receiver. The USB buffer is separate and is set by --usb-latency. Persists as " +
                                 "audio.latencyMs when saved with 'wfas config set'."
                     )
                 )

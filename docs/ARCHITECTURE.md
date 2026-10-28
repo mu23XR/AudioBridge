@@ -1,19 +1,22 @@
-# Monorepo Architecture
-
-This repository contains both implementations of WiFi Audio Streaming.
+# AudioBridge Monorepo Architecture
 
 ```text
-WiFiAudioStreaming/
+AudioBridge/
 ├── android/             Android application
 ├── desktop/             Desktop application
-├── WFAS_PROTOCOL.md     Shared protocol specification
-└── .github/workflows/   Monorepo build workflows
+├── docs/                project governance and architecture
+├── WFAS_PROTOCOL.md     single shared protocol specification
+├── AGENTS.md            contributor/AI entrypoint
+└── .github/workflows/   CI and release workflows
 ```
 
-## Rules
+## Architecture rules
 
-1. WFAS wire-format changes are documented at the repository root.
-2. A wire-incompatible change must be implemented on both Android and Desktop before release.
-3. Platform-only implementation details stay inside their platform directory.
-4. Windows is the primary Desktop validation target for the current development phase.
-5. Android and Desktop may have independent UI/version numbers while sharing the same WFAS protocol version.
+1. The repository root is the coordination layer for Android and Desktop.
+2. `WFAS_PROTOCOL.md` at the root is the single protocol source of truth.
+3. A wire-incompatible WFAS change must be implemented on both Android and Desktop before release.
+4. Platform-only implementation details stay inside their platform directory.
+5. Windows 10/11 x64 is the primary Desktop validation target for the current development phase.
+6. Android and Desktop may have different UI/platform details while sharing the same WFAS protocol version.
+7. Android application identity is `io.github.mu23xr.audiobridge`.
+8. Release signing and publishing rules are defined in `docs/SIGNING.md` and `docs/RELEASE.md`.

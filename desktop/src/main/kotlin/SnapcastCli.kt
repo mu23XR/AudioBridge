@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -670,7 +670,7 @@ object SnapcastCli {
     private suspend fun discoverCmd(args: CliArgs): Int {
         if (!args.json && !args.quiet) {
             println()
-            println("  " + bold("WiFi Audio Streaming") + "  - Snapcast discovery")
+            println("  " + bold("AudioBridge") + "  - Snapcast discovery")
             println("  " + dim(if (args.watch) "Scanning... (Ctrl+C to stop)" else "Scanning network (${DISCOVER_MS / 1000}s)..."))
             println()
         }

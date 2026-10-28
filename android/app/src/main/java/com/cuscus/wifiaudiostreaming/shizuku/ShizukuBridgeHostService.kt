@@ -8,6 +8,7 @@
 package com.cuscus.wifiaudiostreaming.shizuku
 
 import com.cuscus.wifiaudiostreaming.StreamingActionReceiver
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 
 import android.app.Service
 import android.content.Context
@@ -19,6 +20,7 @@ import android.os.PowerManager
 import com.cuscus.wifiaudiostreaming.NetworkManager
 import com.cuscus.wifiaudiostreaming.NotificationCenter
 import com.cuscus.wifiaudiostreaming.RoleSelectionGate
+import com.cuscus.wifiaudiostreaming.SenderVolumeSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -39,29 +41,40 @@ class ShizukuBridgeHostService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var statusJob: Job? = null
     private var bridgeWatchJob: Job? = null
+    private var volumeSession: SenderVolumeSession? = null
+    private var volumeSessionFailed = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        RuntimeDiagnostics.event("SENDER_HOST_START", "startId=$startId redelivered=${intent == null}", true)
         RoleSelectionGate.initialize(applicationContext)
-        if (
-            StreamingActionReceiver.wasRecentlyTaskRemoved(this) ||
-            !RoleSelectionGate.isSenderSelected()
-        ) {
+        NotificationCenter.ensureChannels(this)
+        try {
+            startForeground(
+                NotificationCenter.ID_SERVER,
+                NotificationCenter.shizukuBridgeNotification(
+                    this,
+                    NetworkManager.connectionStatus.value.ifBlank {
+                        getString(com.cuscus.wifiaudiostreaming.R.string.shizuku_bridge_active)
+                    },
+                    NetworkManager.serverVolume.value
+                )
+            )
+        } catch (failure: RuntimeException) {
+            if (Build.VERSION.SDK_INT < 31 || failure !is android.app.ForegroundServiceStartNotAllowedException) throw failure
+            RuntimeDiagnostics.event("SENDER_FOREGROUND_REJECTED", failure.javaClass.simpleName, true)
+            ShizukuAudioBridgeManager.stop(this)
+            NetworkManager.connectionStatus.value = getString(com.cuscus.wifiaudiostreaming.R.string.source_foreground_denied)
             stopSelf()
             return START_NOT_STICKY
         }
-        NotificationCenter.ensureChannels(this)
-        startForeground(
-            NotificationCenter.ID_SERVER,
-            NotificationCenter.shizukuBridgeNotification(
-                this,
-                NetworkManager.connectionStatus.value.ifBlank {
-                    getString(com.cuscus.wifiaudiostreaming.R.string.shizuku_bridge_active)
-                },
-                NetworkManager.serverVolume.value
-            )
-        )
+        // Honor a pending foreground-service promotion before rejecting a stale
+        // role command. No capture/session resources are acquired on this path.
+        if (StreamingActionReceiver.wasRecentlyTaskRemoved(this) || !RoleSelectionGate.isSenderSelected()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         acquireLocks()
 
@@ -74,17 +87,17 @@ class ShizukuBridgeHostService : Service() {
                     .distinctUntilChanged()
                     .conflate()
                     .collect { (status, volume) ->
-                        ShizukuAudioBridgeManager.setVolume(volume)
+                        updateVolumeSession(volume)
                         NotificationCenter.post(
                             this@ShizukuBridgeHostService,
                             NotificationCenter.ID_SERVER,
                             NotificationCenter.shizukuBridgeNotification(
                                 this@ShizukuBridgeHostService,
-                                status.ifBlank {
+                                volumeSessionStatus(status.ifBlank {
                                     getString(
                                         com.cuscus.wifiaudiostreaming.R.string.shizuku_bridge_active
                                     )
-                                },
+                                }),
                                 volume
                             )
                         )
@@ -144,14 +157,41 @@ class ShizukuBridgeHostService : Service() {
         }
     }
 
+    private fun updateVolumeSession(volume: Float) {
+        if (ShizukuAudioBridgeManager.state.value is ShizukuAudioBridgeManager.State.Running &&
+            !ShizukuAudioBridgeManager.keepsLocalPlayback()) {
+            if (volumeSession == null && !volumeSessionFailed) {
+                try {
+                    volumeSession = SenderVolumeSession(this)
+                } catch (error: RuntimeException) {
+                    volumeSessionFailed = true
+                    RuntimeDiagnostics.event("SENDER_VOLUME_SESSION_FAILED", error.javaClass.simpleName, true)
+                }
+            }
+            volumeSession?.update(volume)
+        } else {
+            volumeSession?.release()
+            volumeSession = null
+            volumeSessionFailed = false
+        }
+    }
+
+    private fun volumeSessionStatus(status: String): String =
+        if (volumeSessionFailed) status + "\n" + getString(com.cuscus.wifiaudiostreaming.R.string.sender_volume_keys_unavailable)
+        else status
+
     override fun onTaskRemoved(rootIntent: Intent?) {
+        RuntimeDiagnostics.event("SENDER_HOST_TASK_REMOVED", critical = true)
         StreamingActionReceiver.handleTaskRemoved(this)
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        RuntimeDiagnostics.event("SENDER_HOST_DESTROY", "status=${NetworkManager.connectionStatus.value}", true)
         StreamingActionReceiver.handleStoppedWithTask(this)
+        volumeSession?.release()
+        volumeSession = null
         runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
         runCatching { wifiLock?.takeIf { it.isHeld }?.release() }
         wakeLock = null

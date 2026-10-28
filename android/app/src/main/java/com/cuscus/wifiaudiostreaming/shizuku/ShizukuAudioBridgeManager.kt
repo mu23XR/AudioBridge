@@ -12,9 +12,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.Binder
 import android.os.IBinder
 import android.os.RemoteException
 import android.util.Log
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.cuscus.wifiaudiostreaming.BuildConfig
@@ -31,6 +33,7 @@ object ShizukuAudioBridgeManager {
     private const val REQUEST_CODE_PERMISSION = 0x5746
     private val USER_SERVICE_VERSION: Int = BuildConfig.VERSION_CODE
     private const val RUNTIME_PREFS = "wfas_shizuku_runtime"
+    private val ownerProcessToken: IBinder = Binder()
 
     data class Config(
         val port: Int,
@@ -38,6 +41,7 @@ object ShizukuAudioBridgeManager {
         val channels: Int = 2,
         val packetBytes: Int = 512,
         val keepPlayingOnDevice: Boolean = true,
+        val requireLocalPlayback: Boolean = false,
         val networkInterfaceName: String = "Auto",
         val persistAfterClient: Boolean = false
     )
@@ -69,9 +73,13 @@ object ShizukuAudioBridgeManager {
 
     private var appContext: Context? = null
     private var listenersInstalled = false
+    private val startupBudget = com.cuscus.wifiaudiostreaming.RecoveryBudget()
+    private var commandGeneration = 0L
+    private var remoteVolumeRevision = -1L
 
     private val serviceConnection: ServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            remoteVolumeRevision = -1L
             service = IShizukuAudioBridge.Stub.asInterface(binder)
             bindingInProgress = false
             bound = true
@@ -153,6 +161,8 @@ object ShizukuAudioBridgeManager {
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
+            remoteVolumeRevision = -1L
+            RuntimeDiagnostics.event("CAPTURE_BINDER_DISCONNECTED", "desired=$desiredRunning", true)
             service = null
             bindingInProgress = false
             bound = false
@@ -211,8 +221,14 @@ object ShizukuAudioBridgeManager {
     }
 
     fun start(context: Context, config: Config) {
+        commandGeneration++
+        startupBudget.reset()
         val app = context.applicationContext
         appContext = app
+        if (config.requireLocalPlayback && android.os.Build.VERSION.SDK_INT < 33) {
+            fail(app, app.getString(R.string.sender_local_playback_unavailable))
+            return
+        }
         StreamingActionReceiver.clearTaskRemovedStop(app)
         desiredRunning = true
         pendingConfig = config
@@ -222,6 +238,7 @@ object ShizukuAudioBridgeManager {
     }
 
     fun stop(context: Context, removeUserService: Boolean = true) {
+        commandGeneration++
         val app = context.applicationContext
         val oldConfig = pendingConfig
         desiredRunning = false
@@ -346,7 +363,10 @@ object ShizukuAudioBridgeManager {
     fun isActive(): Boolean =
         desiredRunning || _state.value is State.Running
 
+    fun keepsLocalPlayback(): Boolean = pendingConfig?.keepPlayingOnDevice ?: true
+
     fun setVolume(volume: Float) {
+        require(volume.isFinite()) { "Sender volume must be finite" }
         val safe = volume.coerceIn(0f, 2f)
         runCatching { service?.setVolume(safe) }
             .onFailure { Log.w(TAG, "could not update Shizuku stream volume", it) }
@@ -354,9 +374,12 @@ object ShizukuAudioBridgeManager {
 
     fun refreshRemoteState(context: Context): Boolean {
         val remote = service ?: return isActive()
+        synchronizeRemoteVolume(remote)
+        captureRemoteDiagnostics(remote)
         val detail = runCatching { remote.getStatus() }.getOrNull() ?: return isActive()
 
         if (detail == "idle" && _state.value is State.Running) {
+            RuntimeDiagnostics.event("SENDER_REMOTE_IDLE", detail, true)
             val app = context.applicationContext
             val oldConfig = pendingConfig
             desiredRunning = false
@@ -391,6 +414,16 @@ object ShizukuAudioBridgeManager {
         }
 
         return isActive()
+    }
+
+    private fun captureRemoteDiagnostics(remote: IShizukuAudioBridge, critical: Boolean = false) {
+        runCatching { remote.drainDiagnostics() }
+            .onSuccess { batch -> batch.lineSequence().filter { it.isNotBlank() }.forEach {
+                RuntimeDiagnostics.event("REMOTE_CAPTURE", it, critical)
+            } }
+            .onFailure {
+                RuntimeDiagnostics.event("CAPTURE_DIAGNOSTIC_IPC_FAILED", it.javaClass.simpleName, critical)
+            }
     }
 
     private fun begin(context: Context, config: Config) {
@@ -471,6 +504,11 @@ object ShizukuAudioBridgeManager {
 
     private fun recoverStaleBinding(context: Context, config: Config, detail: String) {
         if (!desiredRunning) return
+        if (!startupBudget.retryAllowed()) {
+            fail(context, detail)
+            return
+        }
+        val generation = commandGeneration
         Log.w(TAG, "recoverable UserService binding failure: $detail")
 
         val app = context.applicationContext
@@ -494,7 +532,7 @@ object ShizukuAudioBridgeManager {
         reconnectHandler.removeCallbacks(rebindRunnable)
         reconnectHandler.postDelayed(
             {
-                if (desiredRunning && pendingConfig != null) {
+                if (desiredRunning && pendingConfig != null && generation == commandGeneration) {
                     begin(app, pendingConfig ?: config)
                 }
             },
@@ -513,10 +551,15 @@ object ShizukuAudioBridgeManager {
                 config.channels,
                 config.packetBytes,
                 config.keepPlayingOnDevice,
-                config.persistAfterClient
+                config.persistAfterClient,
+                ownerProcessToken
             ).also {
                 remote.setVolume(NetworkManager.serverVolume.value.coerceIn(0f, 2f))
             }
+        } catch (e: SecurityException) {
+            captureRemoteDiagnostics(remote, critical = true)
+            fail(context, context.getString(R.string.shizuku_error_bridge_start, e.message ?: "permission"))
+            return
         } catch (e: RemoteException) {
             recoverStaleBinding(
                 context,
@@ -533,8 +576,17 @@ object ShizukuAudioBridgeManager {
             return
         }
 
+        // Failed startup is followed by UserService destruction, so drain its
+        // evidence before releasing the binder instead of waiting for a host poll.
+        captureRemoteDiagnostics(remote, critical = true)
         if (detail.startsWith("error:", ignoreCase = true)) {
-            fail(context, detail)
+            if (detail.contains("kind=ROUTE_NOT_READY")) recoverStaleBinding(context, config, detail)
+            else fail(context, detail)
+            return
+        }
+        startupBudget.reset()
+        if (config.requireLocalPlayback && !detail.contains("LOOP_BACK_RENDER")) {
+            fail(context, context.getString(R.string.sender_local_playback_unavailable))
             return
         }
 
@@ -566,6 +618,11 @@ object ShizukuAudioBridgeManager {
     }
 
     private fun restoreRunningState(context: Context, config: Config, detail: String) {
+        if (config.requireLocalPlayback && !detail.contains("LOOP_BACK_RENDER")) {
+            fail(context, context.getString(R.string.sender_local_playback_unavailable))
+            return
+        }
+        synchronizeRemoteVolume(service ?: return)
         NetworkManager.configureSecurity("OFF", "", false)
         NetworkManager.serverStreamsMic = false
         NetworkManager.startBroadcastingPresence(
@@ -596,6 +653,7 @@ object ShizukuAudioBridgeManager {
             .putInt("channels", config.channels)
             .putInt("packet_bytes", config.packetBytes)
             .putBoolean("keep_playing", config.keepPlayingOnDevice)
+            .putBoolean("require_local_playback", config.requireLocalPlayback)
             .putString("network_interface", config.networkInterfaceName)
             .putBoolean("persist_after_client", config.persistAfterClient)
             .apply()
@@ -612,6 +670,7 @@ object ShizukuAudioBridgeManager {
             channels = prefs.getInt("channels", 2).coerceIn(1, 2),
             packetBytes = prefs.getInt("packet_bytes", 512),
             keepPlayingOnDevice = prefs.getBoolean("keep_playing", true),
+            requireLocalPlayback = prefs.getBoolean("require_local_playback", false),
             networkInterfaceName = prefs.getString("network_interface", "Auto") ?: "Auto",
             persistAfterClient = prefs.getBoolean("persist_after_client", false)
         )
@@ -622,6 +681,30 @@ object ShizukuAudioBridgeManager {
             .edit()
             .clear()
             .apply()
+    }
+
+    private fun synchronizeRemoteVolume(remote: IShizukuAudioBridge) {
+        try {
+            val snapshot = remote.volumeState
+            if (snapshot == null || snapshot.length > 128) {
+                RuntimeDiagnostics.event("SENDER_VOLUME_STATE_INVALID", critical = true)
+                return
+            }
+            val parts = snapshot.split(';', limit = 3)
+            val revision = parts.getOrNull(0)?.toLongOrNull()
+            val gain = parts.getOrNull(1)?.toFloatOrNull()
+            if (parts.size != 2 || revision == null || revision < 0 ||
+                gain == null || !gain.isFinite() || gain !in 0f..2f) {
+                RuntimeDiagnostics.event("SENDER_VOLUME_STATE_INVALID", critical = true)
+                return
+            }
+            if (revision != remoteVolumeRevision) {
+                remoteVolumeRevision = revision
+                NetworkManager.setServerVolume(gain, propagateToSender = false)
+            }
+        } catch (error: RemoteException) {
+            RuntimeDiagnostics.event("SENDER_VOLUME_STATE_FAILED", error.javaClass.simpleName, true)
+        }
     }
 
     private val reconnectHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -653,8 +736,10 @@ object ShizukuAudioBridgeManager {
     }
 
     private fun fail(context: Context, detail: String) {
+        commandGeneration++
+        RuntimeDiagnostics.event("SENDER_FAILURE", detail, true)
         Log.e(TAG, detail)
-        Toast.makeText(context, detail, Toast.LENGTH_LONG).show()
+        Toast.makeText(context, R.string.shizuku_sender_failure_toast, Toast.LENGTH_LONG).show()
 
         desiredRunning = false
         pendingConfig = null
@@ -689,7 +774,7 @@ object ShizukuAudioBridgeManager {
         )
             .daemon(true)
             .processNameSuffix("audio_bridge")
-            .tag("wfas-audio-bridge")
+            .tag("${context.packageName}.audio_bridge")
             .debuggable(true)
             .version(USER_SERVICE_VERSION)
 

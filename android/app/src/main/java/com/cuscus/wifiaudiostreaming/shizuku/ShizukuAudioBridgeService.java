@@ -8,6 +8,9 @@
 package com.cuscus.wifiaudiostreaming.shizuku;
 
 import com.cuscus.wifiaudiostreaming.BuildConfig;
+import com.cuscus.wifiaudiostreaming.PcmSilence;
+import com.cuscus.wifiaudiostreaming.PcmGainLimiter;
+import com.cuscus.wifiaudiostreaming.RemoteVolumeProtocol;
 
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
@@ -20,7 +23,11 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Build;
+import android.os.Binder;
+import android.os.IBinder;
+import android.os.RemoteException;
 import android.os.Process;
+import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.annotation.Keep;
@@ -65,9 +72,49 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
     private volatile DatagramSocket socket;
     private volatile AudioRecord recorder;
     private volatile float streamVolume = 1.0f;
+    private long volumeRevision;
+    private volatile RemoteVolumeProtocol.Server volumeSession;
     private volatile Object registeredAudioPolicy;
     private volatile Class<?> registeredAudioPolicyClass;
+    private volatile AudioManager registeredAudioManager;
     private volatile String activeCaptureMode = "none";
+    private volatile IBinder ownerToken;
+    private volatile IBinder.DeathRecipient ownerDeathRecipient;
+    private AudioManager captureVolumeManager;
+    private boolean originalMediaMuted;
+    private int originalMediaVolume;
+    private boolean captureMuteChanged;
+    private final java.util.ArrayDeque<String> diagnosticEvents = new java.util.ArrayDeque<>();
+    private long droppedDiagnosticEvents;
+    private static final class CaptureRoutePendingException extends IllegalStateException {
+        CaptureRoutePendingException(String detail) { super(detail); }
+    }
+
+    private void trace(String event, String detail) {
+        synchronized (diagnosticEvents) {
+            if (diagnosticEvents.size() >= 64) {
+                diagnosticEvents.removeFirst();
+                droppedDiagnosticEvents++;
+            }
+            String safeDetail = detail == null ? "" : detail.replace('\n', ' ').replace('\r', ' ');
+            if (safeDetail.length() > 1500) safeDetail = safeDetail.substring(0, 1500);
+            diagnosticEvents.addLast("wall=" + System.currentTimeMillis() + " elapsed=" +
+                    SystemClock.elapsedRealtime() + " pid=" + Process.myPid() +
+                    " event=" + event + " " + safeDetail);
+        }
+    }
+
+    @Override public String drainDiagnostics() {
+        synchronized (diagnosticEvents) {
+            StringBuilder result = new StringBuilder();
+            if (droppedDiagnosticEvents > 0) {
+                result.append("REMOTE_DIAGNOSTIC_DROP count=").append(droppedDiagnosticEvents).append('\n');
+                droppedDiagnosticEvents = 0;
+            }
+            while (!diagnosticEvents.isEmpty()) result.append(diagnosticEvents.removeFirst()).append('\n');
+            return result.toString();
+        }
+    }
 
     public ShizukuAudioBridgeService() {
         this.context = null;
@@ -87,9 +134,47 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
             int channels,
             int packetBytes,
             boolean keepPlayingOnDevice,
-            boolean persistAfterClient
+            boolean persistAfterClient,
+            IBinder ownerToken
     ) {
+        enforceCaller();
+        if (ownerToken == null || !ownerToken.isBinderAlive()) {
+            return "error: owner process unavailable";
+        }
+        trace("CAPTURE_IDENTITY", "processUid=" + Process.myUid() + " callerUid=" + Binder.getCallingUid());
+        // AudioPolicy performs a local checkCallingOrSelfPermission. A shell
+        // process inside an app-originated Binder call otherwise checks the
+        // unprivileged caller, even with a shell-attributed Context.
+        long identity = Binder.clearCallingIdentity();
+        try {
+            return startBridgeOwned(port, sampleRate, channels, packetBytes,
+                    keepPlayingOnDevice, persistAfterClient, ownerToken);
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private void enforceCaller() {
+        int caller = Binder.getCallingUid();
+        if (caller == Process.myUid() || caller == 0) return;
+        if (context == null) throw new SecurityException("Shizuku application Context unavailable");
+        try {
+            String[] packages = context.getPackageManager().getPackagesForUid(caller);
+            if (packages != null) for (String name : packages) {
+                if (BuildConfig.APPLICATION_ID.equals(name)) return;
+            }
+            throw new SecurityException("Unauthorized bridge caller");
+        } catch (RuntimeException e) {
+            throw new SecurityException("Bridge owner package unavailable", e);
+        }
+    }
+
+    private String startBridgeOwned(int port, int sampleRate, int channels, int packetBytes,
+            boolean keepPlayingOnDevice, boolean persistAfterClient, IBinder ownerToken) {
         stopBridgeInternal();
+
+        trace("CAPTURE_START", "port=" + port + " rate=" + sampleRate + " channels=" + channels +
+                "payload=" + packetBytes + " local=" + keepPlayingOnDevice + " persist=" + persistAfterClient);
 
         int uid = Process.myUid();
         if (uid != SHELL_UID && uid != 0) {
@@ -109,6 +194,14 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
             return status;
         }
 
+        try {
+            attachOwner(ownerToken);
+        } catch (Throwable t) {
+            status = "error: owner process unavailable: " + String.valueOf(t.getMessage());
+            Log.e(TAG, "could not attach owner process token", t);
+            return status;
+        }
+
         int frameSize = channels * 2;
         int safePacketBytes = Math.max(128, Math.min(packetBytes, 1390));
         safePacketBytes -= safePacketBytes % frameSize;
@@ -116,6 +209,11 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
         String captureMode;
         try {
+            Context volumeContext = createSystemShellAudioContext(context);
+            AudioManager initialVolumeManager = AudioManager.class.getConstructor(Context.class)
+                    .newInstance(volumeContext);
+            boolean initialMuted = initialVolumeManager.isStreamMute(AudioManager.STREAM_MUSIC);
+            int initialVolume = initialVolumeManager.getStreamVolume(AudioManager.STREAM_MUSIC);
             if (Build.VERSION.SDK_INT >= 33) {
                 if (context == null) {
                     throw new IllegalStateException("Shizuku v13+ Context is required for AudioPolicy");
@@ -153,15 +251,24 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
             if (recorder == null || recorder.getState() != AudioRecord.STATE_INITIALIZED) {
                 throw new IllegalStateException("AudioRecord is not initialized");
             }
+            if (captureMode.startsWith("REMOTE_SUBMIX")) {
+                captureVolumeManager = initialVolumeManager;
+                originalMediaMuted = initialMuted;
+                originalMediaVolume = initialVolume;
+            }
             recorder.startRecording();
             if (recorder.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
                 throw new IllegalStateException("AudioRecord did not enter RECORDSTATE_RECORDING");
             }
+            synchronizeCaptureVolume();
 
         } catch (Throwable t) {
             releaseCapture();
-            status = "error: build=" + BuildConfig.VERSION_CODE + " " + t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage());
+            detachOwner();
+            status = "error: " + (t instanceof CaptureRoutePendingException ? "kind=ROUTE_NOT_READY; " : "") +
+                    "build=" + BuildConfig.VERSION_CODE + " " + t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage());
             Log.e(TAG, "capture start failed", t);
+            trace("CAPTURE_START_FAILED", t.getClass().getSimpleName() + ": " + t.getMessage());
             return status;
         }
 
@@ -186,7 +293,12 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
     @Override
     public synchronized void stopBridge() {
-        stopBridgeInternal();
+        enforceCaller();
+        long identity = Binder.clearCallingIdentity();
+        try {
+            trace("CAPTURE_STOP_REQUEST", status);
+            stopBridgeInternal();
+        } finally { Binder.restoreCallingIdentity(identity); }
     }
 
     @Override
@@ -200,16 +312,37 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
     }
 
     @Override
-    public void setVolume(float volume) {
+    public synchronized void setVolume(float volume) {
+        enforceCaller();
         if (Float.isNaN(volume) || Float.isInfinite(volume)) {
-            return;
+            throw new IllegalArgumentException("Stream volume must be finite");
         }
-        streamVolume = Math.max(0.0f, Math.min(volume, 2.0f));
+        float safe = Math.max(0.0f, Math.min(volume, 2.0f));
+        if (streamVolume != safe) {
+            if (volumeRevision == Long.MAX_VALUE) throw new IllegalStateException("Volume revision exhausted");
+            streamVolume = safe;
+            volumeRevision++;
+        }
+    }
+
+    @Override
+    public synchronized String getVolumeState() {
+        enforceCaller();
+        return volumeRevision + ";" + streamVolume;
+    }
+
+    private RemoteVolumeProtocol.Server offerVolume(String hello) {
+        return RemoteVolumeProtocol.offer(hello, "", "", "", new RemoteVolumeProtocol.Volume() {
+            @Override public int getPercent() { return Math.round(streamVolume * 50.0f); }
+            @Override public void setPercent(int value) { setVolume(value / 50.0f); }
+        });
     }
 
 
     @Override
     public void destroy() {
+        enforceCaller();
+        Binder.clearCallingIdentity();
         stopBridgeInternal();
         Log.i(TAG, "destroy");
         System.exit(0);
@@ -239,7 +372,43 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         }
 
         releaseCapture();
+        detachOwner();
         status = "idle";
+    }
+
+    private synchronized void attachOwner(IBinder token) throws RemoteException {
+        detachOwner();
+        if (token == null) {
+            throw new IllegalArgumentException("ownerToken is null");
+        }
+
+        IBinder.DeathRecipient recipient = () -> {
+            Log.w(TAG, "owner app process died; stopping Shizuku bridge");
+            Thread cleanup = new Thread(() -> {
+                stopBridgeInternal();
+                Log.w(TAG, "owner-death cleanup complete; exiting UserService");
+                System.exit(0);
+            }, "wfas-owner-death-cleanup");
+            cleanup.setDaemon(false);
+            cleanup.start();
+        };
+
+        token.linkToDeath(recipient, 0);
+        ownerToken = token;
+        ownerDeathRecipient = recipient;
+    }
+
+    private synchronized void detachOwner() {
+        IBinder token = ownerToken;
+        IBinder.DeathRecipient recipient = ownerDeathRecipient;
+        ownerToken = null;
+        ownerDeathRecipient = null;
+        if (token != null && recipient != null) {
+            try {
+                token.unlinkToDeath(recipient, 0);
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     private void runServer(
@@ -264,11 +433,13 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                 InetSocketAddress client = waitForClient(localSocket);
                 if (client == null || !running.get()) break;
                 Log.i(TAG, "client connected " + client);
+                trace("SENDER_CLIENT_CONNECTED", client.toString());
                 boolean cleanClientBye =
                         runSession(localSocket, client, sampleRate, channels, packetBytes);
                 if (running.get() && cleanClientBye && !persistAfterClient) {
                     Log.i(TAG, "client disconnected cleanly; persistence disabled, stopping bridge");
                     status = "idle";
+                    trace("SENDER_STOP", "reason=CLIENT_BYE_PERSIST_DISABLED");
                     running.set(false);
                     break;
                 }
@@ -281,11 +452,13 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         } catch (SocketException e) {
             if (running.get()) {
                 status = "error: UDP " + e.getMessage();
+                trace("SENDER_FAILED", "reason=UDP " + e.getMessage());
                 Log.e(TAG, "UDP bridge failed", e);
             }
         } catch (Throwable t) {
             if (running.get()) {
                 status = "error: " + t.getClass().getSimpleName() + ": " + t.getMessage();
+                trace("SENDER_FAILED", t.getClass().getSimpleName() + ": " + t.getMessage());
                 Log.e(TAG, "bridge failed", t);
             }
         } finally {
@@ -322,7 +495,9 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                     sendText(s, remote, "WFAS_INCOMPATIBLE;v=" + PROTOCOL_VERSION);
                     continue;
                 }
-                sendText(s, remote, "HELLO_ACK;v=" + PROTOCOL_VERSION);
+                volumeSession = offerVolume(text);
+                sendText(s, remote, "HELLO_ACK;v=" + PROTOCOL_VERSION +
+                        (volumeSession == null ? "" : volumeSession.ackSuffix()));
                 return remote;
             }
         }
@@ -370,18 +545,31 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                         if (version != PROTOCOL_VERSION) {
                             sendText(s, remote, "WFAS_INCOMPATIBLE;v=" + PROTOCOL_VERSION);
                         } else if (remote.getAddress().equals(clientIp)) {
+                            RemoteVolumeProtocol.Server control = volumeSession;
+                            if (control == null || !control.acceptsHello(text)) volumeSession = offerVolume(text);
                             client.set(remote);
                             lastClientActivityAt.set(System.currentTimeMillis());
-                            sendText(s, remote, "HELLO_ACK;v=" + PROTOCOL_VERSION);
+                            control = volumeSession;
+                            sendText(s, remote, "HELLO_ACK;v=" + PROTOCOL_VERSION +
+                                    (control == null ? "" : control.ackSuffix()));
                             Log.i(TAG, "client endpoint refreshed " + remote);
                         } else {
                             sendText(s, remote, "WFAS_BUSY");
                         }
-                    } else if ("PONG".equals(text) && remote.getAddress().equals(clientIp)) {
-                        client.set(remote);
+                    } else if ((text.startsWith(RemoteVolumeProtocol.GET) || text.startsWith(RemoteVolumeProtocol.SET)) &&
+                            remote.equals(client.get())) {
+                        RemoteVolumeProtocol.Server control = volumeSession;
+                        String reply = control == null ? null : control.receive(text);
+                        if (reply != null) {
+                            sendText(s, remote, reply);
+                            lastClientActivityAt.set(System.currentTimeMillis());
+                            trace("SENDER_VOLUME_ACK", "gain=" + streamVolume);
+                        }
+                    } else if ("PONG".equals(text) && remote.equals(client.get())) {
                         pongCapable.set(true);
                         lastClientActivityAt.set(System.currentTimeMillis());
-                    } else if ("CLIENT_BYE".equals(text) && remote.getAddress().equals(clientIp)) {
+                    } else if ("CLIENT_BYE".equals(text) && remote.equals(client.get())) {
+                        trace("SENDER_CLIENT_BYE", remote.toString());
                         lastClientActivityAt.set(System.currentTimeMillis());
                         explicitClientBye.set(true);
                         sessionAlive.set(false);
@@ -399,9 +587,13 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                 try {
                     Thread.sleep(1000);
                     sendText(s, client.get(), "PING");
+                    RemoteVolumeProtocol.Server control = volumeSession;
+                    String update = control == null ? null : control.snapshot();
+                    if (update != null) sendText(s, client.get(), update);
                     if (pongCapable.get() &&
                             System.currentTimeMillis() - lastClientActivityAt.get() > 30_000L) {
                         Log.w(TAG, "client heartbeat timed out; releasing session");
+                        trace("SENDER_CLIENT_TIMEOUT", "lastPongAgeMs=" + (System.currentTimeMillis() - lastClientActivityAt.get()));
                         sessionAlive.set(false);
                         break;
                     }
@@ -420,6 +612,16 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         int seq = 0;
         long samplePosition = 0;
         long packets = 0;
+        long lastSilenceKeepaliveAt = 0L;
+        long lastDiagnosticAt = SystemClock.elapsedRealtime();
+        long lastReadAt = lastDiagnosticAt;
+        long lastPositiveReadAt = lastDiagnosticAt;
+        long maxReadGap = 0;
+        long capturedFrames = 0;
+        long zeroReads = 0;
+        long limitedSamples = 0;
+        long wouldClipSamples = 0;
+        long silentBuffers = 0;
 
         try {
             while (running.get() && sessionAlive.get()) {
@@ -433,9 +635,59 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                         AudioRecord.READ_NON_BLOCKING
                 );
                 if (read < 0) {
+                    trace("CAPTURE_READ_ERROR", "code=" + read + " mode=" + activeCaptureMode);
                     throw new IllegalStateException("AudioRecord.read failed: " + read);
                 }
-                if (read == 0) {
+                int alignedRead = read - (read % frameSize);
+                long readAt = SystemClock.elapsedRealtime();
+                maxReadGap = Math.max(maxReadGap, readAt - lastReadAt);
+                lastReadAt = readAt;
+                if (alignedRead > 0) lastPositiveReadAt = readAt;
+                capturedFrames += alignedRead / frameSize;
+                boolean silentPcm = alignedRead > 0 && PcmSilence.isZero(readBuffer, 0, alignedRead);
+                if (alignedRead == 0) zeroReads++;
+                else if (silentPcm) silentBuffers++;
+                float gain = streamVolume;
+                wouldClipSamples += PcmGainLimiter.countWouldClip(readBuffer, 0, alignedRead, gain);
+                limitedSamples += PcmGainLimiter.applyInPlace(readBuffer, 0, alignedRead, gain);
+                if (readAt - lastDiagnosticAt >= 10000) {
+                    trace("CAPTURE_STATS", "frames=" + capturedFrames + " packets=" + packets +
+                            " zeroReads=" + zeroReads + " silentBuffers=" + silentBuffers + " maxReadGapMs=" + maxReadGap +
+                            " lastPositiveReadAgeMs=" + (readAt - lastPositiveReadAt) +
+                            " limitedSamples=" + limitedSamples + " wouldClipSamples=" + wouldClipSamples + " gain=" + gain +
+                            " mode=" + activeCaptureMode);
+                    maxReadGap = 0;
+                    lastDiagnosticAt = readAt;
+                }
+                if (alignedRead == 0 || PcmSilence.isZero(readBuffer, 0, alignedRead)) {
+                    // AudioRecord may return full buffers of zero PCM indefinitely.
+                    // Sending those to a media AudioTrack triggers OEM zero-audio
+                    // suspension. Keep the session alive without playing fake PCM.
+                    samplePosition += alignedRead / frameSize;
+                    long now = System.currentTimeMillis();
+                    if (now - lastSilenceKeepaliveAt >= 1_000L) {
+                        byte[] keepalive = new byte[HEADER_SIZE];
+                        keepalive[0] = MAGIC_0;
+                        keepalive[1] = MAGIC_1;
+                        keepalive[2] = (byte) PROTOCOL_VERSION;
+                        keepalive[3] = 0x01; // silence/liveness, no PCM payload
+                        keepalive[4] = (byte) ((seq >>> 8) & 0xFF);
+                        keepalive[5] = (byte) (seq & 0xFF);
+                        ByteBuffer.wrap(keepalive, 6, 4)
+                                .order(ByteOrder.BIG_ENDIAN)
+                                .putInt((int) (samplePosition & 0xFFFFFFFFL));
+
+                        InetSocketAddress target = client.get();
+                        s.send(new DatagramPacket(
+                                keepalive,
+                                keepalive.length,
+                                target.getAddress(),
+                                target.getPort()
+                        ));
+                        seq = (seq + 1) & 0xFFFF;
+                        packets++;
+                        lastSilenceKeepaliveAt = now;
+                    }
                     try {
                         Thread.sleep(2);
                     } catch (InterruptedException e) {
@@ -444,10 +696,6 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                     }
                     continue;
                 }
-
-                int alignedRead = read - (read % frameSize);
-
-                applyPcmGainInPlace(readBuffer, alignedRead, streamVolume);
 
                 int offset = 0;
                 while (offset < alignedRead && running.get() && sessionAlive.get()) {
@@ -575,7 +823,8 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         );
     }
 
-    private static void appendFailure(StringBuilder out, String stage, Throwable t) {
+    private void appendFailure(StringBuilder out, String stage, Throwable t) {
+        trace("CAPTURE_STRATEGY_FAILED", stage + "=" + t.getClass().getSimpleName() + ":" + t.getMessage());
         if (out.length() > 0) out.append(" | ");
         out.append(stage)
                 .append("=")
@@ -649,8 +898,8 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                 .newInstance(mixingRule);
 
         int channelMask = channels == 2
-                ? AudioFormat.CHANNEL_IN_STEREO
-                : AudioFormat.CHANNEL_IN_MONO;
+                ? AudioFormat.CHANNEL_OUT_STEREO
+                : AudioFormat.CHANNEL_OUT_MONO;
         AudioFormat audioFormat = new AudioFormat.Builder()
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setSampleRate(sampleRate)
@@ -686,14 +935,14 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         Object audioPolicy = audioPolicyBuilderClass.getMethod("build").invoke(audioPolicyBuilder);
 
         int result;
+        AudioManager policyAudioManager = policyContext.getSystemService(AudioManager.class);
         if (preferSystemContext) {
             try {
-                Object audioManager = policyContext.getSystemService(AudioManager.class);
                 Method register = AudioManager.class.getMethod(
                         "registerAudioPolicy",
                         audioPolicyClass
                 );
-                result = (Integer) register.invoke(audioManager, audioPolicy);
+                result = (Integer) register.invoke(policyAudioManager, audioPolicy);
             } catch (Throwable instanceFailure) {
                 Log.w(TAG, "instance registerAudioPolicy unavailable; using static", instanceFailure);
                 Method register = AudioManager.class
@@ -713,20 +962,18 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
         AudioRecord resultRecord = null;
         try {
-            Method createSink = audioPolicyClass.getMethod("createAudioRecordSink", audioMixClass);
-            resultRecord = (AudioRecord) createSink.invoke(audioPolicy, audioMix);
-            if (resultRecord == null) {
-                throw new IllegalStateException("createAudioRecordSink returned null");
-            }
+            resultRecord = createAttributedPolicySink(audioMix, audioMixClass,
+                    policyContext, sampleRate, channels);
             if (resultRecord.getState() != AudioRecord.STATE_INITIALIZED) {
                 throw new IllegalStateException(
-                        "createAudioRecordSink returned uninitialized AudioRecord state=" +
+                        "Attributed policy sink returned uninitialized AudioRecord state=" +
                                 resultRecord.getState()
                 );
             }
 
             registeredAudioPolicy = audioPolicy;
             registeredAudioPolicyClass = audioPolicyClass;
+            registeredAudioManager = policyAudioManager;
             return resultRecord;
         } catch (Throwable t) {
             if (resultRecord != null) {
@@ -735,9 +982,42 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
                 } catch (Throwable ignored) {
                 }
             }
-            unregisterPolicy(audioPolicy, audioPolicyClass);
+            unregisterPolicy(policyAudioManager, audioPolicy, audioPolicyClass);
             throw t;
         }
+    }
+
+    @TargetApi(31)
+    @SuppressLint({"PrivateApi", "MissingPermission"})
+    private AudioRecord createAttributedPolicySink(Object mix, Class<?> mixClass,
+            Context policyContext, int sampleRate, int channels) throws Exception {
+        String registration = (String) mixClass.getMethod("getRegistration").invoke(mix);
+        if (registration == null || registration.isEmpty()) {
+            throw new IllegalStateException("AudioPolicy mix has no registered capture address");
+        }
+        // AOSP createAudioRecordSink constructs the record without its policy
+        // Context. In a Shizuku-loaded app this loses shell attribution even
+        // after clearing Binder identity. Pass it to the actual record builder.
+        AudioAttributes.Builder attributes = new AudioAttributes.Builder();
+        AudioAttributes.Builder.class.getMethod("setInternalCapturePreset", int.class)
+                .invoke(attributes, MediaRecorder.AudioSource.REMOTE_SUBMIX);
+        Method addTag = AudioAttributes.Builder.class.getMethod("addTag", String.class);
+        addTag.invoke(attributes, "addr=" + registration);
+        addTag.invoke(attributes, (String) AudioRecord.class.getField("SUBMIX_FIXED_VOLUME").get(null));
+        int inputMask = channels == 2 ? AudioFormat.CHANNEL_IN_STEREO : AudioFormat.CHANNEL_IN_MONO;
+        int minBuffer = AudioRecord.getMinBufferSize(sampleRate, inputMask, AudioFormat.ENCODING_PCM_16BIT);
+        if (minBuffer <= 0) throw new IllegalStateException("Unsupported policy capture format: " + minBuffer);
+        AudioRecord.Builder builder = new AudioRecord.Builder()
+                .setContext(policyContext)
+                .setAudioFormat(new AudioFormat.Builder().setSampleRate(sampleRate)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(inputMask).build())
+                .setBufferSizeInBytes(minBuffer);
+        AudioRecord.Builder.class.getMethod("setAudioAttributes", AudioAttributes.class)
+                .invoke(builder, attributes.build());
+        trace("CAPTURE_ATTRIBUTION", "processUid=" + Process.myUid() +
+                " recordUid=" + policyContext.getAttributionSource().getUid() +
+                " recordPackage=" + policyContext.getAttributionSource().getPackageName());
+        return builder.build();
     }
 
     @SuppressLint({"WrongConstant", "MissingPermission"})
@@ -873,22 +1153,63 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
         }
     }
 
-    private static void applyPcmGainInPlace(byte[] pcm, int bytes, float gain) {
-        if (pcm == null || bytes < 2 || Math.abs(gain - 1.0f) < 0.0001f) {
-            return;
+    private static int mediaOutputDevices() throws Exception {
+        Class<?> audioSystem = Class.forName("android.media.AudioSystem");
+        return (Integer) audioSystem.getMethod("getDevicesForStream", int.class)
+                .invoke(null, AudioManager.STREAM_MUSIC);
+    }
+
+    private void synchronizeCaptureVolume() throws Exception {
+        AudioManager manager = captureVolumeManager;
+        if (manager == null) return; // LOOP_BACK_RENDER retains the local route.
+        long deadline = SystemClock.elapsedRealtime() + 2500L;
+        int devices;
+        while ((devices = mediaOutputDevices()) != 0x8000) {
+            if (SystemClock.elapsedRealtime() >= deadline) {
+                throw new CaptureRoutePendingException("REMOTE_SUBMIX media route did not become active; devices=0x" +
+                        Integer.toHexString(devices));
+            }
+            Thread.sleep(20L);
         }
-        int limit = bytes - (bytes % 2);
-        for (int i = 0; i < limit; i += 2) {
-            int sample = (short) ((pcm[i] & 0xFF) | (pcm[i + 1] << 8));
-            int scaled = Math.round(sample * gain);
-            if (scaled > Short.MAX_VALUE) scaled = Short.MAX_VALUE;
-            if (scaled < Short.MIN_VALUE) scaled = Short.MIN_VALUE;
-            pcm[i] = (byte) (scaled & 0xFF);
-            pcm[i + 1] = (byte) ((scaled >>> 8) & 0xFF);
+        // Never change the local speaker's index to repair a capture-route mute.
+        captureMuteChanged = originalMediaMuted;
+        // Match the volume-key action verified on the affected OEM. Explicit
+        // UNMUTE/setStreamVolume can copy a maximum index into the speaker map.
+        if (manager.isStreamMute(AudioManager.STREAM_MUSIC) ||
+                manager.getStreamVolume(AudioManager.STREAM_MUSIC) == 0) {
+            manager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, 0);
+        }
+        if (mediaOutputDevices() != 0x8000) {
+            throw new IllegalStateException("Media route changed during capture volume setup");
+        }
+        Log.i(TAG, "capture route volume synchronized; originalMediaVolume=" +
+                originalMediaVolume + " originalMuted=" + originalMediaMuted);
+    }
+
+    private void restoreLocalMute() {
+        AudioManager manager = captureVolumeManager;
+        captureVolumeManager = null;
+        if (manager == null || !captureMuteChanged || !originalMediaMuted) return;
+        captureMuteChanged = false;
+        try {
+            long deadline = SystemClock.elapsedRealtime() + 1000L;
+            while ((mediaOutputDevices() & 0x8000) != 0) {
+                if (SystemClock.elapsedRealtime() >= deadline) {
+                    throw new IllegalStateException("Capture route still active after release");
+                }
+                Thread.sleep(20L);
+            }
+            // Do not overwrite a volume the user changed during the session.
+            if (manager.getStreamVolume(AudioManager.STREAM_MUSIC) == originalMediaVolume) {
+                manager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0);
+            }
+        } catch (Exception failure) {
+            Log.e(TAG, "Could not restore local media mute after capture release", failure);
         }
     }
 
-    private synchronized void releaseCapture() {        AudioRecord r = recorder;
+    private synchronized void releaseCapture() {
+        AudioRecord r = recorder;
         recorder = null;
         if (r != null) {
             try {
@@ -903,14 +1224,49 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
 
         Object policy = registeredAudioPolicy;
         Class<?> policyClass = registeredAudioPolicyClass;
+        AudioManager audioManager = registeredAudioManager;
         registeredAudioPolicy = null;
         registeredAudioPolicyClass = null;
+        registeredAudioManager = null;
+        activeCaptureMode = "none";
+
         if (policy != null && policyClass != null) {
-            unregisterPolicy(policy, policyClass);
+            unregisterPolicy(audioManager, policy, policyClass);
         }
+        restoreLocalMute();
     }
 
-    private static void unregisterPolicy(Object policy, Class<?> policyClass) {
+    /**
+     * Task removal can destroy the Shizuku UserService immediately after stopBridge().
+     * AudioManager.unregisterAudioPolicyAsyncStatic() is explicitly asynchronous, so
+     * killing the UserService right afterwards can leave an OEM audio route/volume
+     * context behind. Prefer the synchronous unregisterAudioPolicy() call and only
+     * fall back to the asynchronous hidden API on frameworks where the synchronous
+     * method cannot be reflected.
+     */
+    private static void unregisterPolicy(
+            AudioManager audioManager,
+            Object policy,
+            Class<?> policyClass
+    ) {
+        Throwable syncFailure = null;
+
+        if (audioManager != null) {
+            try {
+                Method unregister = AudioManager.class.getDeclaredMethod(
+                        "unregisterAudioPolicy",
+                        policyClass
+                );
+                unregister.setAccessible(true);
+                unregister.invoke(audioManager, policy);
+                Log.i(TAG, "AudioPolicy synchronously unregistered");
+                return;
+            } catch (Throwable t) {
+                syncFailure = t;
+                Log.w(TAG, "synchronous AudioPolicy unregister failed; falling back", t);
+            }
+        }
+
         try {
             Method unregister = AudioManager.class.getDeclaredMethod(
                     "unregisterAudioPolicyAsyncStatic",
@@ -918,8 +1274,12 @@ public final class ShizukuAudioBridgeService extends IShizukuAudioBridge.Stub {
             );
             unregister.setAccessible(true);
             unregister.invoke(null, policy);
-        } catch (Throwable t) {
-            Log.w(TAG, "could not unregister AudioPolicy: " + t.getMessage());
+            Log.i(TAG, "AudioPolicy async fallback requested");
+        } catch (Throwable asyncFailure) {
+            if (syncFailure != null) {
+                asyncFailure.addSuppressed(syncFailure);
+            }
+            Log.e(TAG, "could not unregister AudioPolicy", asyncFailure);
         }
     }
 

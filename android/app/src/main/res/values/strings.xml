@@ -51,8 +51,20 @@
     <string name="settings_group_performance">Performance</string>
     <string name="settings_item_buffer_size_title">Buffer Size</string>
     <string name="settings_item_buffer_size_desc">A smaller buffer reduces latency but may cause dropouts</string>
-    <string name="settings_item_latency_title">Latency</string>
-    <string name="settings_item_latency_desc">Playback buffer depth. Higher = more stable, more delay.</string>
+    <string name="settings_item_latency_title">Playback buffer (receiver)</string>
+    <string name="settings_item_latency_desc">Receiver-side playout buffer. Applies only when this device receives; never synced to the sender. Higher = steadier, more delay.</string>
+    <string name="settings_latency_preset_title">Receiver latency mode</string>
+    <string name="settings_latency_preset_desc">Choose adaptive (20–80 ms) or a manual value. Changes apply on the next connection.</string>
+    <string name="settings_latency_manual">Manual</string>
+    <string name="settings_latency_preset_adaptive">Adaptive (20–80 ms)</string>
+    <string name="settings_latency_preset_fast">Low latency (20 ms)</string>
+    <string name="settings_latency_preset_balanced">Balanced (40 ms)</string>
+    <string name="settings_latency_preset_steady">Steady (60 ms)</string>
+    <string name="settings_latency_preset_custom_fmt">Custom: %1$d ms</string>
+    <string name="settings_latency_adaptive_hint">(Adaptive is on — a manual change switches to a fixed value)</string>
+    <string name="settings_latency_edit_hint">Value in ms (20–400)</string>
+    <string name="settings_latency_edit_invalid">Enter an integer between 20 and 400</string>
+    <string name="ok">OK</string>
     <string name="settings_group_advanced">Advanced</string>
     <string name="settings_item_packet_size_title">Packet size</string>
     <string name="settings_item_packet_size_desc">Bytes of audio per network packet (stream and mic). Lower = smaller packets, e.g. for microcontrollers.</string>
@@ -90,11 +102,6 @@
     <string name="sec_ask">Approval</string>
     <string name="mic_sends">Sends microphone</string>
     <string name="mic_wants">Accepts talk-back</string>
-    <string name="donation_title">Enjoying AudioBridge?</string>
-    <string name="donation_body">This app is free and ad-free, made by one person in their spare time. If it\'s useful to you, a small tip on Ko-fi helps keep it alive. No pressure, everything keeps working either way.</string>
-    <string name="donation_support">Support on Ko-fi ☕</string>
-    <string name="donation_later">Maybe later</string>
-    <string name="donation_dismiss_30">Don\'t show\nfor 30 days</string>
 
     <string name="status_idle">Idle</string>
     <string name="status_mic_permission_denied">Error: Microphone permission denied.</string>
@@ -135,7 +142,6 @@
     <string name="settings_group_about">About &amp; Help</string>
     <string name="settings_item_show_intro_title">Show Introduction</string>
     <string name="settings_item_show_intro_desc">Review the initial feature tour</string>
-    <string name="developer_name">Developed by</string>
     <string name="notification_permission_title">Notification Permission</string>
     <string name="notification_permission_description">To ensure streaming continues to work even when the app is in the background, granting notification permission is required.</string>
     <string name="grant_permission_button">Grant Permission</string>
@@ -210,10 +216,7 @@
     <string name="save_sdp">Save SDP</string>
     <string name="sdp_copied">SDP copied to clipboard</string>
     <string name="rtp_description">Copy or save the SDP file to listen with VLC or FFplay</string>
-    <string name="support_kofi_title">Buy me a coffee</string>
-    <string name="support_kofi_desc">If you like the app, buy me a coffee! ☕</string>
-    <string name="source_code_android">Android Source Code</string>
-    <string name="source_code_desktop">Desktop Source Code</string>
+    <string name="source_code_android">AudioBridge source code</string>
     <string name="source_code_view_on_github">View on GitHub</string>
     <string name="app_version_label">Version</string>
     <string name="settings_group_license">License</string>
@@ -360,7 +363,7 @@
     <string name="script_action_set">Change settings</string>
     <string name="close">Close</string>
     <string name="status_protocol_incompatible">Incompatible protocol version</string>
-    <string name="status_server_silent_maybe_outdated">The server is not answering the connection request. If you can see it in the list but it will not connect, it is probably running an older version of the app: update it on that device.</string>
+    <string name="status_server_silent_maybe_outdated">Connection timed out. Check that the other device is online, reachable, and running a compatible AudioBridge version.</string>
     <string name="status_group_rekeyed">Group key changed by the sender</string>
     <string name="status_unauthorized">Connection refused by the server</string>
     <string name="status_awaiting_approval">Waiting for the other device to approve…</string>
@@ -390,8 +393,6 @@
     <string name="key_dialog_wrong">Wrong key. Try again:</string>
     <string name="key_dialog_connect">Connect</string>
     <string name="key_dialog_cancel">Cancel</string>
-    <string name="server_silent_title">The other device is not answering</string>
-    <string name="server_silent_body">“%1$s” never answered the connection request. The most likely reason is that it is running an older version of the app, which cannot talk to this one — update the app on that device. Otherwise, check that a firewall is not blocking the port.</string>
     <string name="protocol_incompatible_title">The other device needs an update</string>
     <string name="protocol_incompatible_title_local">This device needs an update</string>
     <string name="protocol_incompatible_body">The two apps are running incompatible WFAS protocol versions (this device: v%1$d, other end: v%2$d). The connection was closed. Please update so both devices run the latest version.</string>
@@ -409,10 +410,6 @@
     <string name="settings_item_haptics_desc">Vibrate on taps, toggles and key actions</string>
     <string name="settings_item_blackout_outlined_title">Outlined dark screen</string>
     <string name="settings_item_blackout_outlined_desc">Keep the controls visible as white outlines instead of a fully black screen</string>
-    <string name="settings_item_show_donation_title">Show support message</string>
-    <string name="settings_item_show_donation_desc">Bring back the Ko-fi message you dismissed</string>
-    <string name="source_code_protocol">WFAS v2 Protocol</string>
-    <string name="source_code_protocol_desc">Reference C99 implementation on GitHub</string>
     <string name="welcome_eyebrow">Audio streaming over WiFi</string>
     <string name="welcome_headline">Your phone,\nyour speaker.</string>
     <string name="welcome_body">Send audio from your PC to this device, or the other way round. Low latency, over your own network, nothing in the cloud.</string>
@@ -827,6 +824,7 @@
     <string name="shizuku_error_bind_service">Cannot bind Shizuku UserService: %1$s</string>
     <string name="shizuku_error_remote_call">Shizuku UserService call failed: %1$s</string>
     <string name="shizuku_error_bridge_start">Shizuku bridge start failed: %1$s</string>
+    <string name="shizuku_sender_failure_toast">Sending failed. Open AudioBridge for details.</string>
     <string name="shizuku_bridge_active">Shizuku audio bridge active</string>
 
     <string name="playback_volume_card_title">Playback volume</string>
@@ -837,4 +835,33 @@
 
     <string name="playback_volume_hint">Controls playback volume on this device without changing the sender.</string>
     <string name="volume_overlay_permission_needed">Allow “Display over other apps” once; then the volume slider can open without pausing the current video.</string>
+    <string name="diagnostics_export_title">Export diagnostics</string>
+    <string name="diagnostics_export_desc">Save recent connection and audio health logs. No audio recordings or authentication keys are included.</string>
+    <string name="diagnostics_export_working">Saving diagnostics…</string>
+    <string name="diagnostics_export_success">Diagnostics saved</string>
+    <string name="diagnostics_export_failed">Could not save diagnostics. Check the destination and try again.</string>
+    <string name="auto_connect_unavailable">Automatic discovery paused by the system. Open the app to resume.</string>
+    <string name="source_list_title">Receiving sources</string>
+    <string name="source_playback_error">Playback could not recover. Reconnect this source; diagnostics have been saved.</string>
+    <string name="source_audio_focus_wait">Connected · waiting for audio focus</string>
+    <string name="source_start_error">Source could not start. Check settings and reconnect; diagnostics have been saved.</string>
+    <string name="source_notification_permission">Allow notifications to keep receiving in the background</string>
+    <string name="source_credential_error">Connected, but the key could not be saved securely. It may be needed again after restart.</string>
+    <string name="source_invalid_address">Enter a valid IP address and optional port</string>
+    <string name="source_probe_failed">Could not verify the sender. Check its address, network and sending state.</string>
+    <string name="source_summary">%1$d / %2$d sources connected</string>
+    <string name="source_wait_network">Waiting for network</string>
+    <string name="source_connected_silent">Connected · waiting for audio</string>
+    <string name="source_capacity">Up to %1$d sources can be received together</string>
+    <string name="source_transport_error">Connection error (%1$s)</string>
+    <string name="source_storage_error">Could not read or save receiver sources. Reconnect your sources to repair the saved configuration.</string>
+    <string name="source_foreground_denied">Open the app to start receiving</string>
+    <string name="source_mute">Mute this source</string>
+    <string name="source_volume">Source volume</string>
+    <string name="source_adaptive">Adaptive buffer</string>
+    <string name="source_manual_latency">Manual buffer (20–400 ms)</string>
+    <string name="source_buffer_status">Target %1$d ms · queued %2$d ms</string>
+    <string name="source_retry">Reconnect</string>
+    <string name="source_remove">Disconnect</string>
+    <string name="source_add_hint">Connect another device below to mix its audio. Microphone return is assigned to the first eligible source.</string>
 </resources>

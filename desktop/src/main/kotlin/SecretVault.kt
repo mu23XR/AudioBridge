@@ -36,7 +36,7 @@ import java.util.concurrent.TimeUnit
  */
 object SecretVault {
 
-    const val SERVICE = "WiFiAudioStreaming"
+    val SERVICE: String = if (BuildIdentity.preview) "AudioBridgeTest" else "WiFiAudioStreaming"
 
     interface Backend {
         val label: String

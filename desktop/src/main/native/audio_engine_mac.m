@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -17,7 +17,7 @@
  * --------------------------------------------------------------------------
  * audio_engine_mac.m
  *
- * macOS implementation of the audio capture engine for WiFi Audio Streaming.
+ * macOS implementation of the audio capture engine for AudioBridge.
  * Uses ScreenCaptureKit (available from macOS 12.3+) to capture system audio
  * without installing virtual drivers like BlackHole.
  *

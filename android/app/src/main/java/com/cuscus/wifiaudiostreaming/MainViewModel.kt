@@ -122,10 +122,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearProtocolMismatch() = NetworkManager.clearProtocolMismatch()
 
-    val unresponsiveServer: StateFlow<String?> = NetworkManager.unresponsiveServer
-
-    fun clearUnresponsiveServer() = NetworkManager.clearUnresponsiveServer()
-
     private val _updateBanner = MutableStateFlow<UpdateChecker.Result.Available?>(null)
     val updateBanner: StateFlow<UpdateChecker.Result.Available?> = _updateBanner.asStateFlow()
 
@@ -342,6 +338,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setAdvancedAudio(latencyMs: Int, maxPayloadBytes: Int) {
         viewModelScope.launch {
             settingsDataStore.saveAdvancedAudio(latencyMs, maxPayloadBytes)
+        }
+    }
+
+    fun setAdaptiveLatency(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsDataStore.saveAdaptiveLatency(enabled)
         }
     }
 
@@ -733,7 +735,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // A manual connect expresses a persistent user intent. The process-wide
     // controller owns reconnects; recreating this ViewModel must not cancel them.
-    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startClient(serverInfo: ServerInfo, presharedKey: String? = null) {
         RoleSelectionGate.selectReceiver()
         ClientSessionController.connect(
@@ -746,18 +747,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @SuppressLint("MissingPermission")
     fun startClientManually(rawIp: String) {
         val currentSettings = appSettings.value ?: return
-        val ip = NetAddr.normalize(rawIp)
-        if (ip.isBlank()) return
+        val endpoint = try { ManualEndpoint.parse(rawIp, currentSettings.streamingPort) }
+        catch (_: IllegalArgumentException) {
+            updateStatus(getApplication<Application>().getString(R.string.source_invalid_address))
+            return
+        }
+        val ip = endpoint.host
 
         viewModelScope.launch {
             updateStatus("Detecting mode for ${NetAddr.display(ip)}...")
-            val port = currentSettings.streamingPort
+            val port = endpoint.port
 
-            val knownServer = resolveFromDiscovery(ip, 2500)
+            val knownServer = resolveFromDiscovery(ip, 2500)?.takeIf { !endpoint.explicitPort || it.port == port }
 
-            val isMulti = knownServer?.isMulticast ?: NetworkManager.probeIsMulticast(ip, port)
+            val isMulti = knownServer?.isMulticast ?: NetworkManager.probeIsMulticast(ip, port,
+                getApplication<Application>(), currentSettings.networkInterface)
+            if (isMulti == null) {
+                updateStatus(getApplication<Application>().getString(R.string.source_probe_failed))
+                return@launch
+            }
 
-            val manualServerInfo = knownServer?.copy(port = port, isMulticast = isMulti)
+            val manualServerInfo = knownServer?.copy(port = if (endpoint.explicitPort) port else knownServer.port, isMulticast = isMulti)
                 ?: ServerInfo(ip = ip, isMulticast = isMulti, port = port)
             startClient(manualServerInfo)
         }

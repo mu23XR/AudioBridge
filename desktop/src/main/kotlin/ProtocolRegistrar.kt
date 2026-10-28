@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -22,9 +22,7 @@ object PendingDeepLink {
     }
 
     fun looksLikePairing(arg: String): Boolean =
-        arg.startsWith("${WfasPairingUri.SCHEME}://", ignoreCase = true) ||
-            arg.startsWith("https://${WfasPairingUri.APPLINK_HOST}${WfasPairingUri.APPLINK_PATH}", ignoreCase = true) ||
-            arg.startsWith("https://${WfasPairingUri.APPLINK_HOST}${WfasPairingUri.APPLINK_PATH_IT}", ignoreCase = true)
+        arg.startsWith("${WfasPairingUri.SCHEME}://", ignoreCase = true)
 }
 
 object ProtocolRegistrar {
@@ -48,7 +46,7 @@ object ProtocolRegistrar {
     private fun desktopFile(): File =
         File(
             System.getProperty("user.home"),
-            ".local/share/applications/wifi-audio-streaming-url.desktop"
+            ".local/share/applications/audiobridge-url.desktop"
         )
 
     private fun queryDefault(key: String): String? = runCatching {
@@ -84,6 +82,7 @@ object ProtocolRegistrar {
      * dell'utente accorgersene.
      */
     fun ensureRegistered(): Boolean {
+        if (BuildIdentity.preview) return false
         if (isMac) return true
         val exe = launcherPath() ?: return false
         val current = registeredCommand()
@@ -95,8 +94,9 @@ object ProtocolRegistrar {
     }
 
     fun register(): Result<Unit> = runCatching {
+        check(!BuildIdentity.preview) { "Preview builds do not replace the Stable URL handler" }
         val exe = launcherPath()
-            ?: error("cannot locate the WiFi Audio Streaming executable")
+            ?: error("cannot locate the AudioBridge executable")
         when {
             isWindows -> registerWindows(exe)
             isLinux -> registerLinux(exe)
@@ -144,7 +144,7 @@ object ProtocolRegistrar {
             """
             [Desktop Entry]
             Type=Application
-            Name=WiFi Audio Streaming
+            Name=AudioBridge
             Exec="$exe" %u
             Terminal=false
             NoDisplay=true

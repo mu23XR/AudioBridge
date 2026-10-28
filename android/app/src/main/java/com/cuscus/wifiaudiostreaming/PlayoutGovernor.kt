@@ -12,100 +12,311 @@
 package com.cuscus.wifiaudiostreaming
 
 import android.media.AudioTrack
+import android.os.Build
+import android.os.SystemClock
 import android.util.Log
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 
-class PlayoutGovernor(
-    private val track: AudioTrack,
+class PlayoutGovernor internal constructor(
+    private val track: Output,
     private val sampleRate: Int,
     private val frameSize: Int,
     targetLatencyMs: Int,
-    private val tag: String = "PLAYOUT"
+    private val tag: String,
+    private val nowMs: () -> Long,
+    private val warn: (String) -> Unit,
+    val adaptive: Boolean = false,
+    private val onDiscontinuity: () -> Unit = {}
 ) {
+    internal interface Output {
+        val playbackHeadPosition: Int
+        val underruns: Int get() = 0
+        val restartPrerollFrames: Int get() = 0
+        fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int): Int
+        fun pause()
+        fun flush()
+        fun play()
+        fun setPlaybackRate(rate: Int): Int
+    }
+
+    constructor(track: AudioTrack, sampleRate: Int, frameSize: Int,
+                targetLatencyMs: Int, tag: String = "PLAYOUT",
+                adaptive: Boolean = false,
+                onDiscontinuity: () -> Unit = {}) : this(
+        object : Output {
+            override val playbackHeadPosition get() = track.playbackHeadPosition
+            override val underruns get() = track.underrunCount
+            override val restartPrerollFrames get() =
+                if (Build.VERSION.SDK_INT >= 31) track.startThresholdInFrames else track.bufferSizeInFrames
+            override fun write(pcm: ByteArray, offset: Int, length: Int, mode: Int) =
+                track.write(pcm, offset, length, mode)
+            override fun pause() = track.pause()
+            override fun flush() = track.flush()
+            override fun play() = track.play()
+            override fun setPlaybackRate(rate: Int) = track.setPlaybackRate(rate)
+        }, sampleRate, frameSize, targetLatencyMs, tag,
+        { SystemClock.elapsedRealtime() }, { Log.w(tag, it) }, adaptive, onDiscontinuity
+    )
     private val framesPerMs = (sampleRate / 1000.0).coerceAtLeast(1.0)
 
-    private val targetFrames = (targetLatencyMs * framesPerMs).toLong().coerceAtLeast((20 * framesPerMs).toLong())
-    private val highFrames = targetFrames + (targetFrames / 2).coerceAtLeast((60 * framesPerMs).toLong())
-    private val panicFrames = targetFrames + (400 * framesPerMs).toLong()
+    // Adaptive mode owns a floor-to-ceiling target band that the receiver
+    // watchdog drives from underrun telemetry; fixed mode pins one target.
+    private val targetFloorMs: Int = if (adaptive) 20 else maxOf(15, targetLatencyMs)
+    private val targetCeilingMs: Int = if (adaptive) 80 else maxOf(15, targetLatencyMs)
+    private var currentTargetMs: Int = targetLatencyMs.coerceIn(targetFloorMs, targetCeilingMs)
+    private var targetFrames: Long = (currentTargetMs * framesPerMs).toLong()
+    private var highFrames: Long = targetFrames + (targetFrames / 2).coerceAtLeast((30 * framesPerMs).toLong())
+    private var panicFrames: Long = targetFrames + (180 * framesPerMs).toLong()
+
+    @Synchronized fun targetMs(): Int = currentTargetMs
+
+    /**
+     * Shift the playout target by [deltaMs] inside the allowed band. Returns
+     * true when the target actually moved (the caller logs and timestamps
+     * it). Fixed-mode governors have floor == ceiling and never move.
+     */
+    @Synchronized fun retargetMs(deltaMs: Int): Boolean {
+        val next = (currentTargetMs + deltaMs).coerceIn(targetFloorMs, targetCeilingMs)
+        if (next == currentTargetMs) return false
+        currentTargetMs = next
+        RuntimeDiagnostics.event("PLAYOUT_TARGET", "output=$tag targetMs=$next adaptive=$adaptive")
+        targetFrames = (currentTargetMs * framesPerMs).toLong()
+        highFrames = targetFrames + (targetFrames / 2).coerceAtLeast((30 * framesPerMs).toLong())
+        panicFrames = targetFrames + (180 * framesPerMs).toLong()
+        return true
+    }
 
     // Uno scarto ogni tanto e' impercettibile, una raffica no: la correzione fine la
     // fa il playback rate, il drop interviene solo se l'arretrato resta alto.
-    private val minDropIntervalMs = 250L
+    private val minDropIntervalMs = 80L
 
     private var framesWritten = 0L
     private var lastHeadRaw = 0
     private var headWraps = 0L
     private var baseHead = -1L
+    private var completedEpochPlayedFrames = 0L
+    private var maximumEpochPlayedFrames = 0L
+    private var discardedNativeFrames = 0L
+    private var localRecoveries = 0L
+    private var outputResets = 0L
 
     private var currentRate = sampleRate
     private var avgBufferedFrames = targetFrames.toDouble()
     private var lastResyncAt = 0L
     private var lastDropAt = 0L
     private var lastLogAt = 0L
+    private var lastProgressHead = -1L
+    private var lastProgressAt = nowMs()
+    private var lastWriteAt = nowMs()
+    private var failedLocalRecoveries = 0
+    private var shortWrites = 0L
+    private var droppedPackets = 0L
+    private var resyncs = 0L
+    private var lastDiagnosticAt = nowMs()
+    private var lastRateDiagnosticAt: Long? = null
+
+    @Synchronized fun recoveryFailures(): Int = failedLocalRecoveries
+
+    @Synchronized fun playbackRateHz(): Int = currentRate
+
+    /** Observed playback progress across flushes; submitted or discarded PCM never counts. */
+    @Synchronized fun totalPlayedFrames(): Long {
+        playedFrames()
+        return completedEpochPlayedFrames + maximumEpochPlayedFrames
+    }
+
+    @Synchronized fun nativeDiscardedFrames(): Long = discardedNativeFrames
+
+    @Synchronized fun localRecoveryCount(): Long = localRecoveries
+
+    @Synchronized fun resetCount(): Long = outputResets
+
+    /** Never let a paused/full AudioTrack block the UDP receive and PONG loop. */
+    @Synchronized fun writePcm(pcm: ByteArray, offset: Int, length: Int,
+                               recoverStall: Boolean = true,
+                               beforeWrite: (() -> Unit)? = null): Int {
+        val now = nowMs()
+        if (now - lastWriteAt > 3000) failedLocalRecoveries = 0
+        lastWriteAt = now
+        if (recoverStall) recoverStalledOutput()
+        // A local flush can restart the caller's fade. Prepare PCM only after
+        // that recovery so this very first write crosses the boundary softly.
+        beforeWrite?.invoke()
+        val written = track.write(pcm, offset, length, AudioTrack.WRITE_NON_BLOCKING)
+        check(written >= 0) { "AudioTrack.write failed: $written" }
+        check(written <= length && written % frameSize == 0) { "AudioTrack.write returned an incomplete frame: $written" }
+        noteWritten(written)
+        // The bounded PCM FIFO retains a short-write tail. Only accepted frames
+        // enter device-buffer accounting; a short write is no longer audio loss.
+        if (written < length) shortWrites++
+        if (written < length && now - lastLogAt > 1000L) {
+            lastLogAt = now
+            warn("[PLAYOUT] buffer full: accepted=$written pending=${length - written}")
+        }
+        return written
+    }
+
+    /** May run even when normal write admission is full; call only for pending real PCM. */
+    @Synchronized fun recoverStalledOutput(): Boolean {
+        val head = playedFrames()
+        val now = nowMs()
+        if (lastProgressHead >= 0 && head > lastProgressHead) failedLocalRecoveries = 0
+        // Reuse this observation: another native head query adds work without
+        // making the progress/queued-state decision internally more consistent.
+        if (head != lastProgressHead || framesWritten <= head) {
+            lastProgressHead = head
+            lastProgressAt = now
+        } else if (now - lastProgressAt >= 500L) {
+            // OEM power management may pause a media track without changing its
+            // public playState. Recover only when new PCM needs to be played.
+            val discarded = pauseAndFlush()
+            localRecoveries++
+            failedLocalRecoveries++
+            primeForRestart()
+            track.play()
+            lastProgressAt = now
+            warn("[PLAYOUT] stalled track recovered; stale PCM flushed")
+            RuntimeDiagnostics.event("PLAYOUT_LOCAL_RECOVERY", "output=$tag failures=$failedLocalRecoveries count=$localRecoveries discardedFrames=$discarded totalDiscardedFrames=$discardedNativeFrames totalPlayedFrames=${totalPlayedFrames()}")
+            return true
+        }
+        return false
+    }
+
+    private fun primeForRestart() {
+        // A flush erases startup priming. Legacy tracks can require their full
+        // capacity; modern tracks expose the actual (possibly restored) threshold.
+        // This is exceptional restart work, never a recurring queue allowance.
+        val count = Math.multiplyExact(track.restartPrerollFrames, frameSize)
+        playedFrames() //Establish the post-flush origin before play can advance it.
+        if (count == 0) return
+        check(count > 0) { "Invalid restart preroll: $count" }
+        val written = track.write(ByteArray(count), 0, count, AudioTrack.WRITE_NON_BLOCKING)
+        check(written == count) { "AudioTrack restart priming failed: $written/$count" }
+        noteWritten(written)
+        RuntimeDiagnostics.event("PLAYOUT_RESTART_PRIME", "output=$tag frames=${count / frameSize}")
+    }
 
     private fun playedFrames(): Long {
         val raw = track.playbackHeadPosition
-        if (raw < lastHeadRaw && lastHeadRaw - raw > Int.MAX_VALUE / 2) headWraps++
+        val unsigned = raw.toLong() and 0xffffffffL
+        val previous = lastHeadRaw.toLong() and 0xffffffffL
+        if (unsigned < previous && previous - unsigned > 0x80000000L) headWraps++
         lastHeadRaw = raw
-        val abs = (raw.toLong() and 0xFFFFFFFFL) + (headWraps shl 32)
+        val abs = unsigned + (headWraps shl 32)
         if (baseHead < 0L) baseHead = abs
-        return abs - baseHead
+        val epochFrames = abs - baseHead
+        maximumEpochPlayedFrames = maxOf(maximumEpochPlayedFrames, epochFrames)
+        return epochFrames
     }
 
-    fun bufferedFrames(): Long = (framesWritten - playedFrames()).coerceAtLeast(0L)
+    @Synchronized fun bufferedFrames(): Long = (framesWritten - playedFrames()).coerceAtLeast(0L)
 
-    fun bufferedMs(): Int = (bufferedFrames() / framesPerMs).toInt()
+    @Synchronized fun bufferedMs(): Int = (bufferedFrames() / framesPerMs).toInt()
 
-    fun noteWritten(bytes: Int) {
+    /**
+     * Milliseconds since the playback head last advanced while PCM is still
+     * queued. Returns 0 whenever the queue is empty (a silent sender draining
+     * the buffer is healthy, not stalled), so only a wedged OEM track that
+     * refuses to consume queued PCM keeps this growing.
+     */
+    @Synchronized fun stalledForMs(): Long {
+        val head = playedFrames()
+        if (lastProgressHead >= 0 && head > lastProgressHead) {
+            failedLocalRecoveries = 0
+            lastProgressHead = head
+            lastProgressAt = nowMs()
+        }
+        return if (bufferedFrames() > 0) nowMs() - lastProgressAt else 0L
+    }
+
+    @Synchronized fun noteWritten(bytes: Int) {
         if (bytes > 0 && frameSize > 0) framesWritten += bytes / frameSize
     }
 
-    fun noteReset() {
-        framesWritten = playedFrames()
+    @Synchronized fun noteReset() {
+        // flush() resets the playback head; establish a fresh accounting origin.
+        // The caller samples after pause and before flush so the final progress
+        // is preserved without pretending the remaining native buffer played.
+        completedEpochPlayedFrames += maximumEpochPlayedFrames
+        maximumEpochPlayedFrames = 0L
+        outputResets++
+        lastHeadRaw = 0
+        headWraps = 0L
+        baseHead = -1L
+        framesWritten = 0L
+        lastProgressHead = -1L
+        lastProgressAt = nowMs()
         avgBufferedFrames = targetFrames.toDouble()
+        onDiscontinuity()
     }
 
-    fun shouldDrop(incomingBytes: Int): Boolean {
+    private fun pauseAndFlush(): Long {
+        track.pause()
+        val discarded = bufferedFrames()
+        track.flush()
+        discardedNativeFrames += discarded
+        noteReset()
+        return discarded
+    }
+
+    @Synchronized fun shouldDrop(incomingBytes: Int): Boolean {
         if (frameSize <= 0 || incomingBytes <= 0) return false
         val incoming = incomingBytes / frameSize
-        if (avgBufferedFrames + incoming <= highFrames) return false
         if (bufferedFrames() + incoming <= highFrames) return false
-        val now = System.currentTimeMillis()
+        val now = nowMs()
         if (now - lastDropAt < minDropIntervalMs) return false
         lastDropAt = now
+        droppedPackets++
         // L'arretrato scartato va tolto subito dalla media, altrimenti la media
         // resta alta e comanda altri scarti che non servono piu'.
         avgBufferedFrames = (avgBufferedFrames - incoming).coerceAtLeast(0.0)
         return true
     }
 
-    fun hardResyncIfNeeded(): Boolean {
+    @Synchronized fun hardResyncIfNeeded(): Boolean {
         val buffered = bufferedFrames()
         if (buffered <= panicFrames || avgBufferedFrames <= panicFrames) return false
-        val now = System.currentTimeMillis()
+        val now = nowMs()
         if (now - lastResyncAt < 5000L) return false
         lastResyncAt = now
-        runCatching {
-            track.pause()
-            track.flush()
-            track.play()
-        }
-        noteReset()
-        Log.w(tag, "[PLAYOUT] resync: buffered ${(buffered / framesPerMs).toInt()}ms over budget, buffer flushed")
+        val discarded = pauseAndFlush()
+        primeForRestart()
+        track.play()
+        resyncs++
+        RuntimeDiagnostics.event("PLAYOUT_RESYNC", "output=$tag bufferedMs=${(buffered / framesPerMs).toInt()} count=$resyncs discardedFrames=$discarded totalDiscardedFrames=$discardedNativeFrames totalPlayedFrames=${totalPlayedFrames()}")
+        warn("[PLAYOUT] resync: buffered ${(buffered / framesPerMs).toInt()}ms over budget, buffer flushed")
         return true
     }
 
-    fun retune() {
+    @Synchronized fun retune(activeInput: Boolean = true) {
         val buffered = bufferedFrames().toDouble()
-        avgBufferedFrames = avgBufferedFrames * 0.9 + buffered * 0.1
+        // A deliberate idle interval is not a slow sender clock. Preserve a
+        // neutral baseline so resuming audio does not inherit a low-pitch rate.
+        avgBufferedFrames = if (activeInput) avgBufferedFrames * 0.9 + buffered * 0.1 else targetFrames.toDouble()
         val errFrames = avgBufferedFrames - targetFrames
         val errRatio = errFrames / targetFrames.toDouble()
-        val factor = (1.0 + errRatio * 0.05).coerceIn(0.995, 1.005)
-        val newRate = (sampleRate * factor).toInt().coerceAtLeast(1)
+        val factor = (1.0 + errRatio * 0.08).coerceIn(0.992, 1.008)
+        val desiredRate = (sampleRate * factor).toInt().coerceAtLeast(1)
+        val newRate = if (activeInput) currentRate + (desiredRate - currentRate).coerceIn(-12, 12) else sampleRate
         if (kotlin.math.abs(newRate - currentRate) >= 4) {
-            runCatching { track.setPlaybackRate(newRate) }
-            currentRate = newRate
+            val result = track.setPlaybackRate(newRate)
+            if (result == AudioTrack.SUCCESS) currentRate = newRate
+            else if (nowMs() - lastLogAt > 1000L) {
+                lastLogAt = nowMs()
+                warn("[PLAYOUT] rate adjustment rejected: code=$result requested=$newRate actual=$currentRate")
+            }
+            val now = nowMs()
+            if (lastRateDiagnosticAt?.let { now - it >= 10_000 } != false) {
+                lastRateDiagnosticAt = now
+                RuntimeDiagnostics.event("PLAYOUT_RATE", "output=$tag code=$result requested=$newRate acceptedRate=$currentRate")
+            }
         }
-        val now = System.currentTimeMillis()
+        val now = nowMs()
+        val monotonicNow = nowMs()
+        if (monotonicNow - lastDiagnosticAt >= 10_000L) {
+            lastDiagnosticAt = monotonicNow
+            RuntimeDiagnostics.event("PLAYOUT_STATS", "output=$tag bufferedMs=${(buffered / framesPerMs).toInt()} targetMs=$currentTargetMs rate=$currentRate underruns=${track.underruns} writtenFrames=$framesWritten head=${playedFrames()} totalPlayedFrames=${totalPlayedFrames()} nativeDiscardedFrames=$discardedNativeFrames resets=$outputResets shortWrites=$shortWrites droppedPackets=$droppedPackets resyncs=$resyncs localRecoveries=$localRecoveries recoveryFailures=$failedLocalRecoveries")
+        }
         if (now - lastLogAt > 10_000L) {
             lastLogAt = now
             Log.d(tag, "[PLAYOUT] buffered=${(buffered / framesPerMs).toInt()}ms target=${(targetFrames / framesPerMs).toInt()}ms rate=$newRate")
