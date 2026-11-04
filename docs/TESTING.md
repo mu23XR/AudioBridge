@@ -139,6 +139,21 @@ sign/build APKs or establish acoustic quality.
 
 ### 2.0.1 follow-up regressions
 
+ReceiverPlaybackWorkerTest exercises the production owned-worker entry points:
+one thread across suspension, concurrent first start, idempotent stop retaining
+the first cleanup, independent release of blocked native work, stop deadlines,
+no-input stop, natural/init/finally failures, late registration, source isolation
+and repeated shutdown without surviving threads. Any unconfirmed release,
+including an unexpected cleanup cancellation, must be reported and cannot make
+awaitStopped return true merely because its tasks completed. Ordinary playback
+cancellation remains successful when resources actually terminate. No native
+operation may be protected by the start/stop ownership lock.
+
+ReceiverPlayout logs the owned thread once in SOURCE_OUTPUT_READY. Fresh native
+evidence must verify the actual wfas-playout thread alongside the unchanged
+audio-path, twelve-method and queue/progress/loss gates. Pure lifecycle tests
+alone do not establish stutter or resume-loss acceptance.
+
 DesktopAudioInitializationChecks holds the initialization-accounting callback
 with a latch: an open failure must not escape while that owner remains active.
 Successful delivery retains its original ordering; timeout/late-close, callback

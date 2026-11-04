@@ -32,9 +32,10 @@ internal class ReceiverPlayout(
     private val backlog = ReceiverBacklogPolicy(format.sampleRate, frame)
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val pendingConfiguration = java.util.concurrent.atomic.AtomicReference<Pair<Boolean, Int>?>(null)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var worker: Job? = null
-    private var releaseJob: Job? = null
+    private val worker = ReceiverPlaybackWorker("wfas-playout-$id", onFailure = { failure ->
+        RuntimeDiagnostics.event("SOURCE_OUTPUT_WORKER_FAILED", "source=$id ${failure.message}", true)
+        if (!stopped) onFailure("PLAYBACK_FAILURE ${failure.message}")
+    })
     private val busyAt = AtomicLong(-1)
     @Volatile private var phase = "WAIT_PCM"
     @Volatile private var stopped = false
@@ -56,15 +57,15 @@ internal class ReceiverPlayout(
 
     internal fun snapshot(): Snapshot = latestSnapshot
 
-    fun offer(pcm: ByteArray) {
+    @Synchronized fun offer(pcm: ByteArray) {
         if (stopped || pcm.isEmpty()) return
         input.pcm(SystemClock.elapsedRealtime())
         silenceTail.remember(pcm)
         fifo.offer(pcm)
-        if (worker == null) worker = scope.launch { runPlayer() }
+        worker.start { runPlayer() }
         wake.trySend(Unit)
     }
-    fun noteSilence() {
+    @Synchronized fun noteSilence() {
         if (stopped) return
         input.silence()
         silenceTail.begin()?.let { fifo.offer(it) }
@@ -111,6 +112,7 @@ internal class ReceiverPlayout(
         val result = builder.build()
         track = result // Cleanup can find a candidate even if later setup fails.
         ReceiverMixer.register(id, result)
+        worker.finishRegistration { ReceiverMixer.unregister(id, result) }
         val governor = PlayoutGovernor(result, format.sampleRate, frame, target,
             "WFAS_SOURCE_$id", adaptive, onDiscontinuity = ramp::restart)
         // Normal/resampled tracks may wait for their entire capacity before
@@ -125,7 +127,7 @@ internal class ReceiverPlayout(
         }
         result.play()
         outputEpoch++
-        RuntimeDiagnostics.event("SOURCE_OUTPUT_READY", "source=$id ${format.describe()} targetMs=$target startFrames=$startFrames capacityFrames=${result.bufferCapacityInFrames} minBytes=$min rateHz=${result.playbackRate} performanceMode=${if (Build.VERSION.SDK_INT >= 26) result.performanceMode else -1}")
+        RuntimeDiagnostics.event("SOURCE_OUTPUT_READY", "source=$id ${format.describe()} targetMs=$target startFrames=$startFrames capacityFrames=${result.bufferCapacityInFrames} minBytes=$min rateHz=${result.playbackRate} performanceMode=${if (Build.VERSION.SDK_INT >= 26) result.performanceMode else -1} thread=${Thread.currentThread().name}")
         result to governor
     }
 
@@ -296,15 +298,14 @@ internal class ReceiverPlayout(
         }
     }
 
-    fun stop() {
-        stopped = true; fifo.clear(); scope.cancel()
+    @Synchronized fun stop() {
+        if (stopped) return
+        stopped = true; fifo.clear()
         // pause/release from a different worker can interrupt a blocked write.
         // Track ownership is transferred atomically so it is released once.
-        releaseJob = CoroutineScope(Dispatchers.IO).launch { releaseOutput() }
+        worker.stop { releaseOutput() }
     }
-    suspend fun awaitStopped(): Boolean = withTimeoutOrNull(1500) {
-        worker?.join(); releaseJob?.join(); true
-    } ?: false
+    suspend fun awaitStopped(): Boolean = worker.awaitStopped()
 
     internal companion object {
         /**
