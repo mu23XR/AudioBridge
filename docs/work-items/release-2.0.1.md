@@ -1,6 +1,6 @@
 # Release 2.0.1 — Android and Windows
 
-Status: Android repair under validation; stable publication pending.
+Status: diagnostic candidate accepted; final stable build/publication pending.
 
 Tracking: [Release #74](https://github.com/mu23XR/AudioBridge/issues/74), Draft PR #75; Android #51/#77, Windows #76.
 
@@ -25,3 +25,7 @@ Independent source review is complete. Focused67 and full173 Android JVM methods
 3. Enable stable publication only after acceptance. Rebuild both final platforms from one exact source; verify actual package/version/signer, unified provenance and checksums, and all nine public downloads before marking stable/latest.
 
 Existing installed applications and historical Releases are preserved. This public work item omits internal workspace history; detailed records remain locally available.
+
+Accepted diagnostic candidate:953c13b3d35d829211ae8a13334925f1047403e3. All six workflows pass. Both independently downloaded native artifacts establish12/12 methods, zero skips, active audio and actual owned playback threads; adaptive resume loss0/1.29ms and35s-silence resume loss0 meet the unchanged limits. Windows checks and actual package identity pass. These results do not establish zero loss or overnight acceptance.
+
+The originally authorized stable request is enabled after this acceptance. Product trees stay identical to953c13b; the final source must rebuild both platforms, pass all gates and verify all nine public assets before stable/latest completion is claimed. Candidate binaries must not be relabeled as final assets.
