@@ -50,8 +50,20 @@
     <string name="settings_group_performance">性能</string>
     <string name="settings_item_buffer_size_title">缓冲区大小</string>
     <string name="settings_item_buffer_size_desc">缓冲越小延迟越低，但更容易出现断音</string>
-    <string name="settings_item_latency_title">延迟</string>
-    <string name="settings_item_latency_desc">播放缓冲深度。越高越稳定，但延迟也越大。</string>
+    <string name="settings_item_latency_title">播放缓冲（接收端）</string>
+    <string name="settings_item_latency_desc">接收端播放缓冲目标。仅在本机作为接收端时生效，不会同步到发送端。越高越稳定，延迟也越大。</string>
+    <string name="settings_latency_preset_title">接收端延迟模式</string>
+    <string name="settings_latency_preset_desc">可选自适应（20–80 ms）或手动设置任意数值；重新连接后生效。</string>
+    <string name="settings_latency_manual">手动</string>
+    <string name="settings_latency_preset_adaptive">自适应（20–80 ms）</string>
+    <string name="settings_latency_preset_fast">极速（20 ms）</string>
+    <string name="settings_latency_preset_balanced">均衡（40 ms）</string>
+    <string name="settings_latency_preset_steady">稳定（60 ms）</string>
+    <string name="settings_latency_preset_custom_fmt">自定义：%1$d ms</string>
+    <string name="settings_latency_adaptive_hint">（自适应已开启，手动调整将改为固定值）</string>
+    <string name="settings_latency_edit_hint">数值，单位 ms（20–400）</string>
+    <string name="settings_latency_edit_invalid">请输入 20–400 之间的整数</string>
+    <string name="ok">确定</string>
     <string name="settings_group_advanced">高级</string>
     <string name="settings_item_packet_size_title">数据包大小</string>
     <string name="settings_item_packet_size_desc">每个网络数据包包含的音频字节数（串流和麦克风）。数值越低，数据包越小，例如适合微控制器。</string>
@@ -87,11 +99,6 @@
     <string name="sec_ask">需要批准</string>
     <string name="mic_sends">发送麦克风</string>
     <string name="mic_wants">接受回传麦克风</string>
-    <string name="donation_title">喜欢 WiFi 音频串流吗？</string>
-    <string name="donation_body">此应用免费且无广告，由开发者利用业余时间独立制作。如果它对你有帮助，可以在 Ko-fi 上小额支持开发。无论是否支持，所有功能都会照常使用。</string>
-    <string name="donation_support">在 Ko-fi 上支持 ☕</string>
-    <string name="donation_later">稍后再说</string>
-    <string name="donation_dismiss_30">30 天内\n不再显示</string>
     <string name="status_idle">空闲</string>
     <string name="status_mic_permission_denied">错误：麦克风权限被拒绝。</string>
     <string name="status_mic_send_error">麦克风发送错误：%1$s</string>
@@ -129,7 +136,6 @@
     <string name="settings_group_about">关于与帮助</string>
     <string name="settings_item_show_intro_title">显示新手介绍</string>
     <string name="settings_item_show_intro_desc">重新查看初始功能介绍</string>
-    <string name="developer_name">开发者</string>
     <string name="notification_permission_title">通知权限</string>
     <string name="notification_permission_description">为了确保应用在后台时仍能持续串流，需要授予通知权限。</string>
     <string name="grant_permission_button">授予权限</string>
@@ -203,10 +209,7 @@
     <string name="save_sdp">保存 SDP</string>
     <string name="sdp_copied">SDP 已复制到剪贴板</string>
     <string name="rtp_description">复制或保存 SDP 文件，然后用 VLC 或 FFplay 收听</string>
-    <string name="support_kofi_title">请我喝杯咖啡</string>
-    <string name="support_kofi_desc">如果你喜欢这个应用，可以请开发者喝杯咖啡！☕</string>
-    <string name="source_code_android">Android 源代码</string>
-    <string name="source_code_desktop">桌面端源代码</string>
+    <string name="source_code_android">AudioBridge 源码</string>
     <string name="source_code_view_on_github">在 GitHub 查看</string>
     <string name="app_version_label">版本</string>
     <string name="settings_group_license">许可证</string>
@@ -346,7 +349,7 @@
     <string name="script_action_set">修改设置</string>
     <string name="close">关闭</string>
     <string name="status_protocol_incompatible">协议版本不兼容</string>
-    <string name="status_server_silent_maybe_outdated">服务器没有响应连接请求。如果它能出现在列表中却始终无法连接，很可能运行的是旧版应用，请在那台设备上更新。</string>
+    <string name="status_server_silent_maybe_outdated">连接超时，请确认另一台设备在线、网络可达，并运行兼容版本的 AudioBridge。</string>
     <string name="status_group_rekeyed">发送端已更改组密钥</string>
     <string name="status_unauthorized">服务器拒绝连接</string>
     <string name="status_awaiting_approval">正在等待另一台设备批准…</string>
@@ -376,8 +379,6 @@
     <string name="key_dialog_wrong">密钥错误，请重试：</string>
     <string name="key_dialog_connect">连接</string>
     <string name="key_dialog_cancel">取消</string>
-    <string name="server_silent_title">另一台设备没有响应</string>
-    <string name="server_silent_body">“%1$s”一直没有响应连接请求。最可能的原因是它运行着旧版应用，无法与当前版本通信——请在那台设备上更新应用。否则请检查防火墙是否阻止了相关端口。</string>
     <string name="protocol_incompatible_title">另一台设备需要更新</string>
     <string name="protocol_incompatible_title_local">本设备需要更新</string>
     <string name="protocol_incompatible_body">两台应用使用了不兼容的 WFAS 协议版本（本设备：v%1$d，另一端：v%2$d），连接已关闭。请更新到最新版本，使两台设备版本一致。</string>
@@ -395,10 +396,6 @@
     <string name="settings_item_haptics_desc">点击、切换和关键操作时振动</string>
     <string name="settings_item_blackout_outlined_title">轮廓黑屏模式</string>
     <string name="settings_item_blackout_outlined_desc">以白色轮廓保留控制按钮，而不是完全黑屏</string>
-    <string name="settings_item_show_donation_title">显示支持提示</string>
-    <string name="settings_item_show_donation_desc">重新显示之前关闭的 Ko-fi 支持提示</string>
-    <string name="source_code_protocol">WFAS v2 协议</string>
-    <string name="source_code_protocol_desc">GitHub 上的 C99 参考实现</string>
     <string name="welcome_eyebrow">通过 WiFi 串流音频</string>
     <string name="welcome_headline">你的手机，\n你的音箱。</string>
     <string name="welcome_body">把电脑声音发送到这台设备，也可以反向传输。低延迟，仅在你自己的网络中传输，不经过云端。</string>
@@ -791,6 +788,7 @@
     <string name="shizuku_error_bind_service">无法连接 Shizuku UserService：%1$s</string>
     <string name="shizuku_error_remote_call">Shizuku UserService 调用失败：%1$s</string>
     <string name="shizuku_error_bridge_start">Shizuku 音频桥启动失败：%1$s</string>
+    <string name="shizuku_sender_failure_toast">发送失败，请打开 AudioBridge 查看原因。</string>
     <string name="shizuku_bridge_active">Shizuku 音频桥正在运行</string>
 
     <string name="playback_volume_card_title">播放音量</string>
@@ -801,4 +799,33 @@
 
     <string name="playback_volume_hint">调节这台设备实际播放出来的音量，不影响发送端。</string>
     <string name="volume_overlay_permission_needed">请允许一次“显示在其他应用上层”，之后音量滑块弹出时不会暂停当前视频。</string>
+    <string name="diagnostics_export_title">导出诊断日志</string>
+    <string name="diagnostics_export_desc">保存近期连接和音频状态记录，不包含音频录音或认证密钥。</string>
+    <string name="diagnostics_export_working">正在保存诊断日志…</string>
+    <string name="diagnostics_export_success">诊断日志已保存</string>
+    <string name="diagnostics_export_failed">无法保存诊断日志，请检查保存位置后重试。</string>
+    <string name="auto_connect_unavailable">系统暂停了自动发现，请打开应用后再试。</string>
+    <string name="source_list_title">接收音源</string>
+    <string name="source_playback_error">播放未能恢复，请重连此音源；诊断记录已保存。</string>
+    <string name="source_audio_focus_wait">已连接 · 等待系统允许播放</string>
+    <string name="source_start_error">音源启动失败，请检查设置后重连；诊断记录已保存。</string>
+    <string name="source_notification_permission">请允许通知，以保持后台接收运行</string>
+    <string name="source_credential_error">当前已连接，但凭证无法安全保存，重启后可能需要重新输入。</string>
+    <string name="source_invalid_address">请输入有效的 IP 地址，可附带端口</string>
+    <string name="source_probe_failed">未能确认发送端，请检查地址、网络和发送状态。</string>
+    <string name="source_summary">已连接 %1$d / %2$d 个音源</string>
+    <string name="source_wait_network">等待网络恢复</string>
+    <string name="source_connected_silent">已连接 · 等待音频</string>
+    <string name="source_capacity">最多可同时接收 %1$d 个音源</string>
+    <string name="source_transport_error">连接错误（%1$s）</string>
+    <string name="source_storage_error">音源配置读取或保存失败，请重新连接音源修复已保存配置。</string>
+    <string name="source_foreground_denied">请打开应用后启动接收</string>
+    <string name="source_mute">静音此音源</string>
+    <string name="source_volume">音源音量</string>
+    <string name="source_adaptive">自适应缓冲</string>
+    <string name="source_manual_latency">手动缓冲（20–400 毫秒）</string>
+    <string name="source_buffer_status">目标 %1$d 毫秒 · 排队 %2$d 毫秒</string>
+    <string name="source_retry">重新连接</string>
+    <string name="source_remove">断开</string>
+    <string name="source_add_hint">在下方连接其他设备，即可同时混合播放。麦克风回传分配给第一个支持回传的音源。</string>
 </resources>

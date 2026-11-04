@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="source_sender_volume">发送音量：%1$s%%</string>
+    <string name="source_sender_volume_pending">等待发送端确认…</string>
+    <string name="source_sender_volume_failed">音量未确认，请在连接恢复后重试。</string>
+    <string name="source_sender_volume_unsupported">此发送端不支持远程音量控制。</string>
+    <string name="source_sender_volume_loading">正在读取发送音量…</string>
+    <string name="source_mix_volume">本机混音音量</string>
+</resources>

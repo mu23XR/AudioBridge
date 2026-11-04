@@ -16,10 +16,12 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="wfas_secrets.xml" />
+        <exclude domain="sharedpref" path="wfas_receiver_credentials.xml" />
         <exclude domain="file" path="datastore/" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="wfas_secrets.xml" />
+        <exclude domain="sharedpref" path="wfas_receiver_credentials.xml" />
         <exclude domain="file" path="datastore/" />
     </device-transfer>
 </data-extraction-rules>

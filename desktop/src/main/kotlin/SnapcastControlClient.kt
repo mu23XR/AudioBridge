@@ -351,7 +351,7 @@ class SnapcastControlClient(
         val json = SnapJson.parse(line) ?: return
 
         // Risposta a Server.GetStatus, oppure notifica Server.OnUpdate.
-        SnapcastControlModel.parseStatus(json)?.let {
+        SnapcastControlModel.parseStatus(json)?.let(::filterVolumeEchoes)?.let {
             current = it
             settle(it)
             publish(SnapControlState.CONNECTED)
@@ -361,8 +361,8 @@ class SnapcastControlClient(
         val method = json.stringAt("method") ?: return
         val updated = SnapcastControlModel.applyNotification(current, method, json.field("params"))
         if (updated != null) {
-            current = updated
-            settle(updated)
+            current = filterVolumeEchoes(updated)
+            settle(current)
             publish(SnapControlState.CONNECTED)
         } else {
             // Notifica che cambia la struttura (client nuovo, gruppo nuovo):
@@ -424,6 +424,29 @@ class SnapcastControlClient(
 
     private val clientIntents = ConcurrentHashMap<String, ClientIntent>()
     private val groupIntents = ConcurrentHashMap<String, GroupIntent>()
+
+    private data class VolumeEcho(
+        val latest: Pair<Int, Boolean>,
+        val superseded: Set<Pair<Int, Boolean>>,
+        val expiresAt: Long
+    )
+    private val volumeEchoes = ConcurrentHashMap<String, VolumeEcho>()
+
+    private fun filterVolumeEchoes(truth: SnapServerStatus): SnapServerStatus {
+        val now = System.currentTimeMillis()
+        volumeEchoes.entries.removeIf { it.value.expiresAt <= now }
+        return truth.copy(groups = truth.groups.map { group ->
+            group.copy(clients = group.clients.map { client ->
+                val echo = volumeEchoes[client.id]
+                val volume = client.volumePercent to client.muted
+                // Notifications have no request ID. Briefly reject only values from
+                // superseded local commands; unrelated remote changes still apply.
+                if (echo != null && volume != echo.latest && volume in echo.superseded)
+                    client.copy(volumePercent = echo.latest.first, muted = echo.latest.second)
+                else client
+            })
+        })
+    }
 
     private fun deadline() = System.currentTimeMillis() + INTENT_TTL_MS
 
@@ -495,6 +518,11 @@ class SnapcastControlClient(
 
     fun setClientVolume(clientId: String, percent: Int, muted: Boolean) = runCatching {
         val p = percent.coerceIn(0, 100)
+        volumeEchoes.compute(clientId) { _, previous ->
+            val old = previous?.takeIf { it.expiresAt > System.currentTimeMillis() }
+            val latest = p to muted
+            VolumeEcho(latest, old?.let { it.superseded + it.latest - latest } ?: emptySet(), deadline())
+        }
         // L'intenzione si registra PRIMA di spedire. Il server puo' rispondere
         // cosi' in fretta che la sua fotografia arriva mentre questo metodo non
         // ha ancora finito: registrandola dopo, quel primo fotogramma vecchio
@@ -559,7 +587,7 @@ class SnapcastControlClient(
         runCatching { socket?.close() }
         job?.cancel()
         job = null
-        clientIntents.clear(); groupIntents.clear()
+        clientIntents.clear(); groupIntents.clear(); volumeEchoes.clear()
         onStatus(SnapControlStatus(SnapControlState.IDLE, host = host, port = port))
     }
 }

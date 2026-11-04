@@ -2,6 +2,16 @@
 
 Unified Android + Desktop low-latency LAN audio streaming project.
 
+## Project status and contribution
+
+- [Open Issues](https://github.com/mu23XR/AudioBridge/issues) are the source of truth for active work.
+- [Android stabilization tracker #6](https://github.com/mu23XR/AudioBridge/issues/6)
+- [Repository governance tracker #7](https://github.com/mu23XR/AudioBridge/issues/7)
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [SECURITY.md](SECURITY.md)
+
+Chat history is supporting context, not the only record of unresolved work.
+
 ## Layout
 
 - `android/` — Android sender/receiver, including the Shizuku system-audio bridge.

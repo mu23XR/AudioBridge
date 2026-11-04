@@ -320,94 +320,6 @@ private fun VersionChip(text: String, container: Color, content: Color) {
 }
 
 @Composable
-fun ExpressiveDonationDialog(
-    onSupport: () -> Unit,
-    onSnooze30: () -> Unit,
-    onLater: () -> Unit
-) {
-    val haptics = rememberAppHaptics()
-    val accent = MaterialTheme.colorScheme.tertiary
-
-    Dialog(onDismissRequest = onLater) {
-        Surface(
-            shape = RoundedCornerShape(36.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-            tonalElevation = 0.dp
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 28.dp, vertical = 32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                DialogShapeBadge(Icons.Outlined.LocalCafe, accent, alert = false)
-
-                Spacer(Modifier.height(24.dp))
-
-                Text(
-                    text = stringResource(R.string.donation_title),
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = (-0.5).sp,
-                    textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                Text(
-                    text = stringResource(R.string.donation_body),
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(Modifier.height(28.dp))
-
-                ExpressiveDialogButton(
-                    label = stringResource(R.string.donation_support),
-                    icon = Icons.Outlined.LocalCafe,
-                    container = accent,
-                    content = MaterialTheme.colorScheme.surfaceContainerLowest,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    haptics.confirm()
-                    onSupport()
-                }
-
-                Spacer(Modifier.height(10.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    ExpressiveDialogButton(
-                        label = stringResource(R.string.donation_dismiss_30),
-                        icon = null,
-                        container = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        content = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        haptics.tap()
-                        onSnooze30()
-                    }
-                    ExpressiveDialogButton(
-                        label = stringResource(R.string.donation_later),
-                        icon = null,
-                        container = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        content = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        haptics.tap()
-                        onLater()
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 fun ExpressiveLongTextDialog(
     icon: ImageVector,
     accent: Color,
@@ -680,14 +592,15 @@ fun ExpressiveAuthRequestDialog(
 @Composable
 fun ExpressiveKeyRequestDialog(
     wrong: Boolean,
+    source: String = "",
     onSubmit: (String) -> Unit,
     onCancel: () -> Unit
 ) {
     val haptics = rememberAppHaptics()
     val accent =
         if (wrong) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-    var keyText by remember { mutableStateOf("") }
-    var keyVisible by remember { mutableStateOf(false) }
+    var keyText by remember(source) { mutableStateOf("") }
+    var keyVisible by remember(source) { mutableStateOf(false) }
 
     val shake = remember { Animatable(0f) }
     LaunchedEffect(wrong) {
@@ -731,7 +644,9 @@ fun ExpressiveKeyRequestDialog(
                 Spacer(Modifier.height(10.dp))
 
                 Text(
-                    text = if (wrong) stringResource(R.string.key_dialog_wrong)
+                    text = if (source.isNotBlank()) source + "\n" +
+                        (if (wrong) stringResource(R.string.key_dialog_wrong) else stringResource(R.string.key_dialog_body))
+                    else if (wrong) stringResource(R.string.key_dialog_wrong)
                     else stringResource(R.string.key_dialog_body),
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,

@@ -15,6 +15,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.annotation.RequiresPermission
 import com.cuscus.wifiaudiostreaming.NetworkManager.updateWidgetState
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,6 +41,22 @@ class AudioCaptureService : Service() {
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (StreamingActionReceiver.wasRecentlyTaskRemoved(this)) {
+            // ACTION_START is delivered through startForegroundService. Even a
+            // command overtaken by task removal must fulfill promotion before
+            // stopping; do not acquire locks, initialize capture or observe it.
+            if (intent?.action == ACTION_START) {
+                try {
+                    startForegroundWithNotification(
+                        intent.getBooleanExtra(EXTRA_STREAM_INTERNAL, false),
+                        intent.getBooleanExtra(EXTRA_STREAM_MIC, false),
+                        observeState = false
+                    )
+                } catch (failure: RuntimeException) {
+                    if (Build.VERSION.SDK_INT < 31 || failure !is android.app.ForegroundServiceStartNotAllowedException) throw failure
+                    RuntimeDiagnostics.event("CAPTURE_FOREGROUND_REJECTED", failure.javaClass.simpleName, true)
+                    NetworkManager.connectionStatus.value = getString(R.string.source_foreground_denied)
+                }
+            }
             stopSelf()
             return START_NOT_STICKY
         }
@@ -209,7 +226,8 @@ class AudioCaptureService : Service() {
     @SuppressLint("MissingPermission")
     private fun startForegroundWithNotification(
         streamInternal: Boolean,
-        streamMic: Boolean
+        streamMic: Boolean,
+        observeState: Boolean = true
     ) {
         NotificationCenter.ensureChannels(this)
 
@@ -232,7 +250,7 @@ class AudioCaptureService : Service() {
             startForeground(NotificationCenter.ID_SERVER, initial)
         }
 
-        if (!observingState.compareAndSet(false, true)) return
+        if (!observeState || !observingState.compareAndSet(false, true)) return
 
         serviceScope.launch {
             combine(

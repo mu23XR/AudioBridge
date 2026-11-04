@@ -1,6 +1,7 @@
 package com.cuscus.wifiaudiostreaming
 
 import android.util.Log
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
@@ -15,6 +16,7 @@ object LinkMetrics {
         val packets: Long = 0,
         val lost: Long = 0,
         val reordered: Long = 0,
+        val duplicates: Long = 0,
         val jitterMs: Double = 0.0,
         val peakJitterMs: Double = 0.0,
         val meanIntervalMs: Double = 0.0
@@ -33,6 +35,18 @@ object LinkMetrics {
 
     private val _snapshot = MutableStateFlow(Snapshot())
     val snapshot: StateFlow<Snapshot> = _snapshot
+
+    /** The receiver host aggregates already-isolated per-source counters. */
+    fun publishSources(sources: List<Snapshot>) {
+        _snapshot.value = Snapshot(
+            transport = sources.firstOrNull()?.transport ?: "-",
+            packets = sources.sumOf { it.packets }, lost = sources.sumOf { it.lost },
+            reordered = sources.sumOf { it.reordered }, duplicates = sources.sumOf { it.duplicates },
+            jitterMs = sources.maxOfOrNull { it.jitterMs } ?: 0.0,
+            peakJitterMs = sources.maxOfOrNull { it.peakJitterMs } ?: 0.0,
+            meanIntervalMs = sources.maxOfOrNull { it.meanIntervalMs } ?: 0.0
+        )
+    }
 
     @Volatile private var enabled = false
     @Volatile private var transport = "-"
@@ -72,6 +86,7 @@ object LinkMetrics {
         enabled = false
         publish()
         Log.i(TAG, "final ${_snapshot.value.format()}")
+        RuntimeDiagnostics.event("NETWORK_FINAL", _snapshot.value.format(), true)
     }
 
     @Synchronized
@@ -125,6 +140,7 @@ object LinkMetrics {
             lastReportMs = nowMs
             publish()
             Log.i(TAG, _snapshot.value.format())
+            RuntimeDiagnostics.event("NETWORK_STATS", _snapshot.value.format())
         }
     }
 

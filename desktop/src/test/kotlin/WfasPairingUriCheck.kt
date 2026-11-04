@@ -72,93 +72,56 @@ fun wfasPairingUriChecks() {
     )
     ok("clock skew tolerated", WfasPairingUri.parse(skewed, NOW) != null)
 
-    val badVersion = "wifiaudio://pair?ip=192.168.1.10&port=50005&mode=unicast&key=$K&exp=${NOW + 120}&v=99"
+    val badVersion = "audiobridge://pair?ip=192.168.1.10&port=50005&mode=unicast&key=$K&exp=${NOW + 120}&v=99"
     ok("unsupported version rejected", WfasPairingUri.parse(badVersion, NOW) == null)
     ok("bad version is not 'expired'", !WfasPairingUri.isExpiredUri(badVersion, NOW))
 
     ok(
         "wrong scheme rejected",
-        WfasPairingUri.parse("wifiaudio2://pair?ip=1.2.3.4&port=1&mode=unicast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
+        WfasPairingUri.parse("otherbridge://pair?ip=1.2.3.4&port=1&mode=unicast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
     )
     ok(
         "wrong host rejected",
-        WfasPairingUri.parse("wifiaudio://connect?ip=1.2.3.4&port=1&mode=unicast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
+        WfasPairingUri.parse("audiobridge://connect?ip=1.2.3.4&port=1&mode=unicast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
     )
     ok(
         "missing key rejected",
-        WfasPairingUri.parse("wifiaudio://pair?ip=1.2.3.4&port=1&mode=unicast&exp=${NOW + 9}&v=2", NOW) == null
+        WfasPairingUri.parse("audiobridge://pair?ip=1.2.3.4&port=1&mode=unicast&exp=${NOW + 9}&v=2", NOW) == null
     )
     ok(
         "missing ip rejected",
-        WfasPairingUri.parse("wifiaudio://pair?port=1&mode=unicast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
+        WfasPairingUri.parse("audiobridge://pair?port=1&mode=unicast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
     )
     ok(
         "missing exp rejected",
-        WfasPairingUri.parse("wifiaudio://pair?ip=1.2.3.4&port=1&mode=unicast&key=$K&v=2", NOW) == null
+        WfasPairingUri.parse("audiobridge://pair?ip=1.2.3.4&port=1&mode=unicast&key=$K&v=2", NOW) == null
     )
     ok(
         "unknown mode rejected",
-        WfasPairingUri.parse("wifiaudio://pair?ip=1.2.3.4&port=1&mode=broadcast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
+        WfasPairingUri.parse("audiobridge://pair?ip=1.2.3.4&port=1&mode=broadcast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
     )
     ok(
         "out of range port rejected",
-        WfasPairingUri.parse("wifiaudio://pair?ip=1.2.3.4&port=70000&mode=unicast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
+        WfasPairingUri.parse("audiobridge://pair?ip=1.2.3.4&port=70000&mode=unicast&key=$K&exp=${NOW + 9}&v=2", NOW) == null
     )
     ok(
         "illegal key charset rejected",
-        WfasPairingUri.parse("wifiaudio://pair?ip=1.2.3.4&port=1&mode=unicast&key=short%2Fkey&exp=${NOW + 9}&v=2", NOW) == null
+        WfasPairingUri.parse("audiobridge://pair?ip=1.2.3.4&port=1&mode=unicast&key=short%2Fkey&exp=${NOW + 9}&v=2", NOW) == null
     )
     ok(
         "garbage rejected",
         WfasPairingUri.parse("not a uri at all", NOW) == null &&
                 WfasPairingUri.parse("", NOW) == null &&
-                WfasPairingUri.parse("wifiaudio://pair", NOW) == null
+                WfasPairingUri.parse("audiobridge://pair", NOW) == null
     )
 
     val appLink = WfasPairingUri.buildAppLink(
         ip = "192.168.1.10", port = 50005, mode = WfasPairingUri.MODE_UNICAST,
         keyBase64 = K, expEpochSeconds = NOW + 120
     )
-    same("https app link parses", WfasPairingUri.parse(appLink, NOW)?.ip, "192.168.1.10")
-    ok("app link puts the fields in the fragment", appLink.contains('#') && !appLink.substringBefore('#').contains('?'))
-    run {
-        val fields = "ip=192.168.1.10&port=50005&mode=unicast&key=$K&exp=${NOW + 120}&v=2"
-        ok(
-            "apex host accepted like www",
-            WfasPairingUri.parse("https://marcomorosi.eu${WfasPairingUri.APPLINK_PATH}#$fields", NOW) != null
-        )
-        ok(
-            "trailing slash accepted",
-            WfasPairingUri.parse("https://www.marcomorosi.eu${WfasPairingUri.APPLINK_PATH}/#$fields", NOW) != null
-        )
-    }
-    ok("app link path carries no secret", !appLink.substringBefore('#').contains(K))
-    ok(
-        "legacy query-string app link still parses",
-        WfasPairingUri.parse(
-            "https://${WfasPairingUri.APPLINK_HOST}${WfasPairingUri.APPLINK_PATH}" +
-                "?ip=192.168.1.10&port=50005&mode=unicast&key=$K&exp=${NOW + 120}&v=2",
-            NOW
-        )?.port == 50005
-    )
-    same(
-        "italian app link fragment parses",
-        WfasPairingUri.parse(
-            WfasPairingUri.buildAppLink(
-                ip = "239.255.0.1", port = 50005, mode = WfasPairingUri.MODE_MULTICAST,
-                keyBase64 = K, expEpochSeconds = NOW + 120, mcastEpoch = 7L, italian = true
-            ),
-            NOW
-        )?.mcastEpoch,
-        7L
-    )
-    ok(
-        "foreign https host rejected",
-        WfasPairingUri.parse(
-            "https://evil.example/wifi-audio-streaming/pair?ip=1.2.3.4&port=1&mode=unicast&key=$K&exp=${NOW + 9}&v=2",
-            NOW
-        ) == null
-    )
+    ok("AudioBridge pairing URI parses", WfasPairingUri.parse(appLink, NOW) != null)
+    ok("pairing URI uses AudioBridge scheme", appLink.startsWith("audiobridge://pair?"))
+    ok("pairing URI does not depend on HTTP", !appLink.startsWith("http"))
 
     val generated = WfasAuth.randomPairingKey()
     same("generated key length", generated.length, 43)

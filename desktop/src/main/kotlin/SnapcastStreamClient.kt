@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -229,7 +229,7 @@ class SnapcastStreamClient(
             put("MAC", clientId)
             put("HostName", clientName)
             put("Version", "0.27.0")
-            put("ClientName", "WiFi Audio Streaming")
+            put("ClientName", "AudioBridge")
             put("OS", System.getProperty("os.name") ?: "")
             put("Arch", System.getProperty("os.arch") ?: "")
             put("Instance", 1)

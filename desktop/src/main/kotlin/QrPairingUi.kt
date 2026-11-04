@@ -71,7 +71,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 
-const val EXPIRED_QR_PAYLOAD = "https://www.marcomorosi.eu/wifi-audio-streaming/expired/"
+const val EXPIRED_QR_PAYLOAD = "audiobridge://expired"
 
 data class QrInvite(
     val uri: String,

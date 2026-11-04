@@ -1,319 +1,74 @@
-<p align="center">
-  <img src="https://github.com/mu-23/AudioBridge/blob/main/desktop/src/main/resources/app_icon.png?raw=true" width="128" alt="App Icon" />
-</p>
+# AudioBridge Desktop
 
-<h1 align="center">AudioBridge (Desktop)</h1>
+AudioBridge Desktop is the PC side of the AudioBridge monorepo. It can send local system audio to Android/Desktop receivers or receive WFAS audio from another device.
 
-<p align="center">
-  <a href="https://github.com/mu-23/AudioBridge/releases"><img src="https://img.shields.io/badge/Available%20on-GitHub-181717?style=for-the-badge&logo=github" alt="Available on GitHub" /></a>
-  <a href="https://gitlab.com/marcomorosi.dev/WiFiAudioStreaming-Desktop/-/releases"><img src="https://img.shields.io/badge/Available%20on-GitLab-FC6D26?style=for-the-badge&logo=gitlab" alt="Available on GitLab" /></a>
-  <a href="https://aur.archlinux.org/packages/wifi-audio-streaming-desktop"><img src="https://img.shields.io/aur/version/wifi-audio-streaming-desktop?color=blue&logo=arch-linux" alt="AUR version" /></a>
-</p>
+Windows 10/11 x64 is the primary validated Desktop target for the current development phase.
 
-<p align="center">
-<a href="https://trendshift.io/repositories/16237?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-16237" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/16237/daily?language=Kotlin" alt="marcomorosi06%2FWiFiAudioStreaming-Desktop | Trendshift" width="250" height="55"/></a>
-</p>
+## Current capabilities
 
-Turn your computer into a **wireless audio transmitter or receiver**.
+- Desktop -> Android / Desktop WFAS streaming
+- Android -> Desktop playback
+- native system-audio capture where supported
+- automatic and manual discovery
+- unicast / multicast WFAS
+- RTP / HTTP / DLNA / Snapcast support
+- optional authentication and encryption
+- QR pairing through `audiobridge://pair?... `
+- system tray and CLI support
+- shared releases with the Android app
 
-This application allows you to send your PC's audio to any device on the same local network, or listen to audio from another device. It is designed to work seamlessly with the [Android version](https://github.com/mu-23/AudioBridge/tree/main/android).
+## Repository
 
-🌐 **Website**: [marcomorosi.eu/wifi-audio-streaming](https://www.marcomorosi.eu/wifi-audio-streaming/)
+AudioBridge Desktop is maintained only inside:
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/marcomorosi)
+https://github.com/mu23XR/AudioBridge
 
----
+Releases:
 
-# 📸 Overview
+https://github.com/mu23XR/AudioBridge/releases
 
-*Screenshots of the Material You interface. Preview of the upcoming Material You interface.*
+Open work:
 
-<p align="center">
-  <img src="https://github.com/mu-23/AudioBridge/blob/main/desktop/images/server.jpg?raw=true" alt="Server Mode"><br>
-  <i>Server Mode</i>
-</p>
+https://github.com/mu23XR/AudioBridge/issues
 
-<p align="center">
-  <img src="https://github.com/mu-23/AudioBridge/blob/main/desktop/images/client.jpg?raw=true" alt="Client Mode"><br>
-  <i>Client Mode</i>
-</p>
+There is no separate upstream download site, donation page or independent Desktop release channel for AudioBridge.
 
-<p align="center">
-  <img src="https://github.com/mu-23/AudioBridge/blob/main/desktop/images/streaming.jpg?raw=true" alt="Streaming"><br>
-  <i>Streaming</i>
-</p>
+## Build
 
-<p align="center">
-  <img src="https://github.com/mu-23/AudioBridge/blob/main/desktop/images/settings.jpg?raw=true" alt="Settings" width="600"><br>
-  <i>Settings</i>
-</p>
-
-https://private-user-images.githubusercontent.com/229497341/628825916-c36bb746-abab-4702-97cd-4b54fa3ab894.mp4?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3ODUzNzAyODYsIm5iZiI6MTc4NTM2OTk4NiwicGF0aCI6Ii8yMjk0OTczNDEvNjI4ODI1OTE2LWMzNmJiNzQ2LWFiYWItNDcwMi05N2NkLTRiNTRmYTNhYjg5NC5tcDQ_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNzMwJTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDczMFQwMDA2MjZaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT04Y2JhNmY4MjgwZDMwYWM2OTRmODcwYjhjZjZjZmZmN2Y2NWFmZTJmYmYyZWFlYWFkZjZiZmE5NzBmZTU2ZDE1JlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9dmlkZW8lMkZtcDQifQ.mrY2UnLgjy7P3DiORrezQfMd2pOKxD81N4s6IaOqh2g
-
-*Song: Toby Fox, Deltarune Chapter 4 - "Ever Higher"*
-
----
-
-# ✨ Key Features
-
-- **Server & Client Modes**
-  Use the app to **send (Server)** or **receive (Client)** audio.
-
-- **Native Audio Engine (Windows & macOS)**
-  On Windows and macOS, audio is captured directly via a native C library loaded through JNI. No VB-Cable, no BlackHole, no third-party virtual drivers required. FFmpeg handles encoding only for the HTTP streaming protocols.
-
-- **Microphone Routing**
-  The server can receive microphone audio from a connected client and route it in three ways: ignore it, expose it as a **virtual microphone** to other apps (Discord, Zoom, games), or **mix it directly into the outgoing stream**. There is also a real-time mute button.
-
-- **System Tray**
-  The app lives in your system tray. Configure it to start minimized and close to tray so it runs silently in the background like AirPlay or Chromecast.
-
-- **Automatic & Manual Discovery**
-  Clients automatically find available servers on the network via multicast beacon, and the device list badges each server as Multicast/Unicast and whether it is encrypted or requires a key. If your router blocks it, you can manually enter the IP address.
-
-- **Unicast & Multicast Support**
-  - **Unicast** → direct streaming to a single device
-  - **Multicast** → simultaneous transmission to multiple clients
-
-- **Multiple Streaming Protocols**
-  - **WFAS v2** (native protocol, lowest latency)
-  - **RTP** (compatible with any RTP-capable receiver)
-  - **HTTP/AAC** (Safari, iOS)
-  - **HTTP/Opus WebM** (Chrome, Firefox, any browser)
-  - **DLNA/UPnP** (AV receivers, soundbars, smart TVs — no app needed on the other side) *(Work in progress for the next release, but visible in the Settings screenshot)*
-  - **Snapcast** (synchronised multiroom — any snapclient joins: Raspberry Pi, ESP32, Home Assistant, the Snapcast mobile apps)
-
-  Peers running an incompatible protocol version are rejected immediately during the handshake with a clear error, instead of hanging silently.
-
-- **Security & Encryption**
-  Optionally gate who can connect (**Off**, **Ask** to approve each device, or **Key** for a pre-shared password checked via mutual HMAC-SHA256 challenge-response) and encrypt the audio end-to-end with **ChaCha20-Poly1305** (per-packet AEAD, anti-replay, keys derived via HKDF). Works for both unicast and multicast; no PKI required. See [`WFAS_PROTOCOL.md`](WFAS_PROTOCOL.md) §7–8.
-
-- **Firewall Assistant**
-  On Windows, the app can create the required inbound firewall rule automatically with one click. On Linux, it detects `ufw` or `firewalld` and shows the exact command to open the required ports.
-
-- **Automatic Update Checker**
-  Optionally checks GitHub for new releases on startup, or on demand, with release notes and a direct download link shown right in the app.
-
-- **Command-Line Interface (`wfas`)**
-  A full headless daemon and control tool, installable to your system's PATH during first-run setup: start a server or client, run `wfas control volume 75` or `wfas control mute` against a running instance, manage configuration profiles with `wfas config`, and fix Windows Firewall with `wfas firewall allow`. Add `--json` to almost any command for scripting. Run `wfas --viz` for a real-time ASCII audio visualizer, with theming (`--viz rainbow`) and a `--groove` mode that highlights melody over raw bass. Run `wfas --debug` for a live-updating table of UDP packets and internal state. See `wfas --help` or the man page for the full command reference.
-
-- **Detailed Audio Configuration**
-  Customize sample rate, bit depth, channels, and buffer size.
-
-- **Modern Interface**
-  A **Material You** interface built with Jetpack Compose for Desktop, with wallpaper-based dynamic theming.
-
-- **Bilingual Support (EN/IT)**
-  Automatically adapts to your OS language.
-
----
-
-## ⚠️ Security & Encryption Notice
-
-The optional WFAS encryption feature is provided **"AS IS"** and is intended primarily as a lightweight privacy and traffic-protection layer for trusted local networks (LAN/P2P).
-
-It is **not intended to provide protection against high-threat attackers, hostile networks, or security-critical environments**, and it should not be relied upon as a substitute for a dedicated secure transport or other security mechanisms where stronger guarantees are required.
-
-Users and integrators are responsible for evaluating whether WFAS's security properties and their network environment are appropriate for their intended use.
-
-The WFAS protocol and its reference implementations are provided under the terms of their respective open-source licenses. No additional security guarantees are implied beyond those explicitly documented by the protocol and implementation.
-
-Security issues should be reported to the project maintainers so they can be investigated and addressed in future releases.
-
----
-
-# 🖥️ Platform Support
-
-| Platform | Architecture | Audio Capture | Tray |
-|----------|-------------|---------------|------|
-| Windows 10/11 | x86_64 | ✅ Native (no drivers needed) | ✅ |
-| macOS 13+ (Ventura) | x86_64, arm64 | ✅ Native (no drivers needed) | ✅ |
-| Linux | x86_64 | ✅ Native (no drivers needed) | ✅ |
-
-> **macOS note:** ScreenCaptureKit (used by the native engine) requires macOS 12.3 or later. The app will ask for screen recording and audio permissions on first launch. Yes, there are quite a few permission dialogs. Grant them all and the audio quality is genuinely clean and crisp on the receiving end.
->
-> **macOS legacy:** If you are on macOS 12.2 or earlier, you can still use the FFmpeg + BlackHole path by disabling the native engine in Settings → Advanced.
-
----
-
-# 🚀 Getting Started
-
-## Send Audio (Server Mode)
-
-1. Open the app and select **Send (Server)**.
-2. On **Linux**, the virtual sink is created automatically. On **Windows and macOS**, the native engine captures system audio directly with no extra setup.
-3. Select **Multicast** (multiple clients) or **Unicast** (single client). In Unicast the server serves one client at a time: while a session is running it stops advertising itself, and any other device that tries to connect is told the server is busy instead of being left waiting.
-4. Optionally set an authorization mode (**Off**, **Ask**, or **Key**) in Settings → Security to control who can connect, and enable encryption if you set a key.
-5. Click **Start Server**.
-
-## Receive Audio (Client Mode)
-
-1. Open the app and select **Receive (Client)**.
-2. Choose your physical output device (headphones, speakers).
-3. The app will automatically list active servers on the network.
-4. Select one to connect. If it's password-protected, you'll be prompted for the key.
-
-If the server does not appear automatically, enter its local IP address manually.
-
-If the server is already streaming to another device in Unicast mode, the app reports *"That server is already streaming to another device"* immediately instead of waiting for a timeout.
-
-If Windows Firewall is blocking the connection, the app will offer to fix it for you automatically.
-
----
-
-# 🎙️ Microphone Routing
-
-If you are using the Android app as a microphone source, the desktop server can handle the incoming audio in three ways, selectable from the UI:
-
-| Mode | What it does |
-|------|-------------|
-| **Off** | Ignores the incoming mic stream |
-| **Virtual Microphone** | Exposes the mic as a virtual input device, visible in Discord, Zoom, games |
-| **Mix Into Stream** | Blends the mic into the outgoing audio directly |
-
-A mute button is available at any time during streaming.
-
----
-
-# ⌨️ Command-Line Interface
-
-AudioBridge ships with `wfas`, a fully-featured CLI and headless daemon, useful for scripting, running on a headless box, or just staying in the terminal.
+Requires JDK 17 or newer.
 
 ```bash
-wfas --server --rtp                     # start a headless RTP server
-wfas --server --persist                 # stay up across client disconnects
-wfas --server --no-mute-render          # keep hearing the audio on this machine too
-wfas --server --snapcast                # serve synchronised multiroom audio
-wfas --server --snapcast --snapcast-codec flac   # halve the bandwidth per room
-wfas --client 192.168.1.42              # connect as a client
-wfas --mode discover --json             # scan the network, output JSON
-wfas control volume 75                  # adjust volume on a running instance
-wfas control mute                       # toggle mic mute on a running instance
-wfas config list                        # show every setting and its value
-wfas config edit                        # edit the shared JSON configuration
-wfas firewall allow                     # open the default ports (Windows)
-wfas --viz rainbow                      # ASCII audio visualizer, rainbow theme
-wfas --monitor --groove                 # visualize local system audio only
-wfas --debug                            # live UDP packet / state table
-wfas --help                             # full command reference
-```
-
-During first-run setup, the app offers to install `wfas` to your system's PATH automatically.
-
----
-
-# 📱 Android Version
-
-Turn your smartphone into a **portable audio receiver or transmitter**.
-
-<a href="https://github.com/mu-23/AudioBridge/tree/main/android">
-<img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" height="80">
-</a>
-
-<a href="https://apt.izzysoft.de/packages/com.cuscus.wifiaudiostreaming">
-<img src="https://gitlab.com/IzzyOnDroid/repo/-/raw/master/assets/IzzyOnDroid.png" height="80">
-</a>
-
----
-
-# 🔌 Open Protocol & Embedded Devices
-
-The WFAS v2 wire protocol is documented separately from the apps, with a tiny, dependency-free C99 reference implementation for embedded and firmware projects (ESP32, STM32, RP2040, Raspberry Pi, and more):
-
-👉 [wfas-protocol on GitHub](https://github.com/marcomorosi06/wfas-protocol)
-
-It has been tested end to end on real hardware, an ESP32 streaming audio from an analog line-in source, decoded live by both this desktop app and the Android app using the exact same protocol implementation. If you're experimenting with an analog capture setup like that, there's an optional **Noise Reduction** filter under Developer Settings that helps with the background hiss.
-
----
-
-# 🛠️ Building from Source
-
-Requires **JDK 17 or newer**.
-
-```bash
-git clone https://github.com/mu-23/AudioBridge.git
+git clone https://github.com/mu23XR/AudioBridge.git
 cd AudioBridge/desktop
+./gradlew check
+./gradlew createReleaseDistributable
 ```
 
-The native C library is compiled as part of the build. On the first build (or after changes to `src/main/native/`), Gradle will invoke CMake automatically. On Windows, it searches for `cmake.exe` in all known locations (Visual Studio, CLion, Scoop, Chocolatey, winget).
+Windows:
 
-### Run for testing
-
-```bash
-./gradlew run
-# Windows:
-gradlew.bat run
+```powershell
+cd desktop
+.\gradlew.bat check
+.\gradlew.bat createReleaseDistributable packagePortableArchives
 ```
 
-### Create distributable packages
+## Protocol
 
-| Format | Command |
-|--------|---------|
-| Portable app (all OS) | `./gradlew createDistributable` |
-| Windows installer | `./gradlew packageMsi` |
-| Debian / Ubuntu | `./gradlew packageDeb` |
-| Fedora / CentOS | `./gradlew packageRpm` |
-| macOS | `./gradlew packageDmg` |
+Desktop and Android share the root protocol specification:
 
-Output: `build/compose/binaries/main/`
+[../WFAS_PROTOCOL.md](../WFAS_PROTOCOL.md)
 
----
+Wire-incompatible changes require coordinated changes on both platforms.
 
-# 💻 Tech Stack
+## Project history
 
-- **Language:** Kotlin
-- **UI Framework:** Jetpack Compose for Desktop
-- **Networking:** Ktor (UDP/TCP sockets)
-- **Audio Capture:** Native C library via JNI (Windows, macOS) / FFmpeg via JavaCV (Linux)
-- **Audio Encoding:** FFmpeg via JavaCV (AAC, Opus for HTTP streaming)
-- **Cryptography:** HMAC-SHA256 challenge-response authentication, ChaCha20-Poly1305 AEAD encryption, HKDF-SHA256 key derivation (Bouncy Castle)
+Early Desktop code and design evolved from and referenced Marco Morosi's open-source WiFi Audio Streaming Desktop project. AudioBridge Desktop is now maintained as part of the independent AudioBridge repository and uses the repository's own release/update path.
 
----
+Required copyright/license notices and third-party attribution remain in source and license files.
 
-# ☕ Support the Project
+## License
 
-This project is completely free and open-source. If it helped you, consider buying me a coffee.
+See:
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/marcomorosi)
-
----
-
-# 📄 License
-
-This project is licensed under the **European Union Public Licence v1.2 (EUPL v1.2)**.
-
-It started as a personal script. Then it grew. Then I rewrote the audio engine during exam season, which is when I realized I had become genuinely invested in it, and that the license deserved a second thought. MIT lets anyone take the code and close it off. EUPL does not.
-
-**You are free to:**
-- Use, modify, and distribute the software
-- Use it for commercial purposes
-
-**Key obligations:**
-- **Copyleft:** modified distributions must be released under the same EUPL license
-- **Network copyleft:** if you run a modified version as a networked service, you must release the source
-- **Attribution:** retain all copyright and trademark notices
-
-For the full legal text, see `LICENSE.md` or visit the [official EUPL website](https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12).
-
-The **app** is EUPL, but the **WFAS v2 wire protocol** is not locked up: a C reference implementation is published separately under the permissive **MIT License** ([`wfas-protocol`](https://github.com/marcomorosi06/wfas-protocol), © 2026 Marco Morosi), so anyone — including embedded/firmware projects — can implement WFAS v2 freely. The copyleft protects this application; the protocol stays open.
-
----
-
-# 🧩 Third-Party Software & Licenses
-
-This application bundles and uses several open-source components, each under its
-own licence. The complete attribution list is in
-**[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)**, and is also available
-inside the app (Settings → *Open-source licenses*) and from the command line via
-`wfas --licenses`.
-
-In particular, this software uses **[FFmpeg](https://ffmpeg.org)** for AAC/Opus
-audio encoding, distributed under the **GNU LGPL v2.1 or later** (some optional
-components may be under the GPL). The FFmpeg native libraries are unmodified and
-provided by the [JavaCPP Presets](https://github.com/bytedeco/javacpp-presets)
-project; their source is available at <https://ffmpeg.org/download.html>. See
-`THIRD_PARTY_LICENSES.md` for the full FFmpeg notice and relinking information.
-
-Other bundled components include JavaCV/JavaCPP, JetBrains Compose Multiplatform,
-Kotlin and kotlinx.coroutines, Ktor, Bouncy Castle, dorkbox SystemTray, JNA and
-SLF4J — see the full list for versions, copyrights and licences.
+- [LICENSE.md](LICENSE.md)
+- [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)

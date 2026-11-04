@@ -96,8 +96,8 @@ data class ChangelogItem(
     val secondaryLinkUrl: String? = null
 )
 
-private const val DESKTOP_RELEASES_URL = "https://github.com/mu-23/WiFiAudioStreaming/releases"
-private const val DESKTOP_DOWNLOAD_URL = "https://www.marcomorosi.eu/wifi-audio-streaming/download/"
+private const val DESKTOP_RELEASES_URL = "https://github.com/mu23XR/AudioBridge/releases"
+private const val DESKTOP_DOWNLOAD_URL = "https://github.com/mu23XR/AudioBridge/releases"
 
 data class ChangelogEntry(
     val version: String,
@@ -180,8 +180,8 @@ object Changelog {
                     icon = Icons.Filled.Computer,
                     title = Bilingual("Update the desktop app too", "Aggiorna anche l'app desktop"),
                     body = Bilingual(
-                        "WiFi Audio Streaming for desktop has been updated as well. Update it too so both ends stay compatible.",
-                        "Anche WiFi Audio Streaming per desktop è stata aggiornata. Aggiornala anche tu, così i due lati restano compatibili."
+                        "AudioBridge for desktop has been updated as well. Update it too so both ends stay compatible.",
+                        "Anche AudioBridge per desktop è stata aggiornata. Aggiornala anche tu, così i due lati restano compatibili."
                     ),
                     linkLabel = Bilingual("Open on GitHub", "Apri su GitHub"),
                     linkUrl = DESKTOP_RELEASES_URL,
@@ -250,8 +250,8 @@ object Changelog {
                     icon = Icons.Filled.Computer,
                     title = Bilingual("Update the desktop app too", "Aggiorna anche l'app desktop"),
                     body = Bilingual(
-                        "WiFi Audio Streaming for desktop has been updated as well. Update it too so both ends stay compatible.",
-                        "Anche WiFi Audio Streaming per desktop è stata aggiornata. Aggiornala anche tu, così i due lati restano compatibili."
+                        "AudioBridge for desktop has been updated as well. Update it too so both ends stay compatible.",
+                        "Anche AudioBridge per desktop è stata aggiornata. Aggiornala anche tu, così i due lati restano compatibili."
                     ),
                     linkLabel = Bilingual("Open on GitHub", "Apri su GitHub"),
                     linkUrl = DESKTOP_RELEASES_URL,

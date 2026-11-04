@@ -28,18 +28,11 @@ data class PairingPayload(
 
 object WfasPairingUri {
 
-    const val SCHEME = "wifiaudio"
+    const val SCHEME = "audiobridge"
     const val HOST = "pair"
     const val VERSION = 2
     const val MODE_UNICAST = "unicast"
     const val MODE_MULTICAST = "multicast"
-
-    const val APPLINK_HOST = "www.marcomorosi.eu"
-    const val APPLINK_PATH = "/wifi-audio-streaming/pair"
-    const val APPLINK_PATH_IT = "/it/wifi-audio-streaming/pair"
-
-    private val APPLINK_PATHS = setOf(APPLINK_PATH, APPLINK_PATH_IT)
-    private val APPLINK_HOSTS = setOf(APPLINK_HOST, APPLINK_HOST.removePrefix("www."))
 
     const val CLOCK_SKEW_SECONDS = 30L
     const val PAIRING_TTL_SECONDS = 120L
@@ -68,6 +61,10 @@ object WfasPairingUri {
         return "$SCHEME://$HOST?$query"
     }
 
+    /**
+     * QR payloads use the AudioBridge custom URI directly. No external website
+     * or upstream domain is required for pairing.
+     */
     fun buildAppLink(
         ip: String,
         port: Int,
@@ -75,30 +72,17 @@ object WfasPairingUri {
         keyBase64: String,
         expEpochSeconds: Long,
         mcastEpoch: Long? = null,
-        italian: Boolean = java.util.Locale.getDefault().language == "it"
-    ): String {
-        val custom = build(ip, port, mode, keyBase64, expEpochSeconds, mcastEpoch)
-        val path = if (italian) APPLINK_PATH_IT else APPLINK_PATH
-        return "https://$APPLINK_HOST$path/#" + custom.substringAfter('?')
-    }
+        italian: Boolean = false
+    ): String = build(ip, port, mode, keyBase64, expEpochSeconds, mcastEpoch)
 
     fun parse(uri: String, nowEpochSeconds: Long = System.currentTimeMillis() / 1000): PairingPayload? {
         val parsed = runCatching { URI(uri.trim()) }.getOrNull() ?: return null
 
         val scheme = parsed.scheme?.lowercase() ?: return null
-        when (scheme) {
-            SCHEME -> {
-                val target = (parsed.host ?: parsed.authority)?.lowercase()?.substringBefore(':')
-                val path = parsed.path?.trim('/')?.lowercase().orEmpty()
-                if (target != HOST && path != HOST) return null
-            }
-            "https" -> {
-                if (parsed.host?.lowercase() !in APPLINK_HOSTS) return null
-                val path = parsed.path?.trimEnd('/')?.lowercase()
-                if (path !in APPLINK_PATHS) return null
-            }
-            else -> return null
-        }
+        if (scheme != SCHEME) return null
+        val target = (parsed.host ?: parsed.authority)?.lowercase()?.substringBefore(':')
+        val path = parsed.path?.trim('/')?.lowercase().orEmpty()
+        if (target != HOST && path != HOST) return null
 
         val raw = parsed.rawFragment?.takeIf { it.isNotBlank() }
             ?: parsed.rawQuery?.takeIf { it.isNotBlank() }

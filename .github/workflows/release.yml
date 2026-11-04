@@ -1,121 +1,91 @@
-name: Publish or Promote AudioBridge Release
+name: Release Android + Windows
 
 on:
+  pull_request:
+    paths:
+      - "docs/releases/stable-build-request.json"
+      - "docs/releases/2.0.1.md"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/android-native.yml"
+      - "scripts/stable_release.py"
+      - "scripts/tests/test_stable_release.py"
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      action:
-        description: "prepare = build/publish prerelease; promote = convert existing prerelease to stable"
-        required: true
-        default: "prepare"
-        type: choice
-        options:
-          - prepare
-          - promote
-      version:
-        description: "Version without v, for example 1.4.0"
-        required: true
+      release_tag:
+        description: "Existing stable tag, for example v2.0.1"
         type: string
       source_ref:
-        description: "Source branch/tag/commit used only for prepare"
-        required: false
-        default: "main"
+        description: "Exact source SHA, branch or tag (defaults to selected workflow ref)"
         type: string
+      version:
+        description: "Stable version without v; alternatively use release_tag"
+        type: string
+      publish:
+        description: "Publish verified assets as stable/latest after all gates"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
 
 concurrency:
-  group: release-${{ inputs.version }}
-  cancel-in-progress: false
+  group: stable-release-${{ github.ref }}
+  # A new PR head supersedes an older authorized release candidate.
+  cancel-in-progress: true
 
 jobs:
-  prepare:
-    if: inputs.action == 'prepare'
+  meta:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'push' || !contains(github.ref_name, '-'))
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-      source_sha: ${{ steps.meta.outputs.source_sha }}
-      version: ${{ steps.meta.outputs.version }}
+      source: ${{ steps.request.outputs.source }}
+      version: ${{ steps.request.outputs.version }}
+      code: ${{ steps.request.outputs.code }}
+      publish: ${{ steps.request.outputs.publish }}
     steps:
-      - name: Validate version and resolve source
-        id: meta
-        env:
-          VERSION: ${{ inputs.version }}
-          SOURCE_REF: ${{ inputs.source_ref }}
-          GH_TOKEN: ${{ github.token }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.source_ref || inputs.release_tag || github.ref }}
+          persist-credentials: false
+      - name: Validate explicit request and pin one source/version/code
+        id: request
+        run: python3 scripts/stable_release.py prepare
+      - name: Test stable and preview verification guards
         run: |
-          set -euo pipefail
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Version must match MAJOR.MINOR.PATCH; got: $VERSION"
-            exit 1
-          fi
-          TAG="v$VERSION"
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $TAG already exists. Existing published versions are never overwritten."
-            exit 1
-          fi
-          SOURCE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_REF" --jq .sha)
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Create draft prerelease container
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.meta.outputs.tag }}
-          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          gh release create "$TAG"             --repo "$GITHUB_REPOSITORY"             --target "$SOURCE_SHA"             --title "AudioBridge $TAG"             --generate-notes             --draft             --prerelease
-          printf '%s\n' "$SOURCE_SHA" > SOURCE_COMMIT.txt
-          gh release upload "$TAG" SOURCE_COMMIT.txt --repo "$GITHUB_REPOSITORY"
+          python3 -m unittest discover -s scripts/tests
+          python3 scripts/test_desktop_preview.py
 
   android:
-    if: inputs.action == 'prepare'
-    needs: prepare
+    needs: meta
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     env:
-      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      WFAS_VERSION_NAME: ${{ needs.meta.outputs.version }}
+      WFAS_VERSION_CODE: ${{ needs.meta.outputs.code }}
+      SOURCE_SHA: ${{ needs.meta.outputs.source }}
     steps:
-      - name: Checkout exact source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+          persist-credentials: false
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+      - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-
-      - name: Install Android 36 SDK
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Resolve Android version code
-        run: |
-          set -euo pipefail
-          YEAR=$(date -u +%Y)
-          OFFSET=$((10#$YEAR - 2020))
-          STAMP=$(date -u +%m%d%H%M)
-          CODE=$((OFFSET * 100000000 + 10#$STAMP))
-          echo "WFAS_VERSION_CODE=$CODE" >> "$GITHUB_ENV"
-          echo "WFAS_VERSION_NAME=$RELEASE_VERSION" >> "$GITHUB_ENV"
-
-      - name: Restore permanent signing key
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Restore and verify permanent signing identity
         env:
           SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
@@ -138,104 +108,113 @@ jobs:
           echo "AUDIOBRIDGE_SIGNING_STORE_PASSWORD=$SIGNING_STORE_PASSWORD" >> "$GITHUB_ENV"
           echo "AUDIOBRIDGE_SIGNING_KEY_ALIAS=$SIGNING_KEY_ALIAS" >> "$GITHUB_ENV"
           echo "AUDIOBRIDGE_SIGNING_KEY_PASSWORD=$SIGNING_KEY_PASSWORD" >> "$GITHUB_ENV"
-
-      - name: Test and build release APK
+      - name: Android unit tests, strict lint and signed release build
         working-directory: android
+        run: bash gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleRelease --stacktrace
+      - name: Verify actual APK identity and collect exact-source Android asset
         run: |
-          chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleRelease --stacktrace
-
-      - name: Verify and upload Android asset directly to prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          SRC="android/app/build/outputs/apk/release/app-release.apk"
-          test -f "$SRC"
-          EXPECTED="4DDF267D25A73F0A28446C9E77293204E32F6777C63417FEB7BD925040FEFB63"
-          ACTUAL=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$SRC" | awk -F': ' '/certificate SHA-256 digest:/ { gsub(":","",$2); print toupper($2); exit }')
-          test "$ACTUAL" = "$EXPECTED"
-          OUT="AudioBridge-Android-$RELEASE_VERSION.apk"
-          cp "$SRC" "$OUT"
-          sha256sum "$OUT" > "$OUT.sha256"
-          gh release upload "$RELEASE_TAG" "$OUT" "$OUT.sha256" --repo "$GITHUB_REPOSITORY"
+          python3 scripts/stable_release.py android --source "$SOURCE_SHA" --version "$WFAS_VERSION_NAME" --code "$WFAS_VERSION_CODE" \
+            --apk android/app/build/outputs/apk/release/app-release.apk \
+            --aapt2 "$ANDROID_HOME/build-tools/36.0.0/aapt2" --apksigner "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+            --output out/stable-android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-android
+          path: out/stable-android/*
+          retention-days: 14
+          if-no-files-found: error
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$GITHUB_WORKSPACE/.ci/audiobridge-release.jks"
 
   windows:
-    if: inputs.action == 'prepare'
-    needs: prepare
+    needs: meta
     runs-on: windows-latest
-    permissions:
-      contents: write
     env:
-      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-      WFAS_VERSION_NAME: ${{ needs.prepare.outputs.version }}
+      WFAS_VERSION_NAME: ${{ needs.meta.outputs.version }}
+      SOURCE_SHA: ${{ needs.meta.outputs.source }}
     steps:
-      - name: Checkout exact source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v5
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: "17"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
           validate-wrappers: true
-
-      - name: Check and build Windows package
+      - name: Full Windows checks
         working-directory: desktop
-        run: .\gradlew.bat check createReleaseDistributable packagePortableArchives
+        run: .\gradlew.bat check
+      - name: Generate versioned manual before packaging resources
+        working-directory: desktop
+        run: .\gradlew.bat generateMan
+      - name: Build exact Windows ZIP and TAR
+        working-directory: desktop
+        run: .\gradlew.bat createReleaseDistributable packagePortableArchives
+      - name: Verify stable JAR, native library, manual and matching archive bytes
+        run: python scripts/stable_release.py windows --source "$env:SOURCE_SHA" --version "$env:WFAS_VERSION_NAME" --output out/stable-windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-windows
+          path: out/stable-windows/*
+          retention-days: 14
+          if-no-files-found: error
 
-      - name: Upload Windows asset directly to prerelease
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $zip = Get-ChildItem "$env:GITHUB_WORKSPACE\desktop\build\packages\*.zip" | Select-Object -First 1
-          if (-not $zip) { throw "Windows ZIP not found" }
-          $out = "$env:GITHUB_WORKSPACE\AudioBridge-$env:RELEASE_VERSION-windows-x86_64.zip"
-          Copy-Item $zip.FullName $out -Force
-          $hash = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
-          "$hash  $(Split-Path $out -Leaf)" | Set-Content "$out.sha256"
-          gh release upload $env:RELEASE_TAG $out "$out.sha256" --repo $env:GITHUB_REPOSITORY
+  governance:
+    needs: meta
+    uses: ./.github/workflows/governance.yml
+    with:
+      source_ref: ${{ needs.meta.outputs.source }}
 
-  publish:
-    if: inputs.action == 'prepare'
-    needs: [prepare, android, windows]
+  native:
+    needs: meta
+    uses: ./.github/workflows/android-native.yml
+    with:
+      source_ref: ${{ needs.meta.outputs.source }}
+
+  release:
+    needs: [meta, android, windows, governance, native]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: stable-publish-${{ needs.meta.outputs.version }}
+      cancel-in-progress: false
+    env:
+      SOURCE_SHA: ${{ needs.meta.outputs.source }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      VERSION_CODE: ${{ needs.meta.outputs.code }}
+      NATIVE_SOURCE: ${{ needs.native.outputs.source_sha }}
     steps:
-      - name: Publish as prerelease
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Confirm native gate checked the same integration source
+        run: test "$NATIVE_SOURCE" = "$SOURCE_SHA"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: stable-*
+          path: out/stable-input
+          merge-multiple: true
+      - name: Verify unified identity, source, provenance and checksums
+        run: |
+          python3 scripts/stable_release.py bundle --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --code "$VERSION_CODE" \
+            --input out/stable-input --output out/stable-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-stable-bundle
+          path: out/stable-release/*
+          retention-days: 14
+          if-no-files-found: error
+      - name: Publish immutable assets, download-verify, then mark stable/latest
+        if: needs.meta.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-        run: |
-          set -euo pipefail
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
-
-  promote:
-    if: inputs.action == 'promote'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Promote existing prerelease without rebuilding
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Version must match MAJOR.MINOR.PATCH; got: $VERSION"
-            exit 1
-          fi
-          TAG="v$VERSION"
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --draft=false --latest
+        run: python3 scripts/stable_release.py publish --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --output out/stable-release

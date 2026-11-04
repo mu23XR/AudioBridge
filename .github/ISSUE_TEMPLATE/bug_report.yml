@@ -1,0 +1,100 @@
+name: Bug report
+description: Report a reproducible AudioBridge defect
+title: "Bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please keep one Issue focused on one defect. Include enough detail that another maintainer or AI can reproduce it without chat history.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What is broken?
+      placeholder: Describe the failure in a few sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Exact steps from a clean starting state.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: What actually happens?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Android SEND / Shizuku
+        - Android RECEIVE
+        - Audio routing / volume
+        - WFAS protocol / networking
+        - Latency / buffering
+        - Desktop
+        - Build / release / signing
+        - UI / settings
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / build
+      description: For example test.13 or a Git commit.
+      placeholder: test.13
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Device / environment
+      description: Device, Android/Windows version, ROM, Shizuku version, network conditions, etc.
+      placeholder: Redmi Note 12 Turbo, HyperOS, Wi-Fi LAN, Shizuku ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / logs
+      description: Logs, screenshots, video, timestamps, or observations. Do not paste secrets.
+      placeholder: Add non-sensitive evidence here.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What exact regression test must pass before this Issue can be closed?
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true

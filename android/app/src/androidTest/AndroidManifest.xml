@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <provider android:authorities="io.github.mu23xr.audiobridge.debug.diagnostics;io.github.mu23xr.audiobridge.test.diagnostics" />
+    </queries>
+    <application>
+        <!-- Runs under the test APK's different UID, not instrumentation's target UID. -->
+        <provider android:name="com.cuscus.wifiaudiostreaming.DiagnosticUnprivilegedProbeProvider"
+            android:authorities="${applicationId}.diagnostic-probe"
+            android:exported="true" android:permission="android.permission.DUMP" />
+    </application>
+</manifest>

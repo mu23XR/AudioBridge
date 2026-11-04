@@ -16,41 +16,42 @@
  */
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
 import java.io.InputStreamReader
 import java.util.Properties
 
 object Strings {
-    private val props = Properties()
+    val languages = listOf("system", "zh", "en")
+    private val selectedLanguage = mutableStateOf("system")
+    val language: String get() = selectedLanguage.value.let { if (it == "system") java.util.Locale.getDefault().language else it }
+    private val localized = mutableStateOf(load("system"))
 
-    init {
-        val loader = Strings::class.java.classLoader
-        loader.getResourceAsStream("strings.properties")
-            ?.use { props.load(InputStreamReader(it, Charsets.UTF_8)) }
-        if (java.util.Locale.getDefault().language == "it") {
-            loader.getResourceAsStream("strings_it.properties")
-                ?.use { props.load(InputStreamReader(it, Charsets.UTF_8)) }
+    fun setLanguage(language: String) {
+        require(language in languages) { "Unknown UI language: $language" }
+        localized.value = load(language)
+        selectedLanguage.value = language
+    }
+
+    private fun load(language: String): Properties {
+        val effective = if (language == "system") java.util.Locale.getDefault().language else language
+        val files = listOf("strings.properties") + if (effective == "zh") listOf("strings_zh.properties") else emptyList()
+        return Properties().apply {
+            for (file in files) {
+                val stream = Strings::class.java.classLoader.getResourceAsStream(file)
+                    ?: error("Missing language resource: $file")
+                stream.use { load(InputStreamReader(it, Charsets.UTF_8)) }
+            }
         }
     }
 
-    fun get(key: String): String = props.getProperty(key, key)
+    fun get(key: String): String = localized.value.getProperty(key)
+        ?: error("Missing UI string: $key")
 
     fun get(key: String, vararg args: Any): String {
-        return try {
-            String.format(get(key), *args)
-        } catch (e: Exception) {
-            key
-        }
+        return String.format(get(key), *args)
     }
 
-    val appVersion: String by lazy {
-        val loader = Strings::class.java.classLoader
-        val stream = loader.getResourceAsStream("version.properties") ?: return@lazy "?"
-        val vProps = Properties().apply { load(InputStreamReader(stream, Charsets.UTF_8)) }
-        vProps.getProperty("app.display.version")
-            ?.takeIf { it.isNotBlank() }
-            ?: displayVersion(vProps.getProperty("app.version", "?"))
-    }
+    val appVersion: String get() = BuildIdentity.version
 }
 
 /**
@@ -70,10 +71,10 @@ fun displayVersion(raw: String): String {
 
 @Composable
 fun stringResource(key: String): String {
-    return remember(key) { Strings.get(key) }
+    return Strings.get(key)
 }
 
 @Composable
 fun stringResource(key: String, vararg args: Any): String {
-    return remember(key, args) { Strings.get(key, *args) }
+    return Strings.get(key, *args)
 }

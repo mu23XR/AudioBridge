@@ -1,0 +1,34 @@
+# Repository-wide editor / OS / temporary files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# Local secrets / environment overrides
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+
+# Generated release packages
+*.apk
+*.aab
+*.zip.sha256
+
+# Root-level scratch/build output
+/build/
+/dist/
+/out/
+/tmp/
+
+# Native lifecycle fixture scratch outputs; never release source/assets.
+/logs/
