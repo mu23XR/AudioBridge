@@ -32,8 +32,7 @@ jobs:
           import urllib.request
           
           REPO = "mu23XR/AudioBridge"
-          PLAN = json.loads("[{\"id\":13339465410,\"name\":\"stable-android\",\"bytes\":25016768,\"run\":41857316658,\"sha\":\"4cbea4a97b73554ca8f9260bc211736916b12154\"},{\"id\":13337738049,\"name\":\"verified-stable-bundle\",\"bytes\":317687939,\"run\":41857316658,\"sha\":\"4cbea4a97b73554ca8f9260bc211736916b12154\"},{\"id\":13337274610,\"name\":\"stable-windows\",\"bytes\":292667634,\"run\":41857316658,\"sha\":\"4cbea4a97b73554ca8f9260bc211736916b12154\"},{\"id\":13337488605,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292673155,\"run\":41857316583,\"sha\":\"4cbea4a97b73554ca8f9260bc211736916b12154\"},{\"id\":13339010963,\"name\":\"AudioBridge-Android-Preview-1.3.1-test.21\",\"bytes\":25016791,\"run\":41857316634,\"sha\":\"4cbea4a97b73554ca8f9260bc211736916b12154\"},{\"id\":13337638182,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":146440068,\"run\":41857316634,\"sha\":\"4cbea4a97b73554ca8f9260bc211736916b12154\"},{\"id\":13338160496,\"name\":\"verified-stable-bundle\",\"bytes\":317689270,\"run\":41854450945,\"sha\":\"953c13b3d35d829211ae8a13334925f1047403e3\"},{\"id\":13337401850,\"name\":\"stable-android\",\"bytes\":25016603,\"run\":41854450945,\"sha\":\"953c13b3d35d829211ae8a13334925f1047403e3\"},{\"id\":13335839951,\"name\":\"stable-windows\",\"bytes\":292669127,\"run\":41854450945,\"sha\":\"953c13b3d35d829211ae8a13334925f1047403e3\"},{\"id\":13336767098,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292673333,\"run\":41854451079,\"sha\":\"953c13b3d35d829211ae8a13334925f1047403e3\"},{\"id\":13338455216,\"name\":\"AudioBridge-Android-Preview-1.3.1-test.21\",\"bytes\":25016897,\"run\":41854451420,\"sha\":\"953c13b3d35d829211ae8a13334925f1047403e3\"},{\"id\":13335969623,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":146440129,\"run\":41854451420,\"sha\":\"953c13b3d35d829211ae8a13334925f1047403e3\"},{\"id\":12818872409,\"name\":\"stable-windows\",\"bytes\":292667860,\"run\":40694640480,\"sha\":\"5916b75bc127de3193d30a239e5b93af2297d23e\"},{\"id\":12818304402,\"name\":\"stable-android\",\"bytes\":25013780,\"run\":40694640480,\"sha\":\"5916b75bc127de3193d30a239e5b93af2297d23e\"},{\"id\":12818348539,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292672643,\"run\":40694640393,\"sha\":\"5916b75bc127de3193d30a239e5b93af2297d23e\"},{\"id\":12818805253,\"name\":\"stable-windows\",\"bytes\":292668241,\"run\":40692598888,\"sha\":\"fbeff3b11ff41a06d70e4485229b3c00310b4439\"},{\"id\":12818062299,\"name\":\"stable-android\",\"bytes\":25013789,\"run\":40692598888,\"sha\":\"fbeff3b11ff41a06d70e4485229b3c00310b4439\"},{\"id\":12817603838,\"name\":\"verified-stable-bundle\",\"bytes\":317685477,\"run\":40692598888,\"sha\":\"fbeff3b11ff41a06d70e4485229b3c00310b4439\"},{\"id\":12817897708,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292672739,\"run\":40692598713,\"sha\":\"fbeff3b11ff41a06d70e4485229b3c00310b4439\"},{\"id\":12671550237,\"name\":\"stable-android\",\"bytes\":25013811,\"run\":40366103499,\"sha\":\"c8d2f9ddeff4d9e6a13493ab3903065eea70b222\"},{\"id\":12671740002,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292671814,\"run\":40366103943,\"sha\":\"c8d2f9ddeff4d9e6a13493ab3903065eea70b222\"},{\"id\":12670330519,\"name\":\"stable-android\",\"bytes\":25014021,\"run\":40363868966,\"sha\":\"457473d53316fc9a0ca1bbef2ca48155fdff91cc\"},{\"id\":12668823614,\"name\":\"stable-windows\",\"bytes\":292666318,\"run\":40363868966,\"sha\":\"457473d53316fc9a0ca1bbef2ca48155fdff91cc\"},{\"id\":12670605094,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292674425,\"run\":40363868487,\"sha\":\"457473d53316fc9a0ca1bbef2ca48155fdff91cc\"},{\"id\":12668358345,\"name\":\"stable-windows\",\"bytes\":292666895,\"run\":40362368659,\"sha\":\"f738991e8321d836de935928a17beb86b0e24030\"},{\"id\":12668133368,\"name\":\"stable-android\",\"bytes\":25013970,\"run\":40362368659,\"sha\":\"f738991e8321d836de935928a17beb86b0e24030\"},{\"id\":12648063906,\"name\":\"stable-windows\",\"bytes\":292669420,\"run\":40319490062,\"sha\":\"a8a534fda2563bc9aadacc881b7b232e8fef2598\"},{\"id\":12647964707,\"name\":\"stable-android\",\"bytes\":25013947,\"run\":40319490062,\"sha\":\"a8a534fda2563bc9aadacc881b7b232e8fef2598\"},{\"id\":12648162934,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292670961,\"run\":40319489965,\"sha\":\"a8a534fda2563bc9aadacc881b7b232e8fef2598\"}]")
-          HEAD_BRANCH = "release/2.0.1"
+          PLAN = json.loads("[{\"id\":12560503591,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292562384,\"run\":40095151417,\"sha\":\"a40463d3198b1c16cc243201578ac340f51b452f\",\"branch\":\"fix/desktop-burst-playout\"},{\"id\":12559493513,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292561699,\"run\":40093640207,\"sha\":\"5f0cad4fb75c0656de0e21d6cac21b8ff24fffe5\",\"branch\":\"fix/desktop-burst-playout\"},{\"id\":12553427127,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292556488,\"run\":40076184631,\"sha\":\"0c7394e5eca15b77c26d1fbb5094f8671a1a5361\",\"branch\":\"publish/desktop-receive-preview\"},{\"id\":12553320696,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292557199,\"run\":40075136207,\"sha\":\"3fc718ab1d6bfe9b64c153ce384434653119c78b\",\"branch\":\"publish/desktop-receive-preview\"},{\"id\":12552686961,\"name\":\"AudioBridge-Desktop-Windows\",\"bytes\":292554418,\"run\":40073998118,\"sha\":\"b4d1d1b564e02f7c8dd4d6c9f99aa16bc8260d0d\",\"branch\":\"publish/desktop-receive-preview\"}]")
           EXPECTED_RELEASE = 434110405
           HEADERS = {
               "Authorization": "Bearer " + os.environ["GH_TOKEN"],
@@ -101,10 +100,7 @@ jobs:
           selected = []
           absent = []
           checked_runs = {}
-          allowed_names = {
-              "stable-android", "stable-windows", "verified-stable-bundle",
-              "AudioBridge-Desktop-Windows", "AudioBridge-Android-Preview-1.3.1-test.21",
-          }
+          allowed_names = {"AudioBridge-Desktop-Windows"}
           
           # Validate the whole plan before the first irreversible API request.
           for expected in PLAN:
@@ -119,7 +115,7 @@ jobs:
                   or artifact["size_in_bytes"] != expected["bytes"]
                   or run_ref["id"] != expected["run"]
                   or run_ref["head_sha"] != expected["sha"]
-                  or run_ref["head_branch"] != HEAD_BRANCH
+                  or run_ref["head_branch"] != expected["branch"]
               ):
                   raise RuntimeError("Artifact preflight mismatch: " + str(expected["id"]))
               if expected["run"] not in checked_runs:
@@ -128,7 +124,7 @@ jobs:
               if (
                   run["status"] != "completed"
                   or run["head_sha"] != expected["sha"]
-                  or run["head_branch"] != HEAD_BRANCH
+                  or run["head_branch"] != expected["branch"]
                   or run["repository"]["full_name"] != REPO
               ):
                   raise RuntimeError("Run preflight mismatch: " + str(expected["run"]))
