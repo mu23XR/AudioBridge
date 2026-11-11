@@ -17,7 +17,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, time, urllib.request
+          import json, os, time, urllib.request, urllib.error
           base="https://api.github.com/repos/mu23XR/AudioBridge"
           expected="ee9c0af9d432287ad94f61a40670cf613d2cf26f"
           def api(path,method="GET",data=None):
@@ -35,19 +35,16 @@ jobs:
           assert old["path"]==".github/workflows/main-native-startup-recovery.yml"
           assert old["status"]=="queued", "Old recovery changed; follow it instead of duplicating"
           assert api("/actions/runs/43096226396/jobs?per_page=1")["total_count"]==0
-          api("/actions/runs/43096226396/cancel","POST")
+          try:
+              api("/actions/runs/43096226396/force-cancel","POST")
+          except urllib.error.HTTPError as failure:
+              detail=failure.read(2000).decode("utf-8",errors="replace")
+              raise RuntimeError("Force-cancel rejected HTTP "+str(failure.code)+": "+detail) from failure
           for _ in range(15):
               old=api("/actions/runs/43096226396")
               if old["status"]=="completed":
                   break
               time.sleep(2)
-          if old["status"]!="completed":
-              api("/actions/runs/43096226396/force-cancel","POST")
-              for _ in range(10):
-                  old=api("/actions/runs/43096226396")
-                  if old["status"]=="completed":
-                      break
-                  time.sleep(2)
           assert old["status"]=="completed" and old["conclusion"]=="cancelled", "Old recovery is not safely stopped"
           native=api("/actions/runs/43090517310")
           assert native["run_attempt"]==2 and native["status"]=="completed" and native["conclusion"]=="startup_failure"
