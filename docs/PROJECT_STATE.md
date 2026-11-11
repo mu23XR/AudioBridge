@@ -2,21 +2,27 @@
 
 ## PR75 acceptance repair and main integration
 
-The owner now authorizes diagnosing/fixing the two latest failed checks and
-merging PR75 into main after all validation passes. Work item:
-[PR75 acceptance](work-items/pr75-acceptance-20261112.md), Issues80/51.
-The worker test races coroutine debug thread-name decoration; corrected
-identity/termination inspection passes1000 debug-enabled repeats and13 original
-methods. Native original report shows before-silence software loss, including
-premature soft cuts after short scheduling bursts. A real-queue regression fails
-the old policy; requiring250ms sustained excess passes22 buffer tests while
-keeping the60ms hard ceiling and every native/producer/latency bound.
-The first repaired sourceb6 still fails a valid native phase from110ms playback
-loop gaps while input64.254ms remains valid. The next candidate configures the
-owned audio thread's Android AUDIO scheduling before track creation; original
-native fixtures independently verify its Linux TID/priority. All original bounds
-and signing remain. Complete new-source CI is pending; no main merge or new
-product Release has occurred yet.
+PR75 merged at36a3343454b8cf00872f51fbd7d554a7ab31c933 after all six exact0979
+workflows passed, both native suites12 tests/zero skipped, stable/preview actual
+permanent-signer/package/source/hash verification and cleanup intact. Issue80
+is closed. The debug-name race, transient soft trim and owned playback scheduling
+repairs retain all original targets, hard capacity and native acceptance bounds.
+[PR75 investigation](work-items/pr75-acceptance-20261112.md) retains the history.
+
+Postmerge native43090517310 rejected paced input88.164ms over the unchanged80ms
+contract. Its incomplete phase is not a new native pass. The verified archive
+shows66 pending packets, nearby same-process46.294ms GC and system delays;
+the exact scheduling cause is not proven. Subsequent startup attempts created
+zero jobs during the official GitHub Actions incident dvy0t3mvh1lg, now resolved.
+Actual native revalidation remains pending under
+[main native follow-up](work-items/main-native-input-20261112.md).
+
+Main ee9c0af removed inherited Dependabot configuration; all14 unsolicited bot
+PRs81–94 were closed without merging. Automatic dependency upgrades stay off.
+This documentation-only update also retires an obsolete recovery script's
+exact-ee9 main lease, preventing it from starting an additional native attempt.
+Only the existing unchanged native workflow will be freshly dispatched after
+the fence. No product/fixture/test-limit/signing change or new Release.
 The older release-flow and publication snapshots below retain their dates.
 
 ## Release delivery without Actions package copies
@@ -27,7 +33,7 @@ prereleases and stable packages remain stable/Latest, after their existing gates
 Ordinary Windows validation no longer retains packages. Native diagnostics use
 their own retention-scoped drafts. Signing, package/source/provenance checks,
 download verification and all native test limits remain intact. Local Python
-regressions and workflow lint pass; nonpublishing CI validation is pending.
+regressions, workflow lint and full nonpublishing CI validation passed on0979.
 The stable request is disarmed so this maintenance change cannot republish2.0.1.
 Work: [direct Release delivery](work-items/release-assets-direct-20261112.md).
 
@@ -36,7 +42,7 @@ Work: [direct Release delivery](work-items/release-assets-direct-20261112.md).
 The stable/latest Release is [v2.0.1](https://github.com/mu23XR/AudioBridge/releases/tag/v2.0.1),
 immutable source4cbea4a97b73554ca8f9260bc211736916b12154/run41857316658,
 with nine verified assets. Existing installations and historical Releases remain.
-PR75 remains Draft/unmerged; this CI task does not merge product code into main.
+PR75 is merged as described above; the published nine assets remain unchanged.
 The following preparation details are historical and do not override this status.
 
 ## Historical 2.0.1 release preparation

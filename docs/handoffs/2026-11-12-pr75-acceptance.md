@@ -1,5 +1,10 @@
 # PR75 repair handoff
 
+PR75 completed: merged36a3343, exacttree equals six-gate accepted0979, both
+native12/0skip and original signing retained; Issue80 closed. Main ee9 removed
+Dependabot; no bot upgrades merged. For later native input/startup diagnosis,
+use 2026-11-12-main-native-input.md. Entries below are investigation history.
+
 Latest: sourceb6fd39a is NOT accepted for main. All ordinary/signed preview
 checks pass; independent native attempt2 passes12/0skip after invalid input.
 Root first SDK download stalled16minutes and was cancelled/restarted without

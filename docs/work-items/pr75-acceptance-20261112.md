@@ -1,5 +1,12 @@
 # PR75 acceptance repairs and main integration
 
+Completed: PR75 merged36a3343454b8cf00872f51fbd7d554a7ab31c933 after six0979
+gates passed, including both native12/0skip and original permanent signer checks.
+Issue80 is closed. Later main input/startup failures are tracked separately in
+[main native follow-up](main-native-input-20261112.md). Dependency automation was
+removed from main ee9c0af and botPRs81–94 closed/unmerged. The historical pending
+entries below do not supersede this completed integration or the newer work item.
+
 Status: additional native scheduling repair under validation; main integration pending. Owner explicitly requests fixing both failed
 checks, retaining all existing tests and signer verification, then marking PR75
 ready and merging into main only after complete validation. Tracks #80 (worker
