@@ -135,7 +135,12 @@ def validate_instrumentation(output: str) -> dict[str, int]:
             code = int(line.partition(":")[2].strip())
             test = (bundle.get("class", ""), bundle.get("test", ""))
             if code not in (0, 1):
-                raise RuntimeError(f"Instrumentation failed/skipped a test: {test}, status={code}")
+                # Preserve the assertion's first line in the Actions log. Full
+                # stacks remain in diagnostics; do not require downloading a ZIP
+                # merely to distinguish queue loss from an invalid producer.
+                detail = bundle.get("stack", "").splitlines()
+                reason = f"; {detail[0][:2000]}" if detail else ""
+                raise RuntimeError(f"Instrumentation failed/skipped a test: {test}, status={code}{reason}")
             if test[0] not in CLASSES or not test[1]:
                 raise RuntimeError(f"Unexpected instrumentation test: {test}")
             if bundle.get("numtests") != str(EXPECTED_TESTS):

@@ -1,5 +1,19 @@
 # Project State
 
+## PR75 acceptance repair and main integration
+
+The owner now authorizes diagnosing/fixing the two latest failed checks and
+merging PR75 into main after all validation passes. Work item:
+[PR75 acceptance](work-items/pr75-acceptance-20261112.md), Issues80/51.
+The worker test races coroutine debug thread-name decoration; corrected
+identity/termination inspection passes1000 debug-enabled repeats and13 original
+methods. Native original report shows before-silence software loss, including
+premature soft cuts after short scheduling bursts. A real-queue regression fails
+the old policy; requiring250ms sustained excess passes22 buffer tests while
+keeping the60ms hard ceiling and every native/producer/latency bound. Complete
+CI remains pending; no main merge or new product Release has occurred yet.
+The older release-flow and publication snapshots below retain their dates.
+
 ## Release delivery without Actions package copies
 
 [Issue78](https://github.com/mu23XR/AudioBridge/issues/78) replaces installer artifact

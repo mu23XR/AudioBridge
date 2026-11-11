@@ -4,6 +4,33 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ReceiverBufferPolicyTest {
+    @Test fun aBriefNativeAdmissionStallDoesNotDiscardARecoverablePcmBurst() {
+        val queue = PcmQueue(4, 11_520)
+        val original = ByteArray(10_752) { (it * 31 + it / 256).toByte() } //56 ms.
+        original.asList().chunked(256).forEach { queue.offer(it.toByteArray()) }
+        val policy = ReceiverBacklogPolicy(48_000, 4)
+        val pump = PcmDrainPump(queue, 48_000, 4) { 0L }
+        var nativeFrames = 1_680L
+        val full = pump.drain(20, { nativeFrames }) { _, _, _ -> fail("No native headroom"); 0 }
+        assertTrue(full.blocked)
+        assertNull("A newly blocked burst is not yet stale", policy.softwareLimit(0, queue.bytes(), full.limited))
+        val accepted = ArrayList<Byte>()
+        repeat(8) { tick ->
+            nativeFrames = (nativeFrames - 384).coerceAtLeast(0)
+            val drained = pump.drain(20, { nativeFrames }) { pcm, offset, length ->
+                accepted.addAll(pcm.copyOfRange(offset, offset + length).toList())
+                nativeFrames += length / 4
+                length
+            }
+            assertNull(policy.softwareLimit((tick + 1L) * 8, queue.bytes(), drained.limited))
+            assertTrue(nativeFrames <= 1_680)
+            assertTrue(queue.bytes() <= 11_520)
+        }
+        assertArrayEquals(original, accepted.toByteArray())
+        assertEquals(0, queue.bytes())
+        assertEquals(0L, queue.discardedBytes)
+    }
+
     @Test fun smallPacketsKeepUpEvenWhenTheWorkerRunsOnlyEveryEightMilliseconds() {
         val queue = PcmQueue(4, 11_520)
         val pump = PcmDrainPump(queue, 48_000, 4) { 0L }
@@ -92,7 +119,9 @@ class ReceiverBufferPolicyTest {
         val pump = PcmDrainPump(queue, 48_000, 4) { 0L }
         assertTrue(pump.drain(20, { 1_680 }) { _, _, _ -> fail("Native buffer is full"); 0 }.blocked)
         val policy = ReceiverBacklogPolicy(48_000, 4)
-        val keep = policy.softwareLimit(0, queue.bytes())!!
+        assertNull(policy.softwareLimit(0, queue.bytes()))
+        assertNull(policy.softwareLimit(249, queue.bytes()))
+        val keep = policy.softwareLimit(250, queue.bytes())!!
         assertEquals(7_680, keep)
         assertEquals(3_328, queue.trimTo(keep))
         assertEquals(3_328L, queue.discardedBytes)
@@ -170,7 +199,8 @@ class ReceiverBufferPolicyTest {
         assertTrue(blocked.blocked)
         assertFalse(blocked.limited)
         assertEquals(0, blocked.writes)
-        val retained = policy.softwareLimit(43, queue.bytes(), blocked.limited)!!
+        assertNull(policy.softwareLimit(43, queue.bytes(), blocked.limited))
+        val retained = policy.softwareLimit(293, queue.bytes(), blocked.limited)!!
         assertEquals(7_680, retained)
         assertEquals(3_072, queue.trimTo(retained))
         assertEquals(3_072L, queue.discardedBytes)
@@ -184,12 +214,13 @@ class ReceiverBufferPolicyTest {
         val queue = PcmQueue(4, 11_520)
         val policy = ReceiverBacklogPolicy(48_000, 4)
         queue.offer(ByteArray(11_008))
-        queue.trimTo(policy.softwareLimit(0, queue.bytes())!!)
+        assertNull(policy.softwareLimit(0, queue.bytes()))
+        queue.trimTo(policy.softwareLimit(250, queue.bytes())!!)
         repeat(50) { queue.offer(ByteArray(256)) }
         assertTrue(queue.bytes() <= 11_520)
-        assertNull(policy.softwareLimit(249, queue.bytes()))
+        assertNull(policy.softwareLimit(499, queue.bytes()))
         val discarded = queue.discardedBytes
-        queue.trimTo(policy.softwareLimit(250, queue.bytes())!!)
+        queue.trimTo(policy.softwareLimit(749, queue.bytes())!!)
         assertEquals(7_680, queue.bytes())
         assertTrue(queue.discardedBytes > discarded)
     }
@@ -198,7 +229,24 @@ class ReceiverBufferPolicyTest {
         val policy = ReceiverBacklogPolicy(48_000, 4)
         assertNull(policy.softwareLimit(0, 0))
         assertNull(policy.softwareLimit(0, 50 * 192))
-        assertEquals(40 * 192, policy.softwareLimit(0, 50 * 192 + 4))
+        assertNull(policy.softwareLimit(0, 50 * 192 + 4))
+        assertEquals(40 * 192, policy.softwareLimit(250, 50 * 192 + 4))
+    }
+
+    @Test fun sustainedBacklogSurvivesAContinuationButRecoveryAndReconfigurationResetItsAge() {
+        val policy = ReceiverBacklogPolicy(48_000, 4)
+        val high = 11_008
+        assertNull(policy.softwareLimit(0, high))
+        assertNull(policy.softwareLimit(200, high, hasWritableContinuation = true))
+        assertNull(policy.softwareLimit(249, high))
+        assertEquals(7_680, policy.softwareLimit(250, high))
+        assertNull(policy.softwareLimit(300, high))
+        assertNull(policy.softwareLimit(400, 50 * 192))
+        assertNull(policy.softwareLimit(500, high))
+        policy.reset()
+        assertNull(policy.softwareLimit(750, high))
+        assertNull(policy.softwareLimit(999, high))
+        assertEquals(7_680, policy.softwareLimit(1_000, high))
     }
 
     @Test fun trimmingRemovesOnlyOldAlignedFramesAfterAPartialWrite() {

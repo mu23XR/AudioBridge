@@ -48,6 +48,18 @@ class AndroidNativeResultTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "failed/skipped"):
                     native.validate_instrumentation(self.output(events))
 
+    def test_failed_native_assertion_is_visible_without_downloading_diagnostics(self):
+        events = list(self.events)
+        reason = 'java.lang.AssertionError: adaptive before silence discarded sustained small-payload input: 21060 bytes'
+        events[1] = events[1].replace('INSTRUMENTATION_STATUS_CODE: 0',
+            'INSTRUMENTATION_STATUS: stack=' + reason + '\n\tat fixture.method(Fixture.kt:247)\n'
+            'INSTRUMENTATION_STATUS_CODE: -2')
+        with self.assertRaises(RuntimeError) as caught:
+            native.validate_instrumentation(self.output(events))
+        self.assertIn(reason, str(caught.exception))
+        self.assertIn('status=-2', str(caught.exception))
+        self.assertNotIn('Fixture.kt:247', str(caught.exception))
+
     def test_partial_run_and_summary_without_events_are_rejected(self):
         for events in (self.events[:-1], []):
             with self.subTest(event_count=len(events)):

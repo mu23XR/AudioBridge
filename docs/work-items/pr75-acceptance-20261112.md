@@ -1,6 +1,6 @@
 # PR75 acceptance repairs and main integration
 
-Status: diagnosis in progress. Owner explicitly requests fixing both failed
+Status: implementation complete; full CI and main integration pending. Owner explicitly requests fixing both failed
 checks, retaining all existing tests and signer verification, then marking PR75
 ready and merging into main only after complete validation. Tracks #80 (worker
 test), #51 (native silence/playout) and PR75. No new product release or install
@@ -55,3 +55,36 @@ suspension/ownership/shutdown checks, and checks the undecorated factory name
 after the thread terminates. Production worker behavior is unchanged.
 Evidence stays in ignored out/pr75-acceptance-20261112. No desktop/browser UI
 will be used further; the user's machine-control preference is explicit.
+
+## Scoped repair and local regressions
+
+Worker fix passes1000 debug-enabled ownership iterations and the original13
+lifecycle methods. Both original Thread identity and termination guarantees stay.
+The earlier read-only UI attempt was stopped; no further desktop/browser input.
+
+Original native phase/journal correlation (cloud43075982962) confirms valid
+producer maxlag77.975ms<80ms; no native discard/rebuild/recovery. Measured software
+loss21060B includes two soft cuts3004+2556=5560B after48–49ms worker gaps. Neighboring
+samples show these high queues recover within250ms. The policy treated the first
+full-buffer burst as stale immediately, adding avoidable loss to hard-cap drops.
+New realQueue→pump→policy regression fails that old path: recoverable56ms burst
+is cut before its native headroom opens. Repair requires continuous250ms excess
+before the same50→40ms soft cut. Writable continuation still skips a cut without
+consuming eligibility; recovery/config reset its age. All original test methods
+and stale-cut/tail/cooldown/hard-cap assertions remain, with sustained-overage
+setup for the changed soft-cut timing. Hard60ms capacity, all buffer/native/loss/
+producer limits, targets, thread priority and protocol are unchanged. Focused
+buffer suite22 methods passes. Strict cloud native acceptance is still required.
+Temporary diagnostic workflow is removed from the final tree.
+
+Native runner errors now include the original assertion's bounded first line,
+while retaining full stacks in diagnostics and unchanged strict result parsing.
+This prevents future queue-loss and producer-contract failures being hidden
+behind the same status-2 message. Original parser tests remain; a new regression
+checks that a failed assertion still fails even with a success summary.
+Final local preflight passes:62 script tests,9 original Windows publisher tests,
+actionlint, clean diff,1000 worker ownership repeats plus13 original worker
+methods and22 buffer methods. Native fixture code and thresholds, Desktop
+product tree, all signing/transport workflows and original stable publisher
+are unchanged froma31. New full Android total is expected175 methods; cloud
+results, actual APK signer and both native runs remain to be checked.

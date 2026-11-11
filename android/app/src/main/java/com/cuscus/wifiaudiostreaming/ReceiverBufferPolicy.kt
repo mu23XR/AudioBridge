@@ -51,19 +51,29 @@ internal class ReceiverBacklogPolicy(private val sampleRate: Int, private val fr
     private val triggerBytes = framesForMs(ReceiverPlayout.QUEUE_TRIM_TRIGGER_MS) * frameSize
     private val retainedBytes = framesForMs(ReceiverPlayout.QUEUE_RETENTION_MS) * frameSize
     private var lastTrimAt: Long? = null
+    private var overLimitSince: Long? = null
 
     fun softwareLimit(nowMs: Long, queuedBytes: Int, hasWritableContinuation: Boolean = false): Int? {
         // A bounded batch may yield while native admission still has room.
         // Continue that work before treating its remaining FIFO as stale;
         // the hard queue ceiling remains enforced independently by offer().
+        if (queuedBytes <= triggerBytes) {
+            overLimitSince = null
+            return null
+        }
         if (hasWritableContinuation) return null
-        if (queuedBytes <= triggerBytes) return null
+        // A full native buffer plus one late packet burst is not evidence of
+        // stale audio. Let the pump catch up before cutting a sustained backlog.
+        // offer() still enforces the same hard60ms ceiling during this grace.
+        val since = overLimitSince ?: nowMs.also { overLimitSince = it }
+        if (nowMs - since < 250) return null
         if (lastTrimAt?.let { nowMs - it < 250 } == true) return null
         lastTrimAt = nowMs
+        overLimitSince = null
         return retainedBytes.toInt()
     }
 
-    fun reset() { lastTrimAt = null }
+    fun reset() { lastTrimAt = null; overLimitSince = null }
     private fun framesForMs(ms: Int): Long = sampleRate.toLong() * ms / 1000
 
 }

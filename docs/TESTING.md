@@ -79,15 +79,19 @@ capture, OEM key arbitration, encrypted multicast delivery or prolonged subjecti
 ### test21 review corrections (emulator only)
 
 ReceiverBufferPolicyTest must exercise the real PcmQueue→pump→policy→trim path:
-bounded bursts drain before trimming, a residual50–60ms queue reaches the soft
-trigger and retains40ms, cooldown never removes the60ms hard safety bound, and
+bounded bursts drain before trimming, a residual50–60ms queue sustained for250ms
+reaches the soft trigger and retains40ms, cooldown never removes the60ms hard safety bound, and
 trim/overflow boundaries signal a frame-based ramp. Numeric queues above the
 hard capacity cannot serve as the sole acceptance test.
 
 A simulated42ms device call must exhaust the pump budget while leaving native
 headroom; writable continuation retains and drains the exact PCM before soft
-trimming. A later admission-blocked batch still trims, without losing cooldown
-eligibility. PcmQueueInFlightTest covers overflow/trim during an unlocked write:
+trimming. A later admission-blocked backlog still trims once sustained, without
+losing cooldown eligibility. A fresh56ms burst blocked by the native ceiling must
+drain byte-for-byte without a premature cut; recovery and reconfiguration reset
+stale-age tracking. The worker ownership test keeps coroutine debug enabled and
+checks Thread identity while active, then the restored base name after shutdown.
+PcmQueueInFlightTest covers overflow/trim during an unlocked write:
 count only unaccepted evicted bytes, keep loss monotonic, preserve partial tails
 and queue bounds, distinguish counted/stop clears, and release writer ownership
 after invalid/throwing output. Neither fix relaxes native progress/loss limits.
