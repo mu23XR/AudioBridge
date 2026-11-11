@@ -6,7 +6,8 @@ on:
     paths: [.github/workflows/pr75-diagnostics.yml]
 
 permissions:
-  contents: read
+  # Draft visibility requires push-level contents access; the job only performs GETs.
+  contents: write
 
 jobs:
   inspect:
