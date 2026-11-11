@@ -161,17 +161,15 @@ jobs:
 
       - name: Run Android unit tests
         working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest --stacktrace
+        run: bash gradlew :app:testDebugUnitTest --stacktrace
 
       - name: Run Android lint
         working-directory: android
-        run: ./gradlew :app:lintDebug --stacktrace
+        run: bash gradlew :app:lintDebug --stacktrace
 
       - name: Build signed standalone test APK
         working-directory: android
-        run: ./gradlew :app:assemblePreview --stacktrace
+        run: bash gradlew :app:assemblePreview --stacktrace
 
       - name: Verify actual APK signer, package, version and source
         run: |

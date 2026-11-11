@@ -1,6 +1,7 @@
 # Direct Release delivery without Actions package copies
 
-Issue: [#78](https://github.com/mu23XR/AudioBridge/issues/78). Status: implementation in progress.
+Issue: [#78](https://github.com/mu23XR/AudioBridge/issues/78),
+[PR79](https://github.com/mu23XR/AudioBridge/pull/79). Status: cloud validation in progress.
 
 ## Scope and baseline
 
@@ -36,3 +37,15 @@ actionlint1.7.12 (verified archive digest). Tests cover signing-material rejecti
 wrong run/source, changed or public drafts, exact retry manifests, tag cleanup,
 failure retention and diagnostic retention based on run time rather than commit
 time. All product publication requests are false for cloud validation.
+
+## First cloud validation and repair
+
+Source43db75b: root43065216885 passed every stable gate, both signed/package
+transfers, combined bundle verification and staging cleanup. Independent Android,
+Windows, governance and strict native43065216903 also passed. Preview43065216996
+passed APK identity checks but its source guard rejected the checkout: the old
+preview workflow runs `chmod +x gradlew` although Git tracks that file as100644.
+Use `bash gradlew` consistently with stable builds, without changing tracked
+permissions. Preserve the source guard and all unit/lint/assemble tasks; the
+workflow regression now checks this invocation. A fresh candidate must pass the
+whole preview path before integration. No failed gate was bypassed.

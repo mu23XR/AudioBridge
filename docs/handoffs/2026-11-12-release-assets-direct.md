@@ -19,8 +19,13 @@ Signing keys are rejected as transport payloads and are always removed after bui
 
 Local preflight: existing40 script tests +21 new tests and existing9 Windows
 publisher tests passed; YAML and official hash-verified actionlint1.7.12 passed.
-The key-material rejection regression also passes. Next: commit only this scoped change,
-push a dedicated branch/PR, exercise the
-real small-file smoke and both build/draft-transfer paths with publish=false.
+The key-material rejection regression also passes. PR79 targets release/2.0.1.
+First candidate43db75b passed stable43065216885 including real transport smoke,
+both platform transfers, unified verification and cleanup, plus the independent
+strict native gate. Preview43065216996 failed its strict source guard after APK
+identity passed: legacy chmod changes the100644 gradlew mode on Linux. The
+workflow now uses bash gradlew for all three unchanged tasks; no source/signing
+check is relaxed. Next: validate the repaired candidate and full preview bundle
+transfer with publish=false, then integrate only this CI change into release/2.0.1.
 Keep all native acceptance tests and signer checks; do not bypass a failed gate
 or publish a new product version as a workflow test.

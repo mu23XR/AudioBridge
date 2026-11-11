@@ -208,7 +208,10 @@ class PreviewReleaseTest(unittest.TestCase):
         test = (root / ".github/workflows/android-test.yml").read_text(encoding="utf-8-sig")
         self.assertIn("needs: [meta, build, windows, governance]", test)
         for task in (":app:testDebugUnitTest", ":app:lintDebug", ":app:assemblePreview"):
-            self.assertIn(task, test)
+            self.assertIn("bash gradlew " + task, test)
+        # gradlew is tracked as 100644: chmod dirties the checkout on Linux and
+        # must not make a legitimate build fail its strict source check.
+        self.assertNotIn("chmod +x gradlew", test)
         self.assertIn("SIGNING_KEY_BASE64", test)
         windows = (root / ".github/workflows/desktop-windows.yml").read_text(encoding="utf-8-sig")
         for task in (".\\gradlew.bat check", ".\\gradlew.bat generateMan", "packagePortableArchives"):
