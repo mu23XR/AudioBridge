@@ -1,0 +1,62 @@
+name: Recover main native startup
+on:
+  push:
+    branches: [maintenance/main-native-input-inspect-20261112]
+    paths: [.github/workflows/main-native-startup-recovery.yml]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Stop the zero-job stale recovery then dispatch the unchanged main native workflow once
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          base="https://api.github.com/repos/mu23XR/AudioBridge"
+          expected="ee9c0af9d432287ad94f61a40670cf613d2cf26f"
+          def api(path,method="GET",data=None):
+              payload=None if data is None else json.dumps(data).encode("utf-8")
+              headers={"Authorization":"Bearer "+os.environ["GH_TOKEN"],"Accept":"application/vnd.github+json",
+                       "X-GitHub-Api-Version":"2022-11-28"}
+              if payload is not None:
+                  headers["Content-Type"]="application/json"
+              with urllib.request.urlopen(urllib.request.Request(base+path,data=payload,headers=headers,method=method),timeout=30) as r:
+                  body=r.read()
+                  return json.loads(body) if body else {}
+          assert api("/git/ref/heads/main")["object"]["sha"]==expected, "Main moved; inspect before dispatch"
+          old=api("/actions/runs/43096226396")
+          assert old["head_sha"]=="666832402cb6d607c5cfa89a27970a80d1e23d30" and old["event"]=="push"
+          assert old["path"]==".github/workflows/main-native-startup-recovery.yml"
+          assert old["status"]=="queued", "Old recovery changed; follow it instead of duplicating"
+          assert api("/actions/runs/43096226396/jobs?per_page=1")["total_count"]==0
+          api("/actions/runs/43096226396/cancel","POST")
+          for _ in range(15):
+              old=api("/actions/runs/43096226396")
+              if old["status"]=="completed":
+                  break
+              time.sleep(2)
+          if old["status"]!="completed":
+              api("/actions/runs/43096226396/force-cancel","POST")
+              for _ in range(10):
+                  old=api("/actions/runs/43096226396")
+                  if old["status"]=="completed":
+                      break
+                  time.sleep(2)
+          assert old["status"]=="completed" and old["conclusion"]=="cancelled", "Old recovery is not safely stopped"
+          native=api("/actions/runs/43090517310")
+          assert native["run_attempt"]==2 and native["status"]=="completed" and native["conclusion"]=="startup_failure"
+          assert native["head_sha"]=="36a3343454b8cf00872f51fbd7d554a7ab31c933"
+          recent=api("/actions/runs?event=workflow_dispatch&head_sha="+expected+"&per_page=20")["workflow_runs"]
+          existing=[r for r in recent if r["path"]==".github/workflows/android-native.yml" and r["created_at"]>="2026-11-11T20:11:00Z"]
+          assert not existing, "Native dispatch already exists; follow its result instead"
+          assert api("/git/ref/heads/main")["object"]["sha"]==expected, "Main moved during cancellation"
+          api("/actions/workflows/388312461/dispatches","POST",{"ref":"main"})
+          print("OLD_RECOVERY_CANCELLED run=43096226396",flush=True)
+          print("NATIVE_MAIN_DISPATCHED_ONCE source="+expected+" workflow=388312461",flush=True)
+          PY
