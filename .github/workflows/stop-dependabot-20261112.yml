@@ -6,13 +6,13 @@ on:
 permissions:
   contents: read
   actions: write
-# Supersede only the known rejected PR91 native run to free a runner slot.
+# Supersede only the known rejected PR90 Windows run; use the separate macOS runner pool.
 concurrency:
-  group: android-native-Validate Android Native Audio-refs/pull/91/merge
+  group: desktop-windows-Validate Desktop Windows-refs/pull/90/merge
   cancel-in-progress: true
 jobs:
   stop:
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     timeout-minutes: 5
     steps:
       - name: Cancel only the verified rejected bot run set
@@ -69,6 +69,12 @@ jobs:
                   assert page <= 10, "Unexpected pagination"
           for run in targets.values():
               cancel(run)
+          old = api('/actions/runs/43091865618')
+          assert old['head_sha'] == 'cee228beb2e8246f6675a003c2febebb9f9a3dc1'
+          assert old['name'] == 'Stop rejected dependency automation' and old['event'] == 'push'
+          if old['status'] != 'completed':
+              api('/actions/runs/43091865618/cancel', 'POST')
+              print('superseded queued shutdown helper', flush=True)
           for _ in range(15):
               live = []
               for ident in list(updaters) + list(targets):
@@ -84,15 +90,3 @@ jobs:
           else:
               raise RuntimeError("Cancellation still pending: " + str(live))
           PY
-  release-rejected-native-slots:
-    permissions: {}
-    strategy:
-      matrix:
-        pr: [82, 83, 85, 87]
-    concurrency:
-      group: android-native-Validate Android Native Audio-refs/pull/${{ matrix.pr }}/merge
-      cancel-in-progress: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    steps:
-      - run: echo 'Superseded only the already-closed, owner-rejected bot native run.'
