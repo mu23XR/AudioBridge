@@ -6,13 +6,13 @@ on:
 permissions:
   contents: read
   actions: write
-# Supersede only the known rejected PR90 Windows run; use the separate macOS runner pool.
+# Supersede only the last verified rejected PR81 release run.
 concurrency:
-  group: desktop-windows-Validate Desktop Windows-refs/pull/90/merge
+  group: stable-release-refs/pull/81/merge
   cancel-in-progress: true
 jobs:
   stop:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Cancel only the verified rejected bot run set
@@ -75,6 +75,12 @@ jobs:
           if old['status'] != 'completed':
               api('/actions/runs/43091865618/cancel', 'POST')
               print('superseded queued shutdown helper', flush=True)
+          old_mac = api('/actions/runs/43092366512')
+          assert old_mac['head_sha'] == '980ea686217e7436e22b14f57ff0da20d33c14df'
+          assert old_mac['name'] == 'Stop rejected dependency automation' and old_mac['event'] == 'push'
+          if old_mac['status'] != 'completed':
+              api('/actions/runs/43092366512/cancel', 'POST')
+              print('stopped queued alternate runner helper', flush=True)
           for _ in range(15):
               live = []
               for ident in list(updaters) + list(targets):
