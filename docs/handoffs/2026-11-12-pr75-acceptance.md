@@ -1,5 +1,18 @@
 # PR75 repair handoff
 
+Latest: sourceb6fd39a is NOT accepted for main. All ordinary/signed preview
+checks pass; independent native attempt2 passes12/0skip after invalid input.
+Root first SDK download stalled16minutes and was cancelled/restarted without
+discarding successful inputs. Root native attempt2 REALLY fails40440B software
+discard, producer64.254ms valid,110ms loop gap, no soft trim/native discard and
+ample host memory. Original report inspected in43084177504 and saved locally.
+Additional code now configures only the owned playback thread with Android
+AUDIO priority before AudioTrack and logs actual nice. Existing native fixtures
+independently query the owner's actual Linux TID/priority. SDK setup has10minute timeout; native/count/loss/input/buffer
+thresholds stay. This candidate needs fresh full CI before ready/mergePR75.
+User says another chat changed GitHub authorization; tools briefly disconnected
+then recovered. No new desktop/browser control or authorization change performed.
+
 Owner authorizes diagnosing/fixing the two current Android acceptance failures
 and merging PR75 into main after all verification passes. See
 work-items/pr75-acceptance-20261112.md. Worktree release-flow, task branch

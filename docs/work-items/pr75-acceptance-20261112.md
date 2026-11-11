@@ -1,6 +1,6 @@
 # PR75 acceptance repairs and main integration
 
-Status: implementation complete; full CI and main integration pending. Owner explicitly requests fixing both failed
+Status: additional native scheduling repair under validation; main integration pending. Owner explicitly requests fixing both failed
 checks, retaining all existing tests and signer verification, then marking PR75
 ready and merging into main only after complete validation. Tracks #80 (worker
 test), #51 (native silence/playout) and PR75. No new product release or install
@@ -88,3 +88,33 @@ methods and22 buffer methods. Native fixture code and thresholds, Desktop
 product tree, all signing/transport workflows and original stable publisher
 are unchanged froma31. New full Android total is expected175 methods; cloud
 results, actual APK signer and both native runs remain to be checked.
+
+## First repaired-source cloud results and remaining native cause
+
+Sourceb6fd39a passes Android175-method build/lint, Windows, governance, signed
+preview transfer/bundle/cleanup and root signed Android/Windows gates. Independent
+native attempt1 rejects invalid86.533ms input; its one bounded attempt2 passes
+all12 methods/0skips. Root SDK download stalls16minutes (10→20% progress), is
+explicitly cancelled/restarted on a fresh runner with successful outputs retained.
+Both environmental failures remain recorded and never count as native passes.
+
+Root native attempt2 then finds REAL before-silence discard40440B. Its original
+verified report (cloud inspection43084177504) shows valid64.254ms producer lag,
+110ms playback loop gaps, no native discard/rebuild/recovery, no soft trims and
+ample host memory. Thus sustained-backlog repair is insufficient by itself:
+the normal-priority owner can still miss the60ms FIFO deadline while input runs.
+No main merge or retry-for-green is performed on this actual failure.
+
+The receiver now sets Android's standard AUDIO Linux priority on its actual
+owned thread before creating AudioTrack, records its actual Linux TID/priority, and
+lets setup failures follow the existing explicit playback-failure cleanup.
+It does not elevate shared IO, input, cleanup or UI threads. Original12-method
+native fixtures independently query that TID's actual Linux priority and assert AUDIO;
+all original progress/loss/producer/buffer assertions remain. SDK setup has an
+explicit10minute failure bound instead of consuming the entire35minute job.
+No target/capacity/acceptance bound or signing change. Fresh full CI is required.
+
+Local preflight for this additional repair passes the changed playback Kotlin
+source compile against the cached Android API/dependencies, actionlint and
+git diff checks. This is not full Android/native acceptance; the new source
+must still compile the modified instrumentation fixture and pass every cloud gate.

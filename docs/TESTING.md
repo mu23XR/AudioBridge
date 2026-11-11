@@ -91,6 +91,8 @@ losing cooldown eligibility. A fresh56ms burst blocked by the native ceiling mus
 drain byte-for-byte without a premature cut; recovery and reconfiguration reset
 stale-age tracking. The worker ownership test keeps coroutine debug enabled and
 checks Thread identity while active, then the restored base name after shutdown.
+Native playout fixtures additionally verify the actual owned playback thread's
+Android audio priority; shared IO and cleanup retain their ordinary scheduling.
 PcmQueueInFlightTest covers overflow/trim during an unlocked write:
 count only unaccepted evicted bytes, keep loss monotonic, preserve partial tails
 and queue bounds, distinguish counted/stop clears, and release writer ownership

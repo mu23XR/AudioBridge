@@ -1,5 +1,6 @@
 package com.cuscus.wifiaudiostreaming
 
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -217,6 +218,9 @@ class ReceiverPlayoutDeviceTest {
     }
 
     private fun assertBufferBound(player: ReceiverPlayout) {
+        assertTrue("Playback must publish its actual Linux thread ID", player.playbackThreadId > 0)
+        assertEquals("Playback must run on its configured audio-priority owner",
+            Process.THREAD_PRIORITY_AUDIO, Process.getThreadPriority(player.playbackThreadId))
         // More permissive than the intended target budget, but still excludes
         // an extra unbounded/native-capacity wait masked by playback progress.
         val snapshot = player.snapshot()

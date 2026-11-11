@@ -78,6 +78,7 @@ jobs:
           packages: platform-tools
 
       - name: Install SDK and create isolated API 35 emulator
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "emulator" "system-images;android-35;google_apis;x86_64"

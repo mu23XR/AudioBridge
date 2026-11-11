@@ -4,6 +4,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Build
+import android.os.Process
 import android.os.SystemClock
 import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import kotlinx.coroutines.*
@@ -44,6 +45,8 @@ internal class ReceiverPlayout(
     @Volatile var bufferedMs = 0
         private set
     @Volatile var playedFrames = 0L
+        private set
+    @Volatile internal var playbackThreadId: Int = 0
         private set
     @Volatile private var track: AudioTrack? = null
     private lateinit var governor: PlayoutGovernor
@@ -127,7 +130,7 @@ internal class ReceiverPlayout(
         }
         result.play()
         outputEpoch++
-        RuntimeDiagnostics.event("SOURCE_OUTPUT_READY", "source=$id ${format.describe()} targetMs=$target startFrames=$startFrames capacityFrames=${result.bufferCapacityInFrames} minBytes=$min rateHz=${result.playbackRate} performanceMode=${if (Build.VERSION.SDK_INT >= 26) result.performanceMode else -1} thread=${Thread.currentThread().name}")
+        RuntimeDiagnostics.event("SOURCE_OUTPUT_READY", "source=$id ${format.describe()} targetMs=$target startFrames=$startFrames capacityFrames=${result.bufferCapacityInFrames} minBytes=$min rateHz=${result.playbackRate} performanceMode=${if (Build.VERSION.SDK_INT >= 26) result.performanceMode else -1} thread=${Thread.currentThread().name} tid=$playbackThreadId priority=${Process.getThreadPriority(playbackThreadId)}")
         result to governor
     }
 
@@ -142,6 +145,12 @@ internal class ReceiverPlayout(
         var maxLoopGapMs = 0L
         var lastGapLogAt = -1_000L
         try {
+            // This executor owns only timed playback. Its default
+            // Java priority can starve the bounded FIFO while input still runs.
+            // Set Linux priority on the actual owner before creating its track;
+            // a failure remains an explicit playback failure, never a fallback.
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+            playbackThreadId = Process.myTid()
             val (_, initial) = buildOutput(targetMs)
             governor = initial
             while (currentCoroutineContext().isActive && !stopped) {

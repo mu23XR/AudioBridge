@@ -10,8 +10,13 @@ identity/termination inspection passes1000 debug-enabled repeats and13 original
 methods. Native original report shows before-silence software loss, including
 premature soft cuts after short scheduling bursts. A real-queue regression fails
 the old policy; requiring250ms sustained excess passes22 buffer tests while
-keeping the60ms hard ceiling and every native/producer/latency bound. Complete
-CI remains pending; no main merge or new product Release has occurred yet.
+keeping the60ms hard ceiling and every native/producer/latency bound.
+The first repaired sourceb6 still fails a valid native phase from110ms playback
+loop gaps while input64.254ms remains valid. The next candidate configures the
+owned audio thread's Android AUDIO scheduling before track creation; original
+native fixtures independently verify its Linux TID/priority. All original bounds
+and signing remain. Complete new-source CI is pending; no main merge or new
+product Release has occurred yet.
 The older release-flow and publication snapshots below retain their dates.
 
 ## Release delivery without Actions package copies
