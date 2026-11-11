@@ -57,7 +57,8 @@ jobs:
                   print('\nJOURNAL FORMAT SAMPLE:', text[:1500])
                   selected = []
                   for line in text.splitlines():
-                      if any(marker in line.lower() for marker in ('discard', 'overflow', 'gap', 'slow', 'stall')):
+                      match = re.search(r'wall=(\d+)', line)
+                      if match and bounds[0] - 250 <= int(match.group(1)) <= bounds[1] + 100:
                           selected.append(line)
                   print('\nJOURNAL LOSS/TIMING EVENTS:', '\n'.join(selected)[-90000:])
           PY
