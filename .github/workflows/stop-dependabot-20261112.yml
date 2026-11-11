@@ -1,0 +1,86 @@
+name: Stop rejected dependency automation
+on:
+  push:
+    branches: [ "maintenance/stop-dependabot-20261112" ]
+    paths: [ ".github/workflows/stop-dependabot-20261112.yml" ]
+permissions:
+  contents: read
+  actions: write
+# Supersede only the known rejected PR91 native run to free a runner slot.
+concurrency:
+  group: android-native-Validate Android Native Audio-refs/pull/91/merge
+  cancel-in-progress: true
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel only the verified rejected bot run set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+          repo = "mu23XR/AudioBridge"
+          heads = {item["sha"] for item in json.loads(r'''[{"number":94,"sha":"0bbf6934934cd5ca08bbcaabd6cf2fb736c0a40b","ref":"dependabot/gradle/desktop/bcVersion-1.86"},{"number":93,"sha":"0aacbb3538387f9a0b40e75372bd2ec2bf6170b1","ref":"dependabot/gradle/android/androidx.core-core-splashscreen-1.2.0"},{"number":92,"sha":"60adbea9fe4527e0dd41675bde2edf05f81dae90","ref":"dependabot/gradle/desktop/com.google.zxing-core-3.5.4"},{"number":91,"sha":"b6717c096f19dbd331e4bf9879dca326543afaec","ref":"dependabot/gradle/android/com.google.zxing-core-3.5.4"},{"number":90,"sha":"162361fedeb83ec52cd85cac95ed2d11584ee58d","ref":"dependabot/gradle/desktop/net.java.dev.jna-jna-platform-jpms-5.19.1"},{"number":89,"sha":"c7d778f1210bb2fc8d3e475fae641fe43eb6bb57","ref":"dependabot/gradle/android/io.ktor-ktor-server-cio-3.6.1"},{"number":88,"sha":"ed6ae273839e9f4890e85d09c026890f71896fb2","ref":"dependabot/gradle/desktop/ktorVersion-3.6.1"},{"number":87,"sha":"780f2d6d34448f753e15b5bae7ebcb5f18fc5cbd","ref":"dependabot/gradle/android/material3-1.5.0-rc01"},{"number":86,"sha":"94d9c602048be0ad40ebc1cc4d6afe043b746b08","ref":"dependabot/github_actions/actions/setup-python-7"},{"number":85,"sha":"1157a6bc3e3089fd6f501c07c07cca117673907e","ref":"dependabot/gradle/android/androidx.appcompat-appcompat-1.8.0"},{"number":84,"sha":"eea9289d3b7fea11eb3c098281e0082da79ddd05","ref":"dependabot/github_actions/actions/setup-java-6"},{"number":83,"sha":"9f85cdea35e2b38c2d7c16280878e34b597d83cd","ref":"dependabot/github_actions/actions/checkout-7"},{"number":82,"sha":"a3c9bcba5d1c5795759dc342093b32fe37dbcdcb","ref":"dependabot/github_actions/android-actions/setup-android-4"},{"number":81,"sha":"f9f56d3dd720b57f014b21ed0dc5d021d7b102a4","ref":"dependabot/github_actions/gradle/actions-6"}]''')}
+          updaters = {43090532413, 43090532560, 43090532460}
+          merge = "36a3343454b8cf00872f51fbd7d554a7ab31c933"
+          cutoff = "2026-11-11T19:47:00Z"
+          base = "https://api.github.com/repos/" + repo
+          def api(path, method="GET"):
+              request = urllib.request.Request(base + path, method=method,
+                  headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                           "Accept": "application/vnd.github+json",
+                           "X-GitHub-Api-Version": "2022-11-28"})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  body = response.read()
+                  return json.loads(body) if body else {}
+          def owned(run):
+              return (run["repository"]["full_name"] == repo and
+                  run["actor"]["login"] == "dependabot[bot]" and run["created_at"] >= cutoff and
+                  ((run["id"] in updaters and run["event"] == "dynamic" and run["head_sha"] == merge) or
+                   (run["event"] == "pull_request" and run["head_sha"] in heads)))
+          def cancel(run):
+              assert owned(run), "Refusing unrelated run"
+              if run["status"] == "completed":
+                  return
+              try:
+                  api("/actions/runs/" + str(run["id"]) + "/cancel", "POST")
+                  print("cancel requested", run["id"], run["name"], flush=True)
+              except urllib.error.HTTPError as failure:
+                  current = api("/actions/runs/" + str(run["id"]))
+                  if current["status"] != "completed":
+                      raise
+                  print("already completed", run["id"], current["conclusion"], flush=True)
+          for ident in sorted(updaters):
+              cancel(api("/actions/runs/" + str(ident)))
+          targets = {}
+          for status in ("queued", "in_progress", "waiting", "pending", "requested"):
+              page = 1
+              while True:
+                  runs = api("/actions/runs?actor=dependabot%5Bbot%5D&status=" + status +
+                             "&per_page=100&page=" + str(page))["workflow_runs"]
+                  for run in runs:
+                      if owned(run):
+                          targets[run["id"]] = run
+                  if len(runs) < 100:
+                      break
+                  page += 1
+                  assert page <= 10, "Unexpected pagination"
+          for run in targets.values():
+              cancel(run)
+          for _ in range(15):
+              live = []
+              for ident in list(updaters) + list(targets):
+                  run = api("/actions/runs/" + str(ident))
+                  assert owned(run)
+                  if run["status"] != "completed":
+                      live.append(ident)
+              if not live:
+                  print("STOPPED: all rejected dependency updater and PR runs are terminal; targets=" +
+                        str(len(targets)), flush=True)
+                  break
+              time.sleep(2)
+          else:
+              raise RuntimeError("Cancellation still pending: " + str(live))
+          PY
