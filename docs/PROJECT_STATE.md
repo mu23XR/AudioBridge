@@ -1,6 +1,26 @@
 # Project State
 
-## Stable 2.0.1 release — Android repair resumed
+## Release delivery without Actions package copies
+
+[Issue78](https://github.com/mu23XR/AudioBridge/issues/78) replaces installer artifact
+uploads with run/source-bound draft Release transfer. Test packages remain
+prereleases and stable packages remain stable/Latest, after their existing gates.
+Ordinary Windows validation no longer retains packages. Native diagnostics use
+their own retention-scoped drafts. Signing, package/source/provenance checks,
+download verification and all native test limits remain intact. Local Python
+regressions and workflow lint pass; nonpublishing CI validation is pending.
+The stable request is disarmed so this maintenance change cannot republish2.0.1.
+Work: [direct Release delivery](work-items/release-assets-direct-20261112.md).
+
+## Stable 2.0.1 published
+
+The stable/latest Release is [v2.0.1](https://github.com/mu23XR/AudioBridge/releases/tag/v2.0.1),
+immutable source4cbea4a97b73554ca8f9260bc211736916b12154/run41857316658,
+with nine verified assets. Existing installations and historical Releases remain.
+PR75 remains Draft/unmerged; this CI task does not merge product code into main.
+The following preparation details are historical and do not override this status.
+
+## Historical 2.0.1 release preparation
 
 Tracking: [Release #74](https://github.com/mu23XR/AudioBridge/issues/74).
 

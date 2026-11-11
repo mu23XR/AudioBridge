@@ -124,7 +124,9 @@ runs the 12-method contract, including the receiver's rewritten-reply-port fixtu
 on its own API35 x86_64 SDK emulator. It retains
 a clocked PulseAudio null sink (audio enabled), rejects pre-existing devices,
 validates emulator/package/source identity, counts starts/completions/skips and
-uploads failure diagnostics as well as successful ones. It uses no signing
+retains failure diagnostics as well as successful ones in run-bound draft
+Releases, with 14-day cleanup eligibility and no Actions artifact quota use.
+Fork runs keep workflow logs and cannot write Releases. It uses no signing
 secrets, publishes no APK, and never substitutes a different emulator's pass for
 a recorded MuMu failure. `scripts/run_android_native.py` refuses local/non-CI
 execution so it cannot accidentally select a user's wireless-debugging device.
@@ -136,6 +138,14 @@ opt-in arguments or skipped methods are not successful regression evidence.
 The artifact tool uses only Python's standard library. Run its mismatch/clean-tree
 tests with `python -m unittest discover -s scripts/tests -v`. These tests do not
 sign/build APKs or establish acoustic quality.
+
+Release storage regressions also cover fork/source/run binding, immutable
+attempt-qualified transfer, corrupt downloads, output collisions, failure retry,
+safe staging cleanup, and preserved product Releases. The preview bundle checks
+the actual postbuild permanent signer/package/version/code and both platform
+sources before promotion. Run `python -m unittest discover -s scripts/tests -v`
+and `python scripts/test_desktop_preview.py`; the original verification suites
+remain in place. A real small-file Release transfer smoke runs in stable CI.
 
 ### 2.0.1 follow-up regressions
 

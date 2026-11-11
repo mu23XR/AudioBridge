@@ -15,12 +15,14 @@ on:
     paths:
       - "android/**"
       - "scripts/run_android_native.py"
+      - "scripts/release_stage.py"
       - ".github/workflows/android-native.yml"
   push:
     branches: [ "main" ]
     paths:
       - "android/**"
       - "scripts/run_android_native.py"
+      - "scripts/release_stage.py"
       - ".github/workflows/android-native.yml"
 
 permissions:
@@ -33,10 +35,14 @@ concurrency:
 jobs:
   native-audio:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
     timeout-minutes: 35
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
     env:
+      PYTHONDONTWRITEBYTECODE: "1"
       # A clocked null sink retains the audio path without a physical speaker.
       # Disabling emulator audio would invalidate AudioTrack progress checks.
       QEMU_AUDIO_DRV: pa
@@ -123,11 +129,12 @@ jobs:
             --adb "$ANDROID_HOME/platform-tools/adb" \
             --aapt2 "$ANDROID_HOME/build-tools/36.0.0/aapt2"
 
-      - name: Upload native diagnostics (no APK publication)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-native-api35-${{ steps.source.outputs.sha }}-${{ github.run_attempt }}
-          path: out/android-native/
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Retain native diagnostics without Actions artifact storage
+        if: always() && steps.source.outputs.sha != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: python3 scripts/release_stage.py native-report --scope native --source "$SOURCE_SHA" --directory out/android-native
+      - name: Explain fork diagnostic access
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: echo '::notice::Fork checks retain workflow logs; only same-repository runs can write diagnostic draft Releases.'

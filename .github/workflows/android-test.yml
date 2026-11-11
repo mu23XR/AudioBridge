@@ -4,6 +4,11 @@ on:
   pull_request:
     paths:
       - "docs/releases/build-request.json"
+      - ".github/workflows/android-test.yml"
+      - "scripts/preview_release.py"
+      - "scripts/release_stage.py"
+      - "scripts/tests/test_preview_release.py"
+      - "scripts/tests/test_release_stage.py"
   push:
     tags:
       - "v*-test.*"
@@ -19,71 +24,91 @@ on:
         required: true
         type: string
       artifact_name:
-        description: "Artifact base name"
+        description: "APK filename prefix"
         required: false
         default: "AudioBridge-Android-Preview"
         type: string
+      publish:
+        description: "Publish as a prerelease after all checks"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
 
 concurrency:
   group: android-test-${{ inputs.source_ref || github.ref }}-${{ inputs.version_name || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  windows:
-    uses: ./.github/workflows/desktop-windows.yml
-    # The called workflow also contains the request/same-repository guarded PC
-    # preview publisher. Reusable builds skip it and leave publish empty; their
-    # build job still requests contents:read. Permit that job's declared ceiling.
-    permissions:
-      contents: write
-    with:
-      source_ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
-      version_name: ${{ inputs.version_name || (github.event_name == 'push' && github.ref_name) || '' }}
-      upload_artifact: true
-
-  governance:
-    uses: ./.github/workflows/governance.yml
-    with:
-      source_ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
-
-  build:
+  meta:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      publish: ${{ steps.version.outputs.publish }}
+      source: ${{ steps.request.outputs.source }}
+      version: ${{ steps.request.outputs.version }}
+      code: ${{ steps.request.outputs.code }}
+      prefix: ${{ steps.request.outputs.prefix }}
+      publish: ${{ steps.request.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
+          persist-credentials: false
+      - name: Validate preview request and pin source, version and Android code
+        id: request
+        run: python3 scripts/preview_release.py prepare
+      - name: Test Release storage and identity guards
+        run: python3 -m unittest discover -s scripts/tests
+      - name: Prepare run-bound draft Release transfer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_stage.py prepare --scope preview --source "${{ steps.request.outputs.source }}"
+
+  windows:
+    needs: meta
+    uses: ./.github/workflows/desktop-windows.yml
+    # Reused jobs inherit the caller event; scope and exact source are explicit.
+    permissions:
+      contents: write
+      actions: read
+    with:
+      source_ref: ${{ needs.meta.outputs.source }}
+      version_name: ${{ needs.meta.outputs.version }}
+      stage_scope: preview
+
+  governance:
+    needs: meta
+    uses: ./.github/workflows/governance.yml
+    with:
+      source_ref: ${{ needs.meta.outputs.source }}
+
+  build:
+    needs: meta
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      manifest: ${{ steps.stage.outputs.manifest }}
+    env:
+      SOURCE_SHA: ${{ needs.meta.outputs.source }}
+      WFAS_VERSION_NAME: ${{ needs.meta.outputs.version }}
+      WFAS_VERSION_CODE: ${{ needs.meta.outputs.code }}
+      APK_PREFIX: ${{ needs.meta.outputs.prefix }}
 
     steps:
       - name: Checkout requested source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
-
-      - name: Validate test version
-        id: version
-        env:
-          VERSION_NAME: ${{ inputs.version_name || github.ref_name }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          PUBLISH_TEST=false
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            VERSION_NAME=$(python3 -c 'import json; print(json.load(open("docs/releases/build-request.json"))["version"])')
-            PUBLISH_TEST=$(python3 -c 'import json; print("true" if json.load(open("docs/releases/build-request.json")).get("publish") is True else "false")')
-          elif [[ "$EVENT_NAME" == "push" ]]; then
-            PUBLISH_TEST=true
-          fi
-          VERSION_NAME="${VERSION_NAME#v}"
-          if [[ ! "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+-test\.[0-9]+$ ]]; then
-            echo "Test versions must match MAJOR.MINOR.PATCH-test.N; got: $VERSION_NAME"
-            exit 1
-          fi
-          echo "TEST_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
-          echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
-          echo "publish=$PUBLISH_TEST" >> "$GITHUB_OUTPUT"
+          ref: ${{ needs.meta.outputs.source }}
+          persist-credentials: false
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -104,21 +129,6 @@ jobs:
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Resolve shared Android version code
-        run: |
-          set -euo pipefail
-          VERSION_NAME="$TEST_VERSION_NAME"
-          YEAR=$(date -u +%Y)
-          OFFSET=$((10#$YEAR - 2020))
-          STAMP=$(date -u +%m%d%H%M)
-          CODE=$((OFFSET * 100000000 + 10#$STAMP))
-          if (( OFFSET < 0 || OFFSET > 20 || CODE <= 0 || CODE > 2100000000 )); then
-            echo "Generated Android versionCode is outside the supported range: $CODE"
-            exit 1
-          fi
-          echo "WFAS_VERSION_CODE=$CODE" >> "$GITHUB_ENV"
-          echo "WFAS_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
 
       - name: Restore permanent signing key
         env:
@@ -163,62 +173,67 @@ jobs:
         working-directory: android
         run: ./gradlew :app:assemblePreview --stacktrace
 
-      - name: Verify APK signer and collect asset
-        env:
-          ARTIFACT_NAME: ${{ inputs.artifact_name || 'AudioBridge-Android-Preview' }}
+      - name: Verify actual APK signer, package, version and source
         run: |
-          set -euo pipefail
-          SRC="android/app/build/outputs/apk/preview/app-preview.apk"
-          test -f "$SRC"
-
-          EXPECTED="4DDF267D25A73F0A28446C9E77293204E32F6777C63417FEB7BD925040FEFB63"
-          ACTUAL=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$SRC"             | awk -F': ' '/certificate SHA-256 digest:/ { gsub(":","",$2); print toupper($2); exit }')
-          echo "APK signer SHA-256: $ACTUAL"
-          test "$ACTUAL" = "$EXPECTED"
-
-          mkdir -p release-assets
-          OUT="$ARTIFACT_NAME-$TEST_VERSION_NAME.apk"
-          cp "$SRC" "release-assets/$OUT"
-          (
-            cd release-assets
-            sha256sum "$OUT" > "$OUT.sha256"
-          )
-          git rev-parse HEAD > release-assets/SOURCE_COMMIT.txt
-
-      - name: Upload test APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.artifact_name || 'AudioBridge-Android-Preview' }}-${{ env.TEST_VERSION_NAME }}
-          path: release-assets/*
-          retention-days: 1
-          if-no-files-found: error
+          python3 scripts/preview_release.py android --source "$SOURCE_SHA" --version "$WFAS_VERSION_NAME" --code "$WFAS_VERSION_CODE" \
+            --apk android/app/build/outputs/apk/preview/app-preview.apk --prefix "$APK_PREFIX" \
+            --aapt2 "$ANDROID_HOME/build-tools/36.0.0/aapt2" --apksigner "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+            --output out/preview-android
+      - name: Transfer verified preview APK via run-bound draft Release
+        id: stage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_stage.py upload --scope preview --source "$SOURCE_SHA" --group android --directory out/preview-android
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$GITHUB_WORKSPACE/.ci/audiobridge-release.jks"
 
   publish:
-    if: needs.build.outputs.publish == 'true'
-    needs: [build, windows, governance]
+    needs: [meta, build, windows, governance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SOURCE_SHA: ${{ needs.meta.outputs.source }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      VERSION_CODE: ${{ needs.meta.outputs.code }}
+      WINDOWS_SOURCE: ${{ needs.windows.outputs.source }}
+      ANDROID_MANIFEST: ${{ needs.build.outputs.manifest }}
+      WINDOWS_MANIFEST: ${{ needs.windows.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.source }}
+          persist-credentials: false
+      - name: Download and verify the exact platform job outputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$WINDOWS_SOURCE" = "$SOURCE_SHA"
+          python3 scripts/release_stage.py download --scope preview --source "$SOURCE_SHA" --manifest "$ANDROID_MANIFEST" --output out/preview-input
+          python3 scripts/release_stage.py download --scope preview --source "$SOURCE_SHA" --manifest "$WINDOWS_MANIFEST" --output out/preview-input
+      - name: Verify unified preview identity, source and checksums
+        run: python3 scripts/preview_release.py bundle --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --code "$VERSION_CODE" --input out/preview-input --output out/preview-release
+      - name: Publish download-verified prerelease without changing Latest
+        if: needs.meta.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_release.py publish --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --output out/preview-release
+
+  cleanup:
+    needs: [meta, build, windows, governance, publish]
+    if: always() && needs.meta.outputs.source != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
-      - uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          merge-multiple: true
-      - name: Publish verified prerelease
+          ref: ${{ needs.meta.outputs.source }}
+          persist-credentials: false
+      - name: Remove verified staging or retain failed-job retry inputs briefly
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: v${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p publish-assets
-          find release-assets -type f \( -name '*.apk' -o -name '*.zip' -o -name 'SOURCE_COMMIT.txt' \) -exec cp {} publish-assets/ \;
-          test -n "$(find publish-assets -name '*.apk' -print -quit)"
-          test -n "$(find publish-assets -name '*.zip' -print -quit)"
-          SOURCE_SHA=$(cat publish-assets/SOURCE_COMMIT.txt)
-          (cd publish-assets && sha256sum * > SHA256SUMS.txt)
-          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --target "$SOURCE_SHA" --prerelease --latest=false --title "AudioBridge $RELEASE_TAG" \
-            --notes-file "docs/releases/${RELEASE_TAG#v}.md" publish-assets/*
+          SOURCE_SHA: ${{ needs.meta.outputs.source }}
+          STAGE_OUTCOME: ${{ needs.publish.result }}
+        run: python3 scripts/release_stage.py finish --scope preview --source "$SOURCE_SHA"

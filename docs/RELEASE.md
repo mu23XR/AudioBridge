@@ -46,21 +46,23 @@ Tags matching `vMAJOR.MINOR.PATCH-test.N` trigger the reusable `android-test.yml
 workflow. Android signing/build, Windows checks/package and governance must all
 pass before the tag is published as a GitHub prerelease (`latest=false`). Provide
 release notes in `docs/releases/MAJOR.MINOR.PATCH-test.N.md` before tagging.
-Assets include SHA-256 checksums and the exact Android source commit. Manual
-workflow dispatch remains available for artifact-only test builds.
+Assets include SHA-256 checksums, platform build records and the exact shared
+source commit. Manual dispatch defaults to publishing a prerelease after all
+checks; select `publish: false` for a nonpublishing validation build.
 
-The test workflow opts into `desktop-windows.yml`'s typed `upload_artifact`
-input so its publisher receives the portable ZIP. Reused workflows inherit
-the caller's event; checking for event_name=workflow_call alone would skip
-uploads for PR/tag-triggered publication. Standalone PR builds keep the default
-off, while manual Desktop dispatch still uploads its artifact.
+The preview workflow resolves one source, version and Android versionCode before
+either platform builds. Its reusable Windows job receives an explicit
+`stage_scope: preview` and returns the exact uploaded-file manifest. Reused
+workflows inherit the caller's event, so delivery is not inferred from
+`event_name=workflow_call`. Ordinary standalone Windows validation builds and
+verifies its packages but retains no installation-package copy in Actions.
 
 Before this workflow reaches `main`, an in-repository PR may request a signed
 prerelease by changing `docs/releases/build-request.json` with a unique version
 and `publish: true`. Only same-repository PRs can run the signing job. The exact
 head SHA is used by all build/check jobs; publication creates the tag only after
 all gates pass. Fork PRs cannot sign or publish. Existing versions are never
-silently replaced. This explicit request file also allows artifact-only builds
+silently replaced. This explicit request file also allows nonpublishing validation builds
 with `publish: false`.
 
 ## Rollback
@@ -113,3 +115,32 @@ in a separate Gradle invocation before resource packaging. Stable Android uses
 `assembleRelease`, the permanent certificate and the monotonic UTC versionCode.
 Both native and software regression checks are required, but are not a substitute
 for real-device or overnight listening. See `releases/2.0.1.md` for migration.
+
+## Release storage and temporary transfer
+
+Installation packages are delivered through GitHub Releases, not Actions
+artifacts. Android previews publish as prereleases with `latest=false`; stable
+versions are promoted to stable/Latest only after their original gates pass.
+Windows-only previews keep their explicit request and preview identity.
+
+Separate build jobs transfer files through a draft `ci-stage-<scope>-<run-id>`
+Release. The draft is bound to this repository, exact source and owning workflow
+run; it is never a public product version. Each producer returns an immutable,
+attempt-qualified filename/size/SHA-256 manifest. Consumers use that exact
+manifest, verify downloaded bytes and then run the existing package/provenance
+checks. Files are never clobbered, and published Releases cannot be staging.
+
+Successful validation/publication removes its transfer draft and any owned tag.
+Failed/cancelled runs retain their draft for failed-job retries; drafts older than
+one day become eligible for cleanup on the next staging/report operation, only
+after the owner run has ended. A retry after that cleanup must rerun all jobs.
+Native diagnostic ZIPs use a separate run-bound draft with a 14-day cleanup
+eligibility window. Fork checks retain workflow logs without Release writes.
+The strict native test commands, test counts and timing/loss limits are unchanged.
+No installation package or diagnostic ZIP is uploaded with `upload-artifact`.
+
+`release_stage.py smoke` exercises a small real upload/download/checksum/cleanup
+before stable builds. Unit regressions additionally reject wrong runs/sources,
+changed or published drafts, corrupt downloads, unsafe names and output
+collisions. Storage and cleanup errors fail explicitly; reducing storage must
+never skip tests, signing, source identity or final download verification.

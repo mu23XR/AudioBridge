@@ -8,7 +8,11 @@ on:
       - ".github/workflows/release.yml"
       - ".github/workflows/android-native.yml"
       - "scripts/stable_release.py"
+      - "scripts/release_stage.py"
+      - "scripts/preview_release.py"
       - "scripts/tests/test_stable_release.py"
+      - "scripts/tests/test_release_stage.py"
+      - "scripts/tests/test_preview_release.py"
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -42,6 +46,9 @@ jobs:
   meta:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'push' || !contains(github.ref_name, '-'))
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
     outputs:
       source: ${{ steps.request.outputs.source }}
       version: ${{ steps.request.outputs.version }}
@@ -59,10 +66,22 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts/tests
           python3 scripts/test_desktop_preview.py
+      - name: Exercise quota-independent Release transfer and cleanup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_stage.py smoke --scope smoke --source "${{ steps.request.outputs.source }}"
+      - name: Prepare private run-bound Release staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_stage.py prepare --scope stable --source "${{ steps.request.outputs.source }}"
 
   android:
     needs: meta
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      manifest: ${{ steps.stage.outputs.manifest }}
     env:
       WFAS_VERSION_NAME: ${{ needs.meta.outputs.version }}
       WFAS_VERSION_CODE: ${{ needs.meta.outputs.code }}
@@ -117,12 +136,11 @@ jobs:
             --apk android/app/build/outputs/apk/release/app-release.apk \
             --aapt2 "$ANDROID_HOME/build-tools/36.0.0/aapt2" --apksigner "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
             --output out/stable-android
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stable-android
-          path: out/stable-android/*
-          retention-days: 14
-          if-no-files-found: error
+      - name: Transfer verified Android files through run-bound draft Release
+        id: stage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_stage.py upload --scope stable --source "$SOURCE_SHA" --group android --directory out/stable-android
       - name: Remove temporary signing key
         if: always()
         run: rm -f "$GITHUB_WORKSPACE/.ci/audiobridge-release.jks"
@@ -130,6 +148,10 @@ jobs:
   windows:
     needs: meta
     runs-on: windows-latest
+    permissions:
+      contents: write
+    outputs:
+      manifest: ${{ steps.stage.outputs.manifest }}
     env:
       WFAS_VERSION_NAME: ${{ needs.meta.outputs.version }}
       SOURCE_SHA: ${{ needs.meta.outputs.source }}
@@ -159,12 +181,11 @@ jobs:
         run: .\gradlew.bat createReleaseDistributable packagePortableArchives
       - name: Verify stable JAR, native library, manual and matching archive bytes
         run: python scripts/stable_release.py windows --source "$env:SOURCE_SHA" --version "$env:WFAS_VERSION_NAME" --output out/stable-windows
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stable-windows
-          path: out/stable-windows/*
-          retention-days: 14
-          if-no-files-found: error
+      - name: Transfer verified Windows files through run-bound draft Release
+        id: stage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_stage.py upload --scope stable --source "$env:SOURCE_SHA" --group windows --directory out/stable-windows
 
   governance:
     needs: meta
@@ -174,6 +195,9 @@ jobs:
 
   native:
     needs: meta
+    permissions:
+      contents: write
+      actions: read
     uses: ./.github/workflows/android-native.yml
     with:
       source_ref: ${{ needs.meta.outputs.source }}
@@ -191,6 +215,8 @@ jobs:
       RELEASE_VERSION: ${{ needs.meta.outputs.version }}
       VERSION_CODE: ${{ needs.meta.outputs.code }}
       NATIVE_SOURCE: ${{ needs.native.outputs.source_sha }}
+      ANDROID_MANIFEST: ${{ needs.android.outputs.manifest }}
+      WINDOWS_MANIFEST: ${{ needs.windows.outputs.manifest }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -198,23 +224,36 @@ jobs:
           persist-credentials: false
       - name: Confirm native gate checked the same integration source
         run: test "$NATIVE_SOURCE" = "$SOURCE_SHA"
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: stable-*
-          path: out/stable-input
-          merge-multiple: true
+      - name: Download and hash the exact platform job outputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release_stage.py download --scope stable --source "$SOURCE_SHA" --manifest "$ANDROID_MANIFEST" --output out/stable-input
+          python3 scripts/release_stage.py download --scope stable --source "$SOURCE_SHA" --manifest "$WINDOWS_MANIFEST" --output out/stable-input
       - name: Verify unified identity, source, provenance and checksums
         run: |
           python3 scripts/stable_release.py bundle --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --code "$VERSION_CODE" \
             --input out/stable-input --output out/stable-release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: verified-stable-bundle
-          path: out/stable-release/*
-          retention-days: 14
-          if-no-files-found: error
       - name: Publish immutable assets, download-verify, then mark stable/latest
         if: needs.meta.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/stable_release.py publish --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --output out/stable-release
+
+  cleanup:
+    needs: [meta, android, windows, governance, native, release]
+    if: always() && needs.meta.outputs.source != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.source }}
+          persist-credentials: false
+      - name: Remove verified staging or retain failed-job retry inputs briefly
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.meta.outputs.source }}
+          STAGE_OUTCOME: ${{ needs.release.result }}
+        run: python3 scripts/release_stage.py finish --scope stable --source "$SOURCE_SHA"

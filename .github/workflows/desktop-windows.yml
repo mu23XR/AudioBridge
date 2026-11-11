@@ -9,10 +9,15 @@ on:
       version_name:
         type: string
         default: ""
-      upload_artifact:
-        description: "Upload the portable ZIP for the calling Android test workflow"
-        type: boolean
-        default: false
+      stage_scope:
+        description: "Run-bound draft Release scope supplied by the preview caller"
+        type: string
+        default: ""
+    outputs:
+      source:
+        value: ${{ jobs.windows.outputs.source }}
+      manifest:
+        value: ${{ jobs.windows.outputs.manifest }}
   workflow_dispatch:
     inputs:
       publish:
@@ -27,6 +32,10 @@ on:
       - ".github/workflows/desktop-windows.yml"
       - "scripts/desktop_preview.py"
       - "scripts/test_desktop_preview.py"
+      - "scripts/release_stage.py"
+      - "scripts/preview_release.py"
+      - "scripts/tests/test_release_stage.py"
+      - "scripts/tests/test_preview_release.py"
       - "scripts/check-wasapi-lifecycle.ps1"
       - "docs/releases/desktop-preview.json"
   pull_request:
@@ -36,11 +45,18 @@ on:
       - ".github/workflows/desktop-windows.yml"
       - "scripts/desktop_preview.py"
       - "scripts/test_desktop_preview.py"
+      - "scripts/release_stage.py"
+      - "scripts/preview_release.py"
+      - "scripts/tests/test_release_stage.py"
+      - "scripts/tests/test_preview_release.py"
       - "scripts/check-wasapi-lifecycle.ps1"
       - "docs/releases/desktop-preview.json"
 
 permissions:
   contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
 
 concurrency:
   group: desktop-windows-${{ github.workflow }}-${{ inputs.source_ref || github.ref }}
@@ -53,18 +69,23 @@ defaults:
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: read
     env:
       # Reusable workflows inherit the caller's event, including pull_request.
-      WFAS_REUSABLE_BUILD: ${{ inputs.source_ref != '' || inputs.version_name != '' || inputs.upload_artifact }}
+      WFAS_REUSABLE_BUILD: ${{ inputs.source_ref != '' || inputs.version_name != '' || inputs.stage_scope != '' }}
     outputs:
-      source: ${{ steps.preview.outputs.source }}
+      source: ${{ steps.preview.outputs.source || steps.reusable.outputs.source }}
       version: ${{ steps.preview.outputs.version }}
       publish: ${{ steps.preview.outputs.publish }}
+      manifest: ${{ steps.stage.outputs.manifest || steps.reusable-stage.outputs.manifest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -106,6 +127,9 @@ jobs:
       - name: Check preview verification and publication guards
         working-directory: .
         run: python scripts/test_desktop_preview.py
+      - name: Test quota-independent transfer and preview identity guards
+        working-directory: .
+        run: python -m unittest discover -s scripts/tests
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -140,38 +164,32 @@ jobs:
         shell: pwsh
         env:
           SOURCE_SHA: ${{ steps.reusable.outputs.source }}
-        run: |
-          @'
-          import os
-          import sys
-          from pathlib import Path
-          sys.path.insert(0, 'scripts')
-          from desktop_preview import check_source, check_tar, check_zip
-          root = Path('.')
-          version = os.environ['WFAS_VERSION_NAME']
-          check_source(root, os.environ['SOURCE_SHA'], generated=True)
-          stem = root / 'desktop/build/packages' / ('AudioBridge-' + version + '-windows-x86_64')
-          check_tar(Path(str(stem) + '.tar.gz'), check_zip(Path(str(stem) + '.zip'), version))
-          '@ | python -
-          if ($LASTEXITCODE -ne 0) { throw 'Reusable test package verification failed' }
+        run: python scripts/preview_release.py windows --source "$env:SOURCE_SHA" --version "$env:WFAS_VERSION_NAME" --output out/reusable-windows
 
-      - name: Upload verified Windows preview
-        if: env.WFAS_REUSABLE_BUILD != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: AudioBridge-Desktop-Windows
-          path: out/desktop-release/*
-          retention-days: 14
-          if-no-files-found: error
-
-      - name: Upload reusable Windows test package
-        if: env.WFAS_REUSABLE_BUILD == 'true' && inputs.upload_artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: AudioBridge-Desktop-Windows
-          path: desktop/build/packages/*.zip
-          retention-days: 1
-          if-no-files-found: error
+      - name: Prepare staging only for explicitly requested PC publication
+        if: env.WFAS_REUSABLE_BUILD != 'true' && steps.preview.outputs.publish == 'true'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.preview.outputs.source }}
+        run: python scripts/release_stage.py prepare --scope desktop --source "$env:SOURCE_SHA"
+      - name: Transfer explicitly requested PC release files
+        if: env.WFAS_REUSABLE_BUILD != 'true' && steps.preview.outputs.publish == 'true'
+        id: stage
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.preview.outputs.source }}
+        run: python scripts/release_stage.py upload --scope desktop --source "$env:SOURCE_SHA" --group windows --directory out/desktop-release
+      - name: Transfer reusable Windows files through caller staging
+        if: env.WFAS_REUSABLE_BUILD == 'true' && inputs.stage_scope != ''
+        id: reusable-stage
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.reusable.outputs.source }}
+          STAGE_SCOPE: ${{ inputs.stage_scope }}
+        run: python scripts/release_stage.py upload --scope "$env:STAGE_SCOPE" --source "$env:SOURCE_SHA" --group windows --directory out/reusable-windows
 
   publish:
     needs: windows
@@ -187,6 +205,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.windows.outputs.source }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -194,13 +213,35 @@ jobs:
           python-version: "3.12"
 
       - name: Download verified Windows preview
-        uses: actions/download-artifact@v4
-        with:
-          name: AudioBridge-Desktop-Windows
-          path: out/desktop-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.windows.outputs.source }}
+          STAGE_MANIFEST: ${{ needs.windows.outputs.manifest }}
+        run: python scripts/release_stage.py download --scope desktop --source "$SOURCE_SHA" --output out/desktop-release
 
       - name: Verify uploaded assets and publish prerelease
         run: python scripts/desktop_preview.py publish --source "$SOURCE_SHA"
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.windows.outputs.source }}
+
+  cleanup:
+    needs: [windows, publish]
+    if: always() && needs.windows.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.windows.outputs.source }}
+          persist-credentials: false
+      - name: Remove verified PC staging or retain failed-job retry inputs briefly
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.windows.outputs.source }}
+          STAGE_OUTCOME: ${{ needs.publish.result }}
+        run: python scripts/release_stage.py finish --scope desktop --source "$SOURCE_SHA"
