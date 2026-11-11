@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -330,7 +330,7 @@ class SnapcastSessionManager(
     private fun registerServices(activeEncoder: SnapcastEncoder) {
         val manager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return
         nsdManager = manager
-        val instance = hostName.ifBlank { "WiFi Audio Streaming" }
+        val instance = hostName.ifBlank { "AudioBridge" }
 
         registerOne(
             manager,

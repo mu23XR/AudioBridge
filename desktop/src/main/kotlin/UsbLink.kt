@@ -5,7 +5,7 @@ object UsbLink {
 
     const val DEFAULT_USB_LATENCY_MS = 20
     const val MIN_USB_LATENCY_MS = 5
-    const val MAX_USB_LATENCY_MS = 300
+    const val MAX_USB_LATENCY_MS = 120
 
     private val IFACE_TOKENS = listOf("rndis", "ncm", "usb")
     private val TETHER_SUBNETS = listOf("192.168.42.", "192.168.112.")
@@ -124,7 +124,7 @@ object UsbLink {
     fun isReady(): Boolean = enabled && activeInterface() != null
 
     fun effectiveLatencyMs(configured: Int): Int =
-        if (isReady()) latencyMs else configured
+        UsbLatency.effective(configured, latencyMs, isReady())
 
     fun isUsbAddress(host: String?): Boolean {
         if (host == null) return false

@@ -17,6 +17,37 @@
 
 import java.util.prefs.Preferences
 
+// All file access and read-modify-write transactions share this reentrant monitor.
+// A GUI snapshot must never overwrite independently remembered receiver sources.
+internal val settingsPersistenceLock = Any()
+
+internal class SettingsTransactions(
+    private val read: () -> AllSettings,
+    private val write: (AllSettings) -> Unit,
+    private val lock: Any = Any()
+) {
+    fun load(): AllSettings = synchronized(lock) { read() }
+
+    fun saveGeneral(settings: AllSettings): AllSettings = synchronized(lock) {
+        val latest = read()
+        val merged = settings.copy(app = settings.app.copy(receiverSources = latest.app.receiverSources))
+        write(merged)
+        merged
+    }
+
+    fun replaceAll(settings: AllSettings): AllSettings = synchronized(lock) {
+        write(settings)
+        settings
+    }
+
+    fun updateSources(transform: (List<String>) -> List<String>): List<String> = synchronized(lock) {
+        val current = read()
+        val next = transform(current.app.receiverSources).toList()
+        if (next != current.app.receiverSources) write(current.copy(app = current.app.copy(receiverSources = next)))
+        next
+    }
+}
+
 data class AllSettings(
     val app: AppSettings,
     val audio: AudioSettings_V1,
@@ -27,9 +58,12 @@ data class AllSettings(
 
 data class AppSettings(
     val theme: Theme = Theme.System,
+    val language: String = "system",
     val hideWindowsPrivacyBanner: Boolean = false,
     val hideWindowsRoutingBanner: Boolean = false,
     val customThemeColor: Long? = null,
+    /** "WxH" or "WxH+X+Y" in physical pixels; empty means the default 600x800. */
+    val windowGeometry: String = "",
     val rtpEnabled: Boolean = false,
     val httpEnabled: Boolean = false,
     val httpPort: String = "8080",
@@ -68,6 +102,12 @@ data class AppSettings(
      */
     val autoStartEncryption: String = AutoStartSecurity.INHERIT,
     val muteRender: Boolean = true,
+    // Store DSP gain, not the displayed percentage: a scale change must not change loudness.
+    val senderGain: Float = 1f,
+    val receiverGain: Float = 1f,
+    val remoteVolumeSyncEnabled: Boolean = false,
+    // Serialized source metadata only. Credentials remain in SecretVault.
+    val receiverSources: List<String> = emptyList(),
     val serverPersist: Boolean = false,
     val lastMulticastMode: Boolean = false,
     val autoConnectClientEnabled: Boolean = false,
@@ -187,7 +227,7 @@ fun AppSettings.toDlnaConfig(): DlnaServerConfig = DlnaServerConfig(
 )
 
 object SettingsRepository {
-    private val prefs = Preferences.userRoot().node("com/mavco/wifiaudiostreamer")
+    private val prefs = Preferences.userRoot().node(BuildIdentity.preferencesNode)
 
     private const val THEME_KEY = "app_theme"
     private const val HIDE_PRIVACY_KEY = "hide_windows_privacy"
@@ -252,38 +292,43 @@ object SettingsRepository {
     fun getMcastClientEpoch(ip: String): Long = prefs.getLong("mcast_client_epoch_$ip", 0L)
     fun setMcastClientEpoch(ip: String, e: Long) { prefs.putLong("mcast_client_epoch_$ip", e); runCatching { prefs.flush() } }
 
-    fun isDonationQualified(): Boolean = prefs.getBoolean("donation_qualified", false)
-    fun setDonationQualified(b: Boolean) { prefs.putBoolean("donation_qualified", b); runCatching { prefs.flush() } }
-    fun donationSnoozeUntil(): Long = prefs.getLong("donation_snooze_until", 0L)
-    fun setDonationSnoozeUntil(t: Long) { prefs.putLong("donation_snooze_until", t); runCatching { prefs.flush() } }
-    fun donationDismissCount(): Int = prefs.getInt("donation_dismiss_count", 0)
-    fun setDonationDismissCount(n: Int) { prefs.putInt("donation_dismiss_count", n); runCatching { prefs.flush() } }
-    fun donationBackoffDays(count: Int): Long = when {
-        count <= 1 -> 2L
-        count == 2 -> 5L
-        count == 3 -> 14L
-        else -> 30L
-    }
-
     const val VAULT_AUTH_KEY   = "authKey"
     const val VAULT_MANUAL_KEY = "manualAuthKey"
     const val ENV_AUTH_KEY     = "WFAS_AUTH_KEY"
 
-    fun saveSettings(settings: AllSettings) {
+    private val transactions = SettingsTransactions(::loadSettingsUnlocked, ::saveSettingsUnlocked, settingsPersistenceLock)
+
+    /** Saves GUI/general settings while retaining the source store's latest list. */
+    fun saveSettings(settings: AllSettings): AllSettings = transactions.saveGeneral(settings)
+
+    /** Explicit import/reset only; unlike a stale GUI snapshot, this replaces every field. */
+    fun replaceAllSettings(settings: AllSettings): AllSettings {
+        decodeRememberedReceiverSources(settings.app.receiverSources)
+        return transactions.replaceAll(settings)
+    }
+
+    internal fun updateReceiverSources(transform: (List<String>) -> List<String>): List<String> =
+        transactions.updateSources { current ->
+            transform(current).also { decodeRememberedReceiverSources(it) }
+        }
+
+    fun loadSettings(): AllSettings = transactions.load()
+
+    private fun saveSettingsUnlocked(settings: AllSettings) {
         // Prima la custodia, poi il file: ConfigManager.save non scrive piu' i
         // segreti, quindi se il vault fallisce non restano comunque in chiaro.
         persistSecrets(settings)
-        runCatching { ConfigManager.save(settings) }
+        ConfigManager.save(settings)
         UsbLink.configure(settings.app.usbModeEnabled, settings.app.usbLatencyMs, settings.app.usbInterface)
         WfasPolicy.configure(settings.app.wfasMode)
     }
 
-    fun loadSettings(): AllSettings {
+    private fun loadSettingsUnlocked(): AllSettings {
         val stored = if (ConfigManager.exists()) {
-            runCatching { ConfigManager.load() }.getOrDefault(ConfigManager.DEFAULTS)
+            ConfigManager.load()
         } else {
             val migrated = if (hasLegacyPreferences()) loadFromPreferencesLegacy() else ConfigManager.DEFAULTS
-            runCatching { ConfigManager.save(migrated) }
+            ConfigManager.save(migrated)
             migrated
         }
         val settings = hydrateSecrets(stored)
@@ -419,7 +464,7 @@ object SettingsRepository {
         val bufferSize = prefs.getInt(BUFFER_SIZE_KEY, 512)
         val latencyMs = prefs.getInt(LATENCY_MS_KEY, 120)
         val maxPayloadBytes = prefs.getInt(MAX_PAYLOAD_KEY, 1390)
-        val audioSettings = AudioSettings_V1(sampleRate, bitDepth, channels, bufferSize, latencyMs, maxPayloadBytes)
+        val audioSettings = AudioSettings_V1(sampleRate, bitDepth, channels, bufferSize, latencyMs.coerceIn(20, 400), maxPayloadBytes, adaptiveLatency = false)
         val streamingPort = prefs.get(STREAMING_PORT_KEY, "9090")
         val micPort = prefs.get(MIC_PORT_KEY, "9092")
         val netInterface = prefs.get(NETWORK_INTERFACE_KEY, "Auto")

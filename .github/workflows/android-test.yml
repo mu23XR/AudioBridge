@@ -1,0 +1,237 @@
+name: Build Android Test APK
+
+on:
+  pull_request:
+    paths:
+      - "docs/releases/build-request.json"
+      - ".github/workflows/android-test.yml"
+      - "scripts/preview_release.py"
+      - "scripts/release_stage.py"
+      - "scripts/tests/test_preview_release.py"
+      - "scripts/tests/test_release_stage.py"
+  push:
+    tags:
+      - "v*-test.*"
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch, tag, or commit to build"
+        required: true
+        default: "main"
+        type: string
+      version_name:
+        description: "Prerelease version, for example 1.3.1-test.14"
+        required: true
+        type: string
+      artifact_name:
+        description: "APK filename prefix"
+        required: false
+        default: "AudioBridge-Android-Preview"
+        type: string
+      publish:
+        description: "Publish as a prerelease after all checks"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+concurrency:
+  group: android-test-${{ inputs.source_ref || github.ref }}-${{ inputs.version_name || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      source: ${{ steps.request.outputs.source }}
+      version: ${{ steps.request.outputs.version }}
+      code: ${{ steps.request.outputs.code }}
+      prefix: ${{ steps.request.outputs.prefix }}
+      publish: ${{ steps.request.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
+          persist-credentials: false
+      - name: Validate preview request and pin source, version and Android code
+        id: request
+        run: python3 scripts/preview_release.py prepare
+      - name: Test Release storage and identity guards
+        run: python3 -m unittest discover -s scripts/tests
+      - name: Prepare run-bound draft Release transfer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_stage.py prepare --scope preview --source "${{ steps.request.outputs.source }}"
+
+  windows:
+    needs: meta
+    uses: ./.github/workflows/desktop-windows.yml
+    # Reused jobs inherit the caller event; scope and exact source are explicit.
+    permissions:
+      contents: write
+      actions: read
+    with:
+      source_ref: ${{ needs.meta.outputs.source }}
+      version_name: ${{ needs.meta.outputs.version }}
+      stage_scope: preview
+
+  governance:
+    needs: meta
+    uses: ./.github/workflows/governance.yml
+    with:
+      source_ref: ${{ needs.meta.outputs.source }}
+
+  build:
+    needs: meta
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      manifest: ${{ steps.stage.outputs.manifest }}
+    env:
+      SOURCE_SHA: ${{ needs.meta.outputs.source }}
+      WFAS_VERSION_NAME: ${{ needs.meta.outputs.version }}
+      WFAS_VERSION_CODE: ${{ needs.meta.outputs.code }}
+      APK_PREFIX: ${{ needs.meta.outputs.prefix }}
+
+    steps:
+      - name: Checkout requested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.source }}
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android 36 SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Restore permanent signing key
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGNING_KEY_BASE64"
+          test -n "$SIGNING_STORE_PASSWORD"
+          test -n "$SIGNING_KEY_ALIAS"
+          test -n "$SIGNING_KEY_PASSWORD"
+
+          mkdir -p "$GITHUB_WORKSPACE/.ci"
+          KEYSTORE="$GITHUB_WORKSPACE/.ci/audiobridge-release.jks"
+          printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$KEYSTORE"
+          chmod 600 "$KEYSTORE"
+
+          EXPECTED="4DDF267D25A73F0A28446C9E77293204E32F6777C63417FEB7BD925040FEFB63"
+          ACTUAL=$(keytool -list -v             -keystore "$KEYSTORE"             -storepass "$SIGNING_STORE_PASSWORD"             -alias "$SIGNING_KEY_ALIAS"             | awk -F': ' '/SHA256:/ { gsub(":","",$2); print toupper($2); exit }')
+
+          echo "Signing certificate SHA-256: $ACTUAL"
+          test "$ACTUAL" = "$EXPECTED"
+
+          echo "AUDIOBRIDGE_SIGNING_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "AUDIOBRIDGE_SIGNING_STORE_PASSWORD=$SIGNING_STORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "AUDIOBRIDGE_SIGNING_KEY_ALIAS=$SIGNING_KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "AUDIOBRIDGE_SIGNING_KEY_PASSWORD=$SIGNING_KEY_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Run Android unit tests
+        working-directory: android
+        run: bash gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Run Android lint
+        working-directory: android
+        run: bash gradlew :app:lintDebug --stacktrace
+
+      - name: Build signed standalone test APK
+        working-directory: android
+        run: bash gradlew :app:assemblePreview --stacktrace
+
+      - name: Verify actual APK signer, package, version and source
+        run: |
+          python3 scripts/preview_release.py android --source "$SOURCE_SHA" --version "$WFAS_VERSION_NAME" --code "$WFAS_VERSION_CODE" \
+            --apk android/app/build/outputs/apk/preview/app-preview.apk --prefix "$APK_PREFIX" \
+            --aapt2 "$ANDROID_HOME/build-tools/36.0.0/aapt2" --apksigner "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+            --output out/preview-android
+      - name: Transfer verified preview APK via run-bound draft Release
+        id: stage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_stage.py upload --scope preview --source "$SOURCE_SHA" --group android --directory out/preview-android
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$GITHUB_WORKSPACE/.ci/audiobridge-release.jks"
+
+  publish:
+    needs: [meta, build, windows, governance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SOURCE_SHA: ${{ needs.meta.outputs.source }}
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+      VERSION_CODE: ${{ needs.meta.outputs.code }}
+      WINDOWS_SOURCE: ${{ needs.windows.outputs.source }}
+      ANDROID_MANIFEST: ${{ needs.build.outputs.manifest }}
+      WINDOWS_MANIFEST: ${{ needs.windows.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.source }}
+          persist-credentials: false
+      - name: Download and verify the exact platform job outputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$WINDOWS_SOURCE" = "$SOURCE_SHA"
+          python3 scripts/release_stage.py download --scope preview --source "$SOURCE_SHA" --manifest "$ANDROID_MANIFEST" --output out/preview-input
+          python3 scripts/release_stage.py download --scope preview --source "$SOURCE_SHA" --manifest "$WINDOWS_MANIFEST" --output out/preview-input
+      - name: Verify unified preview identity, source and checksums
+        run: python3 scripts/preview_release.py bundle --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --code "$VERSION_CODE" --input out/preview-input --output out/preview-release
+      - name: Publish download-verified prerelease without changing Latest
+        if: needs.meta.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_release.py publish --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --output out/preview-release
+
+  cleanup:
+    needs: [meta, build, windows, governance, publish]
+    if: always() && needs.meta.outputs.source != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.source }}
+          persist-credentials: false
+      - name: Remove verified staging or retain failed-job retry inputs briefly
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.meta.outputs.source }}
+          STAGE_OUTCOME: ${{ needs.publish.result }}
+        run: python3 scripts/release_stage.py finish --scope preview --source "$SOURCE_SHA"

@@ -1,0 +1,56 @@
+# Project State
+
+## PR75 acceptance repair and main integration
+
+The owner now authorizes diagnosing/fixing the two latest failed checks and
+merging PR75 into main after all validation passes. Work item:
+[PR75 acceptance](work-items/pr75-acceptance-20261112.md), Issues80/51.
+The worker test races coroutine debug thread-name decoration; corrected
+identity/termination inspection passes1000 debug-enabled repeats and13 original
+methods. Native original report shows before-silence software loss, including
+premature soft cuts after short scheduling bursts. A real-queue regression fails
+the old policy; requiring250ms sustained excess passes22 buffer tests while
+keeping the60ms hard ceiling and every native/producer/latency bound.
+The first repaired sourceb6 still fails a valid native phase from110ms playback
+loop gaps while input64.254ms remains valid. The next candidate configures the
+owned audio thread's Android AUDIO scheduling before track creation; original
+native fixtures independently verify its Linux TID/priority. All original bounds
+and signing remain. Complete new-source CI is pending; no main merge or new
+product Release has occurred yet.
+The older release-flow and publication snapshots below retain their dates.
+
+## Release delivery without Actions package copies
+
+[Issue78](https://github.com/mu23XR/AudioBridge/issues/78) replaces installer artifact
+uploads with run/source-bound draft Release transfer. Test packages remain
+prereleases and stable packages remain stable/Latest, after their existing gates.
+Ordinary Windows validation no longer retains packages. Native diagnostics use
+their own retention-scoped drafts. Signing, package/source/provenance checks,
+download verification and all native test limits remain intact. Local Python
+regressions and workflow lint pass; nonpublishing CI validation is pending.
+The stable request is disarmed so this maintenance change cannot republish2.0.1.
+Work: [direct Release delivery](work-items/release-assets-direct-20261112.md).
+
+## Stable 2.0.1 published
+
+The stable/latest Release is [v2.0.1](https://github.com/mu23XR/AudioBridge/releases/tag/v2.0.1),
+immutable source4cbea4a97b73554ca8f9260bc211736916b12154/run41857316658,
+with nine verified assets. Existing installations and historical Releases remain.
+PR75 remains Draft/unmerged; this CI task does not merge product code into main.
+The following preparation details are historical and do not override this status.
+
+## Historical 2.0.1 release preparation
+
+Tracking: [Release #74](https://github.com/mu23XR/AudioBridge/issues/74).
+
+The authorized release starts from Android source 6a41f957a72ab2615f4a0be3574f8b436372e4a9 and Windows product source 8448887200e2363236156ff6ce1590c8aff01fc3. The existing permanent signing identity is preserved. Windows includes source preference, output selection, live gain, continuous playout and connection recovery repairs. The owner also authorized two narrow follow-up repairs identified by release checks: failed Desktop output initialization must release ownership before publishing failure (#76), and Android small-packet draining must avoid redundant native recovery/head queries (#51). These candidates require fresh validation; installed applications have not been replaced.
+
+Both platforms use version 2.0.1 and WFAS v2. Android release package is io.github.mu23xr.audiobridge; the independent preview package remains .test. Windows stable and preview configuration remain separate. Migration and known limitations are documented in [2.0.1 notes](releases/2.0.1.md).
+
+The November4 Android candidate isolates each source's playback and timers on an owned single thread, with one start/stop owner and first-cleanup retention (#51/#77). Independent IO release, late registration cleanup, actual executor termination and failure barriers are preserved. Normal priority is used, with no buffer/target/native-threshold changes. Focused67 and full173 JVM methods, lint/debug/instrumentation compilation and independent review pass. Candidate953c13b passes all six workflows; both native artifacts establish12/12 methods, zero skips and actual owned playback threads. Adaptive resume loss is0/1.29ms and35s-silence resume loss is0 in both runs, within all original limits. This does not establish zero loss in every phase or overnight acceptance. The final stable source must rebuild both assets and pass all gates again before publication is complete.
+
+The root release workflow requires Android unit tests, lint, strict native audio acceptance, Windows checks and governance on one exact integration commit. Actual package identities, source manifests and checksums must match, and all nine uploaded assets must be downloaded and verified before stable/latest publication. The original stable request is enabled after the accepted owned-thread candidate; final build/publication remains pending. Earlier failed candidates are retained in the issue records and are not substituted for current acceptance. No2.0.1 publication is claimed until the final workflow and asset verification complete.
+
+Open runtime and security issues remain in the [issue tracker](https://github.com/mu23XR/AudioBridge/issues). Compilation and synthetic tests do not close real-device, overnight or network-configuration issues. Existing published tags/assets remain immutable.
+
+Release work item: [release-2.0.1](work-items/release-2.0.1.md). The public project state summarizes product and release facts; private device diagnostics and personal session history are not publication material.

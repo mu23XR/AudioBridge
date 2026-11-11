@@ -105,7 +105,7 @@ import androidx.graphics.shapes.*
 import kotlinx.coroutines.delay
 
 const val EXPIRED_QR_PAYLOAD =
-    "https://www.marcomorosi.eu/wifi-audio-streaming/expired/"
+    "audiobridge://expired"
 
 data class QrInvite(
     val uri: String,

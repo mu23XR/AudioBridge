@@ -105,6 +105,8 @@ import androidx.graphics.shapes.RoundedPolygon
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cuscus.wifiaudiostreaming.data.AppScript
 import com.cuscus.wifiaudiostreaming.data.AppSettings
+import com.cuscus.wifiaudiostreaming.data.SettingsDataStore
+import com.cuscus.wifiaudiostreaming.shizuku.ShizukuAudioBridgeManager
 import com.cuscus.wifiaudiostreaming.data.AutoConnectEntry
 import com.cuscus.wifiaudiostreaming.scripting.ScriptActionType
 import com.cuscus.wifiaudiostreaming.scripting.ScriptCommand
@@ -113,6 +115,9 @@ import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlin.random.Random
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.cuscus.wifiaudiostreaming.diagnostics.RuntimeDiagnostics
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -492,6 +497,7 @@ fun ExpressiveSettingsScreen(
     onChannelConfigChange: (String) -> Unit,
     onBufferSizeChange: (Int) -> Unit,
     onAdvancedAudioChange: (Int, Int) -> Unit = { _, _ -> },
+    onAdaptiveLatencyChange: (Boolean) -> Unit = {},
     onSecurityChange: (String, String) -> Unit = { _, _ -> },
     onStreamingPortChange: (Int) -> Unit,
     onMicPortChange: (Int) -> Unit,
@@ -511,7 +517,6 @@ fun ExpressiveSettingsScreen(
     onHapticsChange: (Boolean) -> Unit = {},
     onBackgroundSpectrumChange: (Boolean, String, Boolean, Int) -> Unit = { _, _, _, _ -> },
     onBlackoutOutlinedChange: (Boolean) -> Unit = {},
-    onShowDonation: () -> Unit = {},
     onDeveloperModeChange: (Boolean) -> Unit = {},
     onNoiseReductionChange: (Boolean, Int) -> Unit = { _, _ -> },
     onOpenScripting: () -> Unit = {},
@@ -546,6 +551,7 @@ fun ExpressiveSettingsScreen(
             onChannelConfigChange = onChannelConfigChange,
             onBufferSizeChange = onBufferSizeChange,
             onAdvancedAudioChange = onAdvancedAudioChange,
+            onAdaptiveLatencyChange = onAdaptiveLatencyChange,
             onSecurityChange = onSecurityChange,
             onStreamingPortChange = onStreamingPortChange,
             onMicPortChange = onMicPortChange,
@@ -565,7 +571,6 @@ fun ExpressiveSettingsScreen(
             onHapticsChange = onHapticsChange,
             onBackgroundSpectrumChange = onBackgroundSpectrumChange,
             onBlackoutOutlinedChange = onBlackoutOutlinedChange,
-            onShowDonation = onShowDonation,
             onDeveloperModeChange = onDeveloperModeChange,
             onNoiseReductionChange = onNoiseReductionChange,
             onOpenScripting = onOpenScripting,
@@ -594,6 +599,7 @@ fun SettingsScreenContent(
     onChannelConfigChange: (String) -> Unit,
     onBufferSizeChange: (Int) -> Unit,
     onAdvancedAudioChange: (Int, Int) -> Unit = { _, _ -> },
+    onAdaptiveLatencyChange: (Boolean) -> Unit = {},
     onSecurityChange: (String, String) -> Unit = { _, _ -> },
     onStreamingPortChange: (Int) -> Unit,
     onMicPortChange: (Int) -> Unit,
@@ -613,7 +619,6 @@ fun SettingsScreenContent(
     onHapticsChange: (Boolean) -> Unit = {},
     onBackgroundSpectrumChange: (Boolean, String, Boolean, Int) -> Unit = { _, _, _, _ -> },
     onBlackoutOutlinedChange: (Boolean) -> Unit = {},
-    onShowDonation: () -> Unit = {},
     onDeveloperModeChange: (Boolean) -> Unit = {},
     onNoiseReductionChange: (Boolean, Int) -> Unit = { _, _ -> },
     onOpenScripting: () -> Unit = {},
@@ -628,6 +633,22 @@ fun SettingsScreenContent(
 ) {
     val context = LocalContext.current
     val settingsHaptics = rememberAppHaptics()
+    val diagnosticScope = rememberCoroutineScope()
+    var exportingDiagnostics by remember { mutableStateOf(false) }
+    val diagnosticExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) diagnosticScope.launch {
+            exportingDiagnostics = true
+            try {
+                withContext(Dispatchers.IO) { RuntimeDiagnostics.export(context.applicationContext, uri) }
+                Toast.makeText(context, R.string.diagnostics_export_success, Toast.LENGTH_LONG).show()
+            } catch (error: Exception) {
+                RuntimeDiagnostics.event("EXPORT_FAILED", "${error.javaClass.simpleName}: ${error.message}", true)
+                Toast.makeText(context, R.string.diagnostics_export_failed, Toast.LENGTH_LONG).show()
+            } finally {
+                exportingDiagnostics = false
+            }
+        }
+    }
 
     var showLicensesDialog by remember { mutableStateOf(false) }
     val licensesText = remember {
@@ -788,6 +809,7 @@ fun SettingsScreenContent(
                                     onCheckedChange = onMuteRenderChange
                                 )
                             } else {
+                                SenderPlaybackSetting(appSettings.senderLocalPlayback)
                                 SettingsInfoItem(
                                     title = stringResource(R.string.shizuku_backend_info_title),
                                     description = stringResource(R.string.shizuku_backend_info_desc),
@@ -874,16 +896,98 @@ fun SettingsScreenContent(
                         ),
                         onOptionSelected = onBufferSizeChange
                     )
-                    SettingsSliderItem(
-                        title = stringResource(R.string.settings_item_latency_title),
-                        description = stringResource(R.string.settings_item_latency_desc),
-                        icon = Icons.Outlined.Timer,
-                        value = appSettings.latencyMs.toFloat(),
-                        range = 40f..400f,
-                        steps = ((400f - 40f) / 20f).toInt() - 1,
-                        valueSuffix = "ms",
-                        onValueChange = { onAdvancedAudioChange(it.toInt(), appSettings.maxPayloadBytes) }
+                    // WFAS latencyMs is a per-device receiver playout target:
+                    // NetworkManager reads it only when THIS device builds its
+                    // AudioTrack as a WFAS client, and it never travels to the
+                    // peer. The preset/label wording must keep saying that.
+                    // The adaptive preset hands a 20-80 ms target band to the
+                    // receiver watchdog; any manual value turns adaptive off.
+                    val latencyPresetLabel = stringResource(
+                        if (appSettings.adaptiveLatency) R.string.settings_latency_preset_adaptive
+                        else R.string.settings_latency_manual
                     )
+                    SettingsSelectionItem(
+                        title = stringResource(R.string.settings_latency_preset_title),
+                        description = stringResource(R.string.settings_latency_preset_desc),
+                        icon = Icons.Outlined.Speed,
+                        currentValue = latencyPresetLabel,
+                        options = linkedMapOf(
+                            stringResource(R.string.settings_latency_preset_adaptive) to true,
+                            stringResource(R.string.settings_latency_manual) to false
+                        ),
+                        onOptionSelected = { picked ->
+                            onAdaptiveLatencyChange(picked)
+                        }
+                    )
+                    if (!appSettings.adaptiveLatency) {
+                        var showLatencyEditor by remember { mutableStateOf(false) }
+                        SettingsSliderItem(
+                            title = stringResource(R.string.settings_item_latency_title),
+                            description = stringResource(R.string.settings_item_latency_desc),
+                            icon = Icons.Outlined.Timer,
+                            value = appSettings.latencyMs.toFloat(),
+                            range = 20f..400f,
+                            // Continuous drag: the old step grid was computed for a
+                            // 40 ms floor while the range started at 20, which
+                            // produced the infamous 21 ms notches.
+                            steps = 0,
+                            valueSuffix = "ms",
+                            onValueChange = {
+                                onAdvancedAudioChange(it.toInt(), appSettings.maxPayloadBytes)
+                            },
+                            onValueClick = { showLatencyEditor = true }
+                        )
+                        if (showLatencyEditor) {
+                            var editedValue by remember(showLatencyEditor) {
+                                mutableStateOf(appSettings.latencyMs.toString())
+                            }
+                            var invalidInput by remember(showLatencyEditor) { mutableStateOf(false) }
+                            AlertDialog(
+                                onDismissRequest = { showLatencyEditor = false },
+                                title = { Text(stringResource(R.string.settings_item_latency_title)) },
+                                text = {
+                                    Column {
+                                        OutlinedTextField(
+                                            value = editedValue,
+                                            onValueChange = { input ->
+                                                editedValue = input.filter { it.isDigit() }.take(3)
+                                                invalidInput = false
+                                            },
+                                            label = { Text(stringResource(R.string.settings_latency_edit_hint)) },
+                                            isError = invalidInput,
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            singleLine = true
+                                        )
+                                        if (invalidInput) {
+                                            Text(
+                                                text = stringResource(R.string.settings_latency_edit_invalid),
+                                                color = MaterialTheme.colorScheme.error,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        val parsed = editedValue.toIntOrNull()
+                                        if (parsed == null || parsed !in 20..400) {
+                                            invalidInput = true
+                                        } else {
+                                            onAdvancedAudioChange(parsed, appSettings.maxPayloadBytes)
+                                            showLatencyEditor = false
+                                        }
+                                    }) {
+                                        Text(stringResource(R.string.ok))
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showLatencyEditor = false }) {
+                                        Text(stringResource(R.string.cancel))
+                                    }
+                                }
+                            )
+                        }
+                    }
                     SettingsSliderItem(
                         title = stringResource(R.string.settings_item_packet_size_title),
                         description = stringResource(R.string.settings_item_packet_size_desc),
@@ -1418,6 +1522,15 @@ fun SettingsScreenContent(
                     title = stringResource(R.string.settings_group_info),
                     icon = Icons.Outlined.Info
                 ) {
+                    SettingsClickableItem(
+                        title = stringResource(R.string.diagnostics_export_title),
+                        description = stringResource(if (exportingDiagnostics) R.string.diagnostics_export_working else R.string.diagnostics_export_desc),
+                        icon = Icons.Outlined.Description,
+                        onClick = {
+                            if (!exportingDiagnostics) diagnosticExport.launch("AudioBridge-diagnostics-${System.currentTimeMillis()}.zip")
+                        }
+                    )
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     SettingsInfoItem(
                         title = stringResource(R.string.license_info_title),
                         description = stringResource(R.string.license_info_desc),
@@ -1447,54 +1560,16 @@ fun SettingsScreenContent(
                         icon = Icons.Outlined.HelpOutline,
                         onClick = onShowOnboarding
                     )
-                    SettingsInfoItem(
-                        title = stringResource(R.string.developer_name),
-                        description = "Marco Morosi",
-                        icon = Icons.Outlined.Person
-                    )
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    SettingsClickableItem(
-                        title = stringResource(R.string.support_kofi_title),
-                        description = stringResource(R.string.support_kofi_desc),
-                        icon = Icons.Outlined.LocalCafe,
-                        onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://ko-fi.com/marcomorosi"))
-                            context.startActivity(intent)
-                        }
-                    )
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    SettingsClickableItem(
-                        title = stringResource(R.string.settings_item_show_donation_title),
-                        description = stringResource(R.string.settings_item_show_donation_desc),
-                        icon = Icons.Outlined.Redeem,
-                        onClick = onShowDonation
-                    )
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     SettingsClickableItem(
                         title = stringResource(R.string.source_code_android),
                         description = stringResource(R.string.source_code_view_on_github),
                         icon = Icons.Outlined.Code,
                         onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/mu-23/AudioBridge/"))
-                            context.startActivity(intent)
-                        }
-                    )
-                    SettingsClickableItem(
-                        title = stringResource(R.string.source_code_desktop),
-                        description = stringResource(R.string.source_code_view_on_github),
-                        icon = Icons.Outlined.Code,
-                        onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/marcomorosi06/WiFiAudioStreaming-Desktop"))
-                            context.startActivity(intent)
-                        }
-                    )
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    SettingsClickableItem(
-                        title = stringResource(R.string.source_code_protocol),
-                        description = stringResource(R.string.source_code_protocol_desc),
-                        icon = Icons.Outlined.Code,
-                        onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/marcomorosi06/wfas-protocol"))
+                            val intent = Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/mu23XR/AudioBridge/")
+                            )
                             context.startActivity(intent)
                         }
                     )
@@ -1797,6 +1872,57 @@ fun SettingsSwitchItem(
 
 
 @Composable
+private fun SenderPlaybackSetting(savedChoice: Boolean?) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val streaming by NetworkManager.isStreamingCurrent.collectAsState()
+    val bridgeState by ShizukuAudioBridgeManager.state.collectAsState()
+    var saving by remember { mutableStateOf(false) }
+    val active = (streaming && NetworkManager.isServerStreaming) ||
+        (bridgeState !is ShizukuAudioBridgeManager.State.Idle && ShizukuAudioBridgeManager.isActive())
+    val localPlayback = SenderPlaybackPolicy.keepPlayingOnDevice(savedChoice, android.os.Build.VERSION.SDK_INT)
+    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+        Text(stringResource(R.string.sender_playback_mode_title),
+            style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+        Text(stringResource(if (active) R.string.sender_playback_stop_to_change else R.string.sender_playback_mode_description),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        listOf(true, false).forEach { local ->
+            val enabled = !active && !saving && (!local || android.os.Build.VERSION.SDK_INT >= 33)
+            val select = {
+                // Check again at the action boundary: capture may have started
+                // since the last composition. Recreate its route only via Stop.
+                if (!ShizukuAudioBridgeManager.isActive() && !NetworkManager.isServerStreaming) {
+                    saving = true
+                    scope.launch {
+                        try {
+                            SettingsDataStore(context.applicationContext).saveSenderLocalPlayback(local)
+                        } catch (error: Exception) {
+                            if (error is kotlinx.coroutines.CancellationException) throw error
+                            RuntimeDiagnostics.event("SENDER_MODE_SAVE_FAILED", error.javaClass.simpleName, true)
+                            Toast.makeText(context, R.string.sender_playback_save_failed, Toast.LENGTH_LONG).show()
+                        } finally {
+                            saving = false
+                        }
+                    }
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = select)
+                .padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = localPlayback == local, enabled = enabled, onClick = select)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(stringResource(if (local) R.string.sender_playback_local else R.string.sender_playback_remote),
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(if (local) R.string.sender_playback_local_description else R.string.sender_playback_remote_description),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Text(stringResource(R.string.sender_playback_hardware_limit),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
 fun SettingsChoiceItem(
     title: String,
     description: String,
@@ -1914,7 +2040,8 @@ fun SettingsSliderItem(
     range: ClosedFloatingPointRange<Float>,
     steps: Int,
     valueSuffix: String = "B",
-    onValueChange: (Float) -> Unit
+    onValueChange: (Float) -> Unit,
+    onValueClick: (() -> Unit)? = null
 ) {
     var sliderValue by remember(value) { mutableFloatStateOf(value) }
     val appHaptics = rememberAppHaptics()
@@ -1943,7 +2070,12 @@ fun SettingsSliderItem(
                 text = "${sliderValue.toInt()} $valueSuffix",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Light
+                fontWeight = FontWeight.Light,
+                modifier = if (onValueClick != null) {
+                    Modifier.clickable { onValueClick() }
+                } else {
+                    Modifier
+                }
             )
         }
 
@@ -2923,7 +3055,7 @@ fun ExpressiveStreamingControlCenter(
                         val volume by NetworkManager.serverVolume.collectAsState()
                         ExpressiveVolumeSlider(
                             volume = volume,
-                            onVolumeChange = { NetworkManager.serverVolume.value = it },
+                            onVolumeChange = { NetworkManager.setServerVolume(it) },
                             modifier = Modifier.fillMaxWidth(0.9f)
                         )
                     } else {
@@ -3624,7 +3756,7 @@ fun WelcomePage(
 ) {
     val context = LocalContext.current
     val haptic = rememberAppHaptics()
-    val link = "https://github.com/marcomorosi06/WiFiAudioStreaming-Desktop"
+    val link = "https://github.com/mu23XR/AudioBridge/releases"
 
     var visible by remember { mutableStateOf(false) }
     var showPrivacyDetail by remember { mutableStateOf(false) }
@@ -4986,7 +5118,7 @@ fun ExpressiveVolumeSlider(
     val displayTitle = title ?: stringResource(R.string.volume_card_title)
     val displaySubtitle = subtitle ?: stringResource(R.string.server_audio_restart_hint)
 
-    val percentage = (volume * 100).toInt()
+    val percentage = VolumeScale.percent(volume, safeMaxVolume)
     val volumeIcon = when {
         volume <= 0.01f -> Icons.Outlined.VolumeOff
         volume < 0.5f -> Icons.Outlined.VolumeMute
@@ -5103,8 +5235,8 @@ fun ExpressiveVolumeSlider(
             ExpressiveChoiceRow(
                 options = listOf(
                     ChoiceOption(Icons.Outlined.VolumeOff, stringResource(R.string.volume_muted), "0"),
-                    ChoiceOption(Icons.Outlined.VolumeDown, "100%", "1"),
-                    ChoiceOption(Icons.Outlined.VolumeUp, "200%", "2")
+                    ChoiceOption(Icons.Outlined.VolumeDown, "50%", "1"),
+                    ChoiceOption(Icons.Outlined.VolumeUp, "100%", "2")
                 ),
                 selectedValue = selected,
                 accent = badgeColor,

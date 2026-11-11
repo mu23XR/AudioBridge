@@ -1,0 +1,109 @@
+name: Project Governance
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        default: ""
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+
+      - name: Verify repository identity
+        run: |
+          set -euo pipefail
+
+          test -f AGENTS.md
+          test -f docs/PROJECT_STATE.md
+          test -f docs/SIGNING.md
+          test -f docs/RELEASE.md
+          test -f docs/TESTING.md
+          test -f WFAS_PROTOCOL.md
+
+          grep -Fq 'applicationId = "io.github.mu23xr.audiobridge"' android/app/build.gradle.kts
+          grep -Fq 'mu23XR/AudioBridge' android/app/src/main/java/com/cuscus/wifiaudiostreaming/UpdateChecker.kt
+          grep -Fq 'mu23XR/AudioBridge' desktop/src/main/kotlin/UpdateChecker.kt
+
+      - name: Reject stale repository references
+        run: |
+          set -euo pipefail
+          if git grep -n -E 'mu-23/(AudioBridge|WiFiAudioStreaming)' -- ':!docs/PROJECT_STATE.md'; then
+            echo "Old GitHub account/repository references remain."
+            exit 1
+          fi
+
+      - name: Enforce single WFAS protocol source
+        run: |
+          set -euo pipefail
+          test ! -e android/WFAS_PROTOCOL.md
+          test ! -e desktop/WFAS_PROTOCOL.md
+
+      - name: Reject private signing material and generated packages
+        run: |
+          set -euo pipefail
+          BAD=$(git ls-files | grep -E '\.(jks|keystore|p12|pfx|apk|aab)$' || true)
+          if [ -n "$BAD" ]; then
+            echo "Private signing material or generated package is tracked:"
+            echo "$BAD"
+            exit 1
+          fi
+
+      - name: Reject nested and one-off workflows
+        run: |
+          set -euo pipefail
+          if find android desktop -type f -path '*/.github/workflows/*' -print -quit | grep -q .; then
+            echo "Nested .github/workflows directories are not allowed; workflows belong at repository root."
+            find android desktop -type f -path '*/.github/workflows/*' -print
+            exit 1
+          fi
+          if find .github/workflows -maxdepth 1 -type f -regextype posix-extended             -regex '.*/.*test\.[0-9]+.*\.ya?ml' -print -quit | grep -q .; then
+            echo "Version-specific test workflows are not allowed; use android-test.yml."
+            exit 1
+          fi
+          test -f .github/workflows/android-test.yml
+          test -f .github/PULL_REQUEST_TEMPLATE.md
+          test -f CONTRIBUTING.md
+          test -f SECURITY.md
+          test -f .github/dependabot.yml
+
+      - name: Reject upstream product links
+        run: |
+          set -euo pipefail
+          TARGETS=(
+            README.md
+            android/README.md
+            android/README_EN.md
+            desktop/README.md
+            android/fastlane
+            android/app/src/main
+            desktop/src/main
+          )
+          if grep -RInE             'ko-fi\.com|marcomorosi\.eu|github\.com/marcomorosi06|gitlab\.com/marcomorosi'             "${TARGETS[@]}"             --exclude='THIRD_PARTY_LICENSES.md'             --exclude='third_party_licenses.txt'; then
+            echo "Upstream product/donation links are not allowed in AudioBridge runtime/product surfaces."
+            exit 1
+          fi
+
+      - name: Verify permanent signing policy
+        run: |
+          set -euo pipefail
+          EXPECTED='4DDF267D25A73F0A28446C9E77293204E32F6777C63417FEB7BD925040FEFB63'
+          grep -Fq "$EXPECTED" .github/workflows/release.yml
+          ! grep -Fq 'stable-153-signer.yml' .github/workflows/release.yml
+          ! grep -Fq 'wfas-audio-bridge-lab-debug-keystore' .github/workflows/release.yml
+
+      - name: Test local preview provenance checks
+        run: python3 -m unittest discover -s scripts/tests -v

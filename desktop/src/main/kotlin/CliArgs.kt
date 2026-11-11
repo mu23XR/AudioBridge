@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Marco Morosi
+ * Copyright AudioBridge
  *
  * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by
  * the European Commission - subsequent versions of the EUPL (the "Licence");
@@ -190,17 +190,7 @@ data class CliArgs(
 
     companion object {
 
-        private val VERSION: String by lazy {
-            val raw = runCatching {
-                CliArgs::class.java.getResourceAsStream("/version.properties")
-                    ?.bufferedReader()
-                    ?.lineSequence()
-                    ?.firstOrNull { it.startsWith("app.version=") }
-                    ?.removePrefix("app.version=")
-                    ?.trim()
-            }.getOrNull() ?: "unknown"
-            displayVersion(raw)
-        }
+        private val VERSION: String by lazy { Strings.appVersion }
 
         val OFFLINE_PAIR_VERBS = setOf("inspect", "check", "parse", "encode", "render")
 
@@ -790,8 +780,8 @@ data class CliArgs(
                         i++
                         val ms = raw.toIntOrNull()
                             ?: parseError("--latency must be numeric, got '$raw'")
-                        if (ms < 0 || ms > 5000)
-                            parseError("--latency must be between 0 and 5000, got $ms")
+                        if (ms < 20 || ms > 400)
+                            parseError("--latency must be between 20 and 400, got $ms")
                         latency = ms
                     }
                     "--no-tray" -> noTray = true
@@ -1133,7 +1123,7 @@ data class CliArgs(
 
         fun printBareHint() {
             println("""
-WiFi Audio Streaming ${VERSION} - Stream audio over your local network.
+AudioBridge ${VERSION} - Stream audio over your local network.
 
   wfas --help             all commands and options
   wfas --gui              open the desktop app
@@ -1162,7 +1152,7 @@ WiFi Audio Streaming ${VERSION} - Stream audio over your local network.
         fun printProtocol() {
             val v = NetworkHandler_v1.WFAS_PROTOCOL_VERSION
             println("""
-WFAS - WiFi Audio Streaming protocol, version $v
+WFAS - AudioBridge wire protocol, version $v
 
 WFAS streams raw 16-bit PCM audio over UDP on the local network. A session has
 three phases: discovery (the server announces itself), connection (handshake in
@@ -1254,8 +1244,8 @@ ENCRYPTION  (optional, requires a key)
   shared group key, so it assumes mutual trust among members (no source signatures).
 
   Releases:
-    Desktop  https://github.com/marcomorosi06/WiFiAudioStreaming-Desktop/releases
-    Android  https://github.com/marcomorosi06/WiFiAudioStreaming-Android/releases
+    Desktop  https://github.com/mu23XR/AudioBridge/releases
+    Android  https://github.com/mu23XR/AudioBridge/releases
             """.trimIndent())
         }
 

@@ -24,6 +24,7 @@
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <application
+        android:name=".AudioBridgeApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -47,6 +48,15 @@
         </service>
 
         <!-- Lab: receive the Shizuku binder used to launch our shell-uid UserService. -->
+        <!-- Only authorized ADB shell (checked again by UID) may read a private
+             diagnostic snapshot. This permission grants no ordinary app access. -->
+        <provider
+            android:name=".diagnostics.DiagnosticExportProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:permission="android.permission.DUMP" />
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
@@ -66,7 +76,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- One filter, no host: it already covers every wifiaudio:// authority,
+            <!-- One filter, no host: it already covers every audiobridge:// authority,
                  pairing included, so a second one for host="pair" would only be a
                  duplicate. autoVerify has no meaning on a custom scheme - it applies
                  to http/https app links, which are declared separately below. -->
@@ -74,29 +84,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="wifiaudio" />
-            </intent-filter>
-
-            <intent-filter android:autoVerify="true">
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data
-                    android:scheme="https"
-                    android:host="www.marcomorosi.eu"
-                    android:pathPrefix="/wifi-audio-streaming/pair" />
-                <data
-                    android:scheme="https"
-                    android:host="www.marcomorosi.eu"
-                    android:pathPrefix="/it/wifi-audio-streaming/pair" />
-                <data
-                    android:scheme="https"
-                    android:host="marcomorosi.eu"
-                    android:pathPrefix="/wifi-audio-streaming/pair" />
-                <data
-                    android:scheme="https"
-                    android:host="marcomorosi.eu"
-                    android:pathPrefix="/it/wifi-audio-streaming/pair" />
+                <data android:scheme="audiobridge" />
             </intent-filter>
 
             <meta-data
@@ -149,38 +137,38 @@
             android:name=".ClientService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="false"
-            android:stopWithTask="true"/>
+            android:stopWithTask="false"/>
 
         <!-- Lab foreground host; privileged capture itself runs in Shizuku UserService. -->
         <service
             android:name=".shizuku.ShizukuBridgeHostService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="false"
-            android:stopWithTask="true" />
+            android:stopWithTask="false" />
 
         <service
             android:name=".RtpClientService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="false"
-            android:stopWithTask="true"/>
+            android:stopWithTask="false"/>
 
         <service
             android:name=".SnapcastClientService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="false"
-            android:stopWithTask="true"/>
+            android:stopWithTask="false"/>
 
         <service
             android:name=".AudioCaptureService"
             android:foregroundServiceType="mediaProjection|microphone"
             android:exported="false"
-            android:stopWithTask="true" />
+            android:stopWithTask="false" />
 
         <service
             android:name=".AutoConnectService"
             android:foregroundServiceType="dataSync"
             android:exported="false"
-            android:stopWithTask="true" />
+            android:stopWithTask="false" />
 
         <service
             android:name=".ServerTileService"

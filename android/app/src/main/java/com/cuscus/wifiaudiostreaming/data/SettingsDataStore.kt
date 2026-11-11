@@ -159,6 +159,9 @@ data class AppSettings(
     // Muto il volume media mentre catturo l'audio interno, cosi' non si sente due
     // volte; spento, si sente sia qui che sul client.
     val muteRender: Boolean = true,
+    // Nullable to distinguish an explicit choice from the previous SDK default.
+    // muteRender was ignored by Shizuku; reusing it would change upgrade behavior.
+    val senderLocalPlayback: Boolean? = null,
     // In unicast: quando il client si stacca finisce la sessione, non il server.
     val serverPersist: Boolean = true,
     val clientTileIp: String = "",
@@ -169,6 +172,11 @@ data class AppSettings(
     val disconnectionSoundEnabled: Boolean = true,
     val lastSeenChangelogVersion: String = "",
     val autoUpdateCheckEnabled: Boolean = true,
+    // Balanced 40 ms default: 20 ms burned its whole margin against measured
+    // Wi-Fi jitter (9-10 ms average, 29 ms peaks) and underrun-stormed.
+    // adaptiveLatency=true starts at the 20 ms floor and lets the receiver
+    // watchdog lift the buffer on underrun evidence (20-80 ms band).
+    val adaptiveLatency: Boolean = true,
     val latencyMs: Int = 40,
     val maxPayloadBytes: Int = 1390,
     val securityMode: String = "OFF",
@@ -215,6 +223,7 @@ class SettingsDataStore(context: Context) {
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val LAST_MULTICAST_MODE = booleanPreferencesKey("last_multicast_mode")
         val MUTE_RENDER = booleanPreferencesKey("mute_render")
+        val SENDER_LOCAL_PLAYBACK = booleanPreferencesKey("sender_local_playback")
         val SERVER_PERSIST = booleanPreferencesKey("server_persist")
         val NETWORK_INTERFACE = stringPreferencesKey("network_interface")
         val RTP_ENABLED = booleanPreferencesKey("rtp_enabled")
@@ -237,6 +246,7 @@ class SettingsDataStore(context: Context) {
         val RTP_SOURCES = stringPreferencesKey("rtp_sources")
         val CLIENT_TILE_IP = stringPreferencesKey("client_tile_ip")
         val AUTO_CONNECT_ENABLED = booleanPreferencesKey("auto_connect_enabled")
+        val ADAPTIVE_LATENCY = booleanPreferencesKey("adaptive_latency")
         val AUTO_CONNECT_LIST = stringPreferencesKey("auto_connect_list")
         val CLIENT_PERSISTENT_CONNECTION = booleanPreferencesKey("client_persistent_connection")
         val CONNECTION_SOUND_ENABLED = booleanPreferencesKey("connection_sound_enabled")
@@ -354,6 +364,7 @@ class SettingsDataStore(context: Context) {
             onboardingCompleted = preferences[PreferencesKeys.ONBOARDING_COMPLETED] ?: false,
             lastMulticastMode = preferences[PreferencesKeys.LAST_MULTICAST_MODE] ?: false,
             muteRender = preferences[PreferencesKeys.MUTE_RENDER] ?: true,
+            senderLocalPlayback = preferences[PreferencesKeys.SENDER_LOCAL_PLAYBACK],
             serverPersist = preferences[PreferencesKeys.SERVER_PERSIST] ?: true,
             networkInterface = preferences[PreferencesKeys.NETWORK_INTERFACE] ?: "Auto",
             rtpEnabled = preferences[PreferencesKeys.RTP_ENABLED] ?: false,
@@ -399,6 +410,8 @@ class SettingsDataStore(context: Context) {
             lastSeenChangelogVersion = preferences[PreferencesKeys.LAST_SEEN_CHANGELOG_VERSION] ?: "",
             autoUpdateCheckEnabled = preferences[PreferencesKeys.AUTO_UPDATE_CHECK_ENABLED] ?: true,
             latencyMs = preferences[PreferencesKeys.LATENCY_MS] ?: 40,
+            adaptiveLatency = resolveAdaptiveLatency(preferences[PreferencesKeys.ADAPTIVE_LATENCY],
+                preferences.contains(PreferencesKeys.LATENCY_MS)),
             maxPayloadBytes = preferences[PreferencesKeys.MAX_PAYLOAD] ?: 1390,
             securityMode = preferences[PreferencesKeys.SECURITY_MODE] ?: "OFF",
             authKey = authKeys.authKey,
@@ -472,6 +485,12 @@ class SettingsDataStore(context: Context) {
         }
     }
 
+    suspend fun saveSenderLocalPlayback(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SENDER_LOCAL_PLAYBACK] = enabled
+        }
+    }
+
     suspend fun saveServerPersist(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[PreferencesKeys.SERVER_PERSIST] = enabled
@@ -524,9 +543,17 @@ class SettingsDataStore(context: Context) {
         }
     }
 
+    suspend fun saveAdaptiveLatency(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[PreferencesKeys.ADAPTIVE_LATENCY] = enabled
+        }
+    }
+
     suspend fun saveAdvancedAudio(latencyMs: Int, maxPayloadBytes: Int) {
         dataStore.edit { preferences ->
-            preferences[PreferencesKeys.LATENCY_MS] = latencyMs
+            // 20..400 matches the settings slider/input; PlayoutGovernor still
+            // enforces its own 15 ms floor downstream.
+            preferences[PreferencesKeys.LATENCY_MS] = latencyMs.coerceIn(20, 400)
             preferences[PreferencesKeys.MAX_PAYLOAD] = maxPayloadBytes
         }
     }
@@ -577,52 +604,6 @@ class SettingsDataStore(context: Context) {
     suspend fun setMcastClientEpoch(ip: String, e: Long) {
         val key = androidx.datastore.preferences.core.longPreferencesKey("mcast_epoch_$ip")
         dataStore.edit { p -> p[key] = e }
-    }
-
-    suspend fun isDonationQualified(): Boolean {
-        val key = booleanPreferencesKey("donation_qualified")
-        return dataStore.data.first()[key] ?: false
-    }
-    suspend fun setDonationQualified(b: Boolean) {
-        val key = booleanPreferencesKey("donation_qualified")
-        dataStore.edit { p -> p[key] = b }
-    }
-    suspend fun donationSnoozeUntil(): Long {
-        val key = androidx.datastore.preferences.core.longPreferencesKey("donation_snooze_until")
-        return dataStore.data.first()[key] ?: 0L
-    }
-    suspend fun setDonationSnoozeUntil(t: Long) {
-        val key = androidx.datastore.preferences.core.longPreferencesKey("donation_snooze_until")
-        dataStore.edit { p -> p[key] = t }
-    }
-    suspend fun donationDismissCount(): Int {
-        val key = androidx.datastore.preferences.core.intPreferencesKey("donation_dismiss_count")
-        return dataStore.data.first()[key] ?: 0
-    }
-    suspend fun setDonationDismissCount(n: Int) {
-        val key = androidx.datastore.preferences.core.intPreferencesKey("donation_dismiss_count")
-        dataStore.edit { p -> p[key] = n }
-    }
-    suspend fun donationSupported(): Boolean {
-        val key = booleanPreferencesKey("donation_supported")
-        return dataStore.data.first()[key] ?: false
-    }
-    suspend fun setDonationSupported(b: Boolean) {
-        val key = booleanPreferencesKey("donation_supported")
-        dataStore.edit { p -> p[key] = b }
-    }
-    suspend fun resetDonationPrompt() {
-        setDonationSupported(false)
-        setDonationQualified(true)
-        setDonationDismissCount(0)
-        setDonationSnoozeUntil(0L)
-    }
-
-    fun donationBackoffDays(count: Int): Long = when {
-        count <= 1 -> 2L
-        count == 2 -> 5L
-        count == 3 -> 14L
-        else -> 30L
     }
 
     suspend fun saveStreamingPort(port: Int) {
@@ -799,3 +780,7 @@ class SettingsDataStore(context: Context) {
     }
 
 }
+
+// Missing new preference must not reinterpret an existing manual setting.
+internal fun resolveAdaptiveLatency(saved: Boolean?, hasManualValue: Boolean): Boolean =
+    saved ?: !hasManualValue

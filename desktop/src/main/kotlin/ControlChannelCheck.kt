@@ -55,7 +55,7 @@ fun controlChannelChecks() {
     // da quello vecchio a una riga, cosi' un'istanza datata viene riconosciuta
     // come tale invece di sembrare assente.
     val dir = kotlin.io.path.createTempDirectory("wfas-session").toFile()
-    val modern = java.io.File(dir, "wfas-4242.port")
+    val modern = java.io.File(dir, "${BuildIdentity.ipcPrefix}-4242.port")
     modern.writeText("# header\nv=1\npid=4242\nport=51000\ntoken=$t\n")
     val parsedModern = IpcAuth.readSession(modern)
     csame("modern session pid", parsedModern?.pid, 4242L)
@@ -63,7 +63,7 @@ fun controlChannelChecks() {
     csame("modern session token", parsedModern?.token, t)
     cok("modern session is authenticated", parsedModern?.authenticated == true)
 
-    val legacy = java.io.File(dir, "wfas-77.port")
+    val legacy = java.io.File(dir, "${BuildIdentity.ipcPrefix}-77.port")
     legacy.writeText("50999\n")
     val parsedLegacy = IpcAuth.readSession(legacy, legacy = true)
     csame("legacy session port", parsedLegacy?.port, 50999)
