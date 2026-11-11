@@ -84,3 +84,15 @@ jobs:
           else:
               raise RuntimeError("Cancellation still pending: " + str(live))
           PY
+  release-rejected-native-slots:
+    permissions: {}
+    strategy:
+      matrix:
+        pr: [82, 83, 85, 87]
+    concurrency:
+      group: android-native-Validate Android Native Audio-refs/pull/${{ matrix.pr }}/merge
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo 'Superseded only the already-closed, owner-rejected bot native run.'
