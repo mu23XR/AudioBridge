@@ -269,7 +269,7 @@ dependencies {
     // DPAPI su Windows. La versione segue quella che dorkbox:SystemTray porta
     // gia' a runtime, ma va dichiarata: le transitive di un 'implementation'
     // non finiscono sul compile classpath.
-    implementation("net.java.dev.jna:jna-platform-jpms:5.13.0")
+    implementation("net.java.dev.jna:jna-platform-jpms:5.19.1")
     implementation("com.dorkbox:SystemTray:4.4")
     implementation("org.slf4j:slf4j-nop:2.0.9")
 }
