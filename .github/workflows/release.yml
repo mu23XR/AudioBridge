@@ -55,7 +55,7 @@ jobs:
       code: ${{ steps.request.outputs.code }}
       publish: ${{ steps.request.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || inputs.source_ref || inputs.release_tag || github.ref }}
           persist-credentials: false
@@ -87,7 +87,7 @@ jobs:
       WFAS_VERSION_CODE: ${{ needs.meta.outputs.code }}
       SOURCE_SHA: ${{ needs.meta.outputs.source }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
@@ -156,7 +156,7 @@ jobs:
       WFAS_VERSION_NAME: ${{ needs.meta.outputs.version }}
       SOURCE_SHA: ${{ needs.meta.outputs.source }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
@@ -218,7 +218,7 @@ jobs:
       ANDROID_MANIFEST: ${{ needs.android.outputs.manifest }}
       WINDOWS_MANIFEST: ${{ needs.windows.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
@@ -247,7 +247,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.source }}
           persist-credentials: false

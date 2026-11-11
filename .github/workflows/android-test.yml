@@ -57,7 +57,7 @@ jobs:
       prefix: ${{ steps.request.outputs.prefix }}
       publish: ${{ steps.request.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
           persist-credentials: false
@@ -105,7 +105,7 @@ jobs:
 
     steps:
       - name: Checkout requested source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.source }}
           persist-credentials: false
@@ -199,7 +199,7 @@ jobs:
       ANDROID_MANIFEST: ${{ needs.build.outputs.manifest }}
       WINDOWS_MANIFEST: ${{ needs.windows.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.source }}
           persist-credentials: false
@@ -225,7 +225,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.source }}
           persist-credentials: false

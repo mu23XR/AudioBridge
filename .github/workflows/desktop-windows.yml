@@ -82,7 +82,7 @@ jobs:
       manifest: ${{ steps.stage.outputs.manifest || steps.reusable-stage.outputs.manifest }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -202,7 +202,7 @@ jobs:
         working-directory: .
     steps:
       - name: Checkout verified source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.windows.outputs.source }}
           persist-credentials: false
@@ -235,7 +235,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.windows.outputs.source }}
           persist-credentials: false

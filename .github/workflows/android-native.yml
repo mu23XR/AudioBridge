@@ -54,7 +54,7 @@ jobs:
       ANDROID_AVD_HOME: /tmp/audiobridge-native-android/avd
     steps:
       - name: Checkout exact tested source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.ref }}
           persist-credentials: false
