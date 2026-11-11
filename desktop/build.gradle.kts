@@ -243,7 +243,7 @@ dependencies {
     implementation(compose.material3)
     implementation(compose.materialIconsExtended)
 
-    val ktorVersion = "3.0.3"
+    val ktorVersion = "3.6.1"
     implementation("io.ktor:ktor-network:$ktorVersion")
     implementation("io.ktor:ktor-network-tls:$ktorVersion")
 
