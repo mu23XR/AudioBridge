@@ -11,3 +11,11 @@ Current investigation: get full original native failure diagnostics and reproduc
 worker thread-name comparison under coroutine debug. Do not treat a previously
 passing same-source run as resolving the newer failures. Other checkouts and
 existing installations are untouched.
+
+Original native assertion retrieved with verified archive digest/ownership via
+cloud-only diagnostic43074638341: adaptive before-silence discarded21060bytes,
+limit19200. Need correlate original journal; do not blame producer/host yet.
+Worker debug-name race reproduced at iteration64 on unchanged code. Fixed test
+will inspect real Thread ownership while active and factory name after shutdown;
+all original lifecycle assertions stay. Local focused check in progress.
+User forbids further desktop/browser control; use CLI/GitHub/cloud only.

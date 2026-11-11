@@ -20,6 +20,7 @@ class ReceiverPlaybackWorkerTest {
         val fixture = Fixture("test-playout-thread")
         val observed = Collections.synchronizedList(mutableListOf<Thread>())
         val ready = CompletableDeferred<Unit>()
+        val inspected = CountDownLatch(1)
         fixture.worker.start {
             repeat(20) {
                 observed.add(Thread.currentThread())
@@ -27,16 +28,24 @@ class ReceiverPlaybackWorkerTest {
                 delay(1)
             }
             ready.complete(Unit)
+            // Keep the coroutine active while its owner is inspected. Debug mode
+            // decorates the live thread name; it must not change thread identity.
+            check(inspected.await(2, TimeUnit.SECONDS))
             awaitCancellation()
         }
         try {
             withTimeout(2_000) { ready.await() }
             assertEquals(1, observed.toSet().size)
-            assertEquals("test-playout-thread", observed.first().name)
-        } finally { fixture.worker.stop {}; assertTrue(fixture.worker.awaitStopped()) }
+        } finally {
+            inspected.countDown()
+            fixture.worker.stop {}
+            assertTrue(fixture.worker.awaitStopped())
+        }
         val thread = observed.first()
         thread.join(1_000)
         assertFalse("The owned playback thread survived shutdown", thread.isAlive)
+        // Only a terminated thread has restored its undecorated factory name.
+        assertEquals("test-playout-thread", thread.name)
         assertTrue(fixture.failures.isEmpty())
     }
 

@@ -21,7 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, io, json, subprocess, zipfile
+          import hashlib, io, json, re, subprocess, tarfile, zipfile
           release = json.loads(subprocess.check_output([
               'gh', 'api', 'repos/mu23XR/AudioBridge/releases/442019411']))
           expected = {'schema': 'audiobridge-release-stage-v1',
@@ -44,4 +44,20 @@ jobs:
                       assert item.file_size < 2 * 1024 * 1024
                       print('\nREPORT:', item.filename)
                       print(archive.read(item).decode('utf-8')[-50000:])
+              print('\nORIGINAL FAILED PHASE:')
+              lines = archive.read('logcat.txt').decode('utf-8').splitlines()
+              phase = [line for line in lines if 'PLAYOUT_FIXTURE' in line and 'adaptive-sole-before-silence' in line]
+              print('\n'.join(phase))
+              bounds = [int(re.search(r'wallMs=(\d+)', line).group(1)) for line in phase if ' START ' in line or ' END ' in line]
+              assert len(bounds) == 2
+              with tarfile.open(fileobj=io.BytesIO(archive.read('runtime-journal.tar'))) as journal:
+                  entry = journal.getmember('files/diagnostics/runtime.log')
+                  assert entry.size < 16 * 1024 * 1024
+                  text = journal.extractfile(entry).read().decode('utf-8')
+                  print('\nJOURNAL FORMAT SAMPLE:', text[:1500])
+                  selected = []
+                  for line in text.splitlines():
+                      if any(marker in line.lower() for marker in ('discard', 'overflow', 'gap', 'slow', 'stall')):
+                          selected.append(line)
+                  print('\nJOURNAL LOSS/TIMING EVENTS:', '\n'.join(selected)[-90000:])
           PY

@@ -36,3 +36,22 @@ merging, re-read PR head/base/checks and use an expected-head merge. Afterwards
 verify main and release/tag/assets; do not republish2.0.1 or install candidates.
 
 Record diagnosis, implementation, local and cloud results here by milestone.
+
+## Diagnosis evidence
+
+The original native report was read by a temporary cloud GET-only diagnostic
+job, after verifying its repository/run/source ownership and SHA2567efcd51c...
+(run43074638341). No rerun was substituted for the failure. It is actual
+adaptive **before-silence** discard21060bytes (>19200bytes/100ms), not a failed
+post-silence assertion. Producer/queue/timing journal correlation is next.
+The initial diagnostic job403 required push-level draft visibility; it changed
+no Release state. The temporary workflow will be removed before main integration.
+
+Worker failure is reproduced on unchanged sources with assertions and coroutine
+debug enabled: iteration64 reports expected test-playout-thread, actual
+test-playout-thread @coroutine#194. Actual Thread identity still passes.
+The test now keeps the coroutine active during identity inspection, retains all
+suspension/ownership/shutdown checks, and checks the undecorated factory name
+after the thread terminates. Production worker behavior is unchanged.
+Evidence stays in ignored out/pr75-acceptance-20261112. No desktop/browser UI
+will be used further; the user's machine-control preference is explicit.
