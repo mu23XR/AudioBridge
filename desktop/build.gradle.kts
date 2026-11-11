@@ -249,7 +249,7 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 
-    val bcVersion = "1.78.1"
+    val bcVersion = "1.86"
     implementation("org.bouncycastle:bcprov-jdk18on:$bcVersion")
     implementation("org.bouncycastle:bctls-jdk18on:$bcVersion")
     implementation("org.bouncycastle:bcpkix-jdk18on:$bcVersion")
