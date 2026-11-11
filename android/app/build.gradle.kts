@@ -127,7 +127,7 @@ dependencies {
     implementation("io.ktor:ktor-client-core:2.3.11")
     implementation("io.ktor:ktor-client-cio:2.3.11") // Motore client
     implementation("io.ktor:ktor-server-core:2.3.11")
-    implementation("io.ktor:ktor-server-cio:2.3.11") // Motore server
+    implementation("io.ktor:ktor-server-cio:3.6.1") // Motore server
     implementation("io.ktor:ktor-network:2.3.11")
 
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
