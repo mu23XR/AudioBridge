@@ -265,7 +265,7 @@ dependencies {
     implementation("org.bytedeco:javacv:$javacvVersion")
     implementation("org.bytedeco:ffmpeg:$javacvVersion:$targetPlatform")
     implementation("org.bytedeco:javacpp:$javacvVersion:$targetPlatform")
-    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.zxing:core:3.5.4")
     // DPAPI su Windows. La versione segue quella che dorkbox:SystemTray porta
     // gia' a runtime, ma va dichiarata: le transitive di un 'implementation'
     // non finiscono sul compile classpath.
