@@ -13,13 +13,14 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Stop the zero-job stale recovery then dispatch the unchanged main native workflow once
+      - name: Verify the obsolete lease and dispatch the unchanged main native tests once
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, time, urllib.request, urllib.error
+          import base64, json, os, urllib.request
           base="https://api.github.com/repos/mu23XR/AudioBridge"
-          expected="ee9c0af9d432287ad94f61a40670cf613d2cf26f"
+          expected="a5857b18e06a02294f4203b22390c83e8e602f54"
+          obsolete="ee9c0af9d432287ad94f61a40670cf613d2cf26f"
           def api(path,method="GET",data=None):
               payload=None if data is None else json.dumps(data).encode("utf-8")
               headers={"Authorization":"Bearer "+os.environ["GH_TOKEN"],"Accept":"application/vnd.github+json",
@@ -29,31 +30,26 @@ jobs:
               with urllib.request.urlopen(urllib.request.Request(base+path,data=payload,headers=headers,method=method),timeout=30) as r:
                   body=r.read()
                   return json.loads(body) if body else {}
-          assert api("/git/ref/heads/main")["object"]["sha"]==expected, "Main moved; inspect before dispatch"
+          assert os.environ["GITHUB_RUN_ID"]!="43096226396", "Obsolete recovery must never dispatch"
+          assert api("/git/ref/heads/main")["object"]["sha"]==expected and expected!=obsolete
           old=api("/actions/runs/43096226396")
-          assert old["head_sha"]=="666832402cb6d607c5cfa89a27970a80d1e23d30" and old["event"]=="push"
-          assert old["path"]==".github/workflows/main-native-startup-recovery.yml"
-          assert old["status"]=="queued", "Old recovery changed; follow it instead of duplicating"
+          assert old["head_sha"]=="666832402cb6d607c5cfa89a27970a80d1e23d30"
           assert api("/actions/runs/43096226396/jobs?per_page=1")["total_count"]==0
-          try:
-              api("/actions/runs/43096226396/force-cancel","POST")
-          except urllib.error.HTTPError as failure:
-              detail=failure.read(2000).decode("utf-8",errors="replace")
-              raise RuntimeError("Force-cancel rejected HTTP "+str(failure.code)+": "+detail) from failure
-          for _ in range(15):
-              old=api("/actions/runs/43096226396")
-              if old["status"]=="completed":
-                  break
-              time.sleep(2)
-          assert old["status"]=="completed" and old["conclusion"]=="cancelled", "Old recovery is not safely stopped"
-          native=api("/actions/runs/43090517310")
-          assert native["run_attempt"]==2 and native["status"]=="completed" and native["conclusion"]=="startup_failure"
-          assert native["head_sha"]=="36a3343454b8cf00872f51fbd7d554a7ab31c933"
+          definition=api("/contents/.github/workflows/main-native-startup-recovery.yml?ref="+old["head_sha"])
+          text=base64.b64decode(definition["content"]).decode("utf-8")
+          lease='assert api("/git/ref/heads/main")["object"]["sha"]=="'+obsolete+'"'
+          post='api("/actions/runs/43090517310/rerun","POST")'
+          assert "\n          "+lease in text and text.index(lease)<text.index(post), "Old source lease not verified"
+          print("OBSOLETE_RECOVERY_FENCED old_run=43096226396 expected_old_main="+obsolete,flush=True)
           recent=api("/actions/runs?event=workflow_dispatch&head_sha="+expected+"&per_page=20")["workflow_runs"]
           existing=[r for r in recent if r["path"]==".github/workflows/android-native.yml" and r["created_at"]>="2026-11-11T20:11:00Z"]
-          assert not existing, "Native dispatch already exists; follow its result instead"
-          assert api("/git/ref/heads/main")["object"]["sha"]==expected, "Main moved during cancellation"
-          api("/actions/workflows/388312461/dispatches","POST",{"ref":"main"})
-          print("OLD_RECOVERY_CANCELLED run=43096226396",flush=True)
-          print("NATIVE_MAIN_DISPATCHED_ONCE source="+expected+" workflow=388312461",flush=True)
+          assert len(existing)<=1, "Multiple native dispatches require inspection"
+          if existing:
+              print("EXISTING_NATIVE_RUN "+str(existing[0]["id"])+" source="+expected,flush=True)
+          else:
+              assert api("/git/ref/heads/main")["object"]["sha"]==expected, "Main moved before dispatch"
+              api("/actions/workflows/388312461/dispatches","POST",{"ref":"main"})
+              print("NATIVE_MAIN_DISPATCHED_ONCE source="+expected,flush=True)
+          api("/actions/workflows/415130389/disable","PUT")
+          print("TEMPORARY_RECOVERY_WORKFLOW_DISABLED id=415130389",flush=True)
           PY
