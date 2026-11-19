@@ -26,6 +26,11 @@ on:
       version:
         description: "Stable version without v; alternatively use release_tag"
         type: string
+      platforms:
+        description: "Packages to publish after the original checks pass"
+        type: choice
+        options: [android-windows, android]
+        default: android-windows
       publish:
         description: "Publish verified assets as stable/latest after all gates"
         type: boolean
@@ -54,6 +59,7 @@ jobs:
       version: ${{ steps.request.outputs.version }}
       code: ${{ steps.request.outputs.code }}
       publish: ${{ steps.request.outputs.publish }}
+      platforms: ${{ steps.request.outputs.platforms }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -174,14 +180,18 @@ jobs:
         working-directory: desktop
         run: .\gradlew.bat check
       - name: Generate versioned manual before packaging resources
+        if: needs.meta.outputs.platforms == 'android-windows'
         working-directory: desktop
         run: .\gradlew.bat generateMan
       - name: Build exact Windows ZIP and TAR
+        if: needs.meta.outputs.platforms == 'android-windows'
         working-directory: desktop
         run: .\gradlew.bat createReleaseDistributable packagePortableArchives
       - name: Verify stable JAR, native library, manual and matching archive bytes
+        if: needs.meta.outputs.platforms == 'android-windows'
         run: python scripts/stable_release.py windows --source "$env:SOURCE_SHA" --version "$env:WFAS_VERSION_NAME" --output out/stable-windows
       - name: Transfer verified Windows files through run-bound draft Release
+        if: needs.meta.outputs.platforms == 'android-windows'
         id: stage
         env:
           GH_TOKEN: ${{ github.token }}
@@ -214,6 +224,7 @@ jobs:
       SOURCE_SHA: ${{ needs.meta.outputs.source }}
       RELEASE_VERSION: ${{ needs.meta.outputs.version }}
       VERSION_CODE: ${{ needs.meta.outputs.code }}
+      PLATFORMS: ${{ needs.meta.outputs.platforms }}
       NATIVE_SOURCE: ${{ needs.native.outputs.source_sha }}
       ANDROID_MANIFEST: ${{ needs.android.outputs.manifest }}
       WINDOWS_MANIFEST: ${{ needs.windows.outputs.manifest }}
@@ -224,16 +235,19 @@ jobs:
           persist-credentials: false
       - name: Confirm native gate checked the same integration source
         run: test "$NATIVE_SOURCE" = "$SOURCE_SHA"
-      - name: Download and hash the exact platform job outputs
+      - name: Download and hash the exact Android job outputs
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/release_stage.py download --scope stable --source "$SOURCE_SHA" --manifest "$ANDROID_MANIFEST" --output out/stable-input
-          python3 scripts/release_stage.py download --scope stable --source "$SOURCE_SHA" --manifest "$WINDOWS_MANIFEST" --output out/stable-input
+        run: python3 scripts/release_stage.py download --scope stable --source "$SOURCE_SHA" --manifest "$ANDROID_MANIFEST" --output out/stable-input
+      - name: Download and hash the exact Windows job outputs
+        if: needs.meta.outputs.platforms == 'android-windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_stage.py download --scope stable --source "$SOURCE_SHA" --manifest "$WINDOWS_MANIFEST" --output out/stable-input
       - name: Verify unified identity, source, provenance and checksums
         run: |
           python3 scripts/stable_release.py bundle --source "$SOURCE_SHA" --version "$RELEASE_VERSION" --code "$VERSION_CODE" \
-            --input out/stable-input --output out/stable-release
+            --platforms "$PLATFORMS" --input out/stable-input --output out/stable-release
       - name: Publish immutable assets, download-verify, then mark stable/latest
         if: needs.meta.outputs.publish == 'true'
         env:

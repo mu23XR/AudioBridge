@@ -109,6 +109,14 @@ release identities and one shared source SHA, and only then creates the release.
 Forks cannot publish. Existing releases/tags are not replaced. Uploaded assets are
 downloaded and checksum-verified before the draft becomes stable/latest.
 
+An Android-only stable release sets `"platforms": "android"` in that request,
+or selects `android` in the manual workflow inputs. Omit the field for the
+standard Android and Windows release. The Windows `check` job still gates an
+Android-only release, while Windows packaging and transfer are reserved for the
+combined release. CI validates the exact APK and all release metadata, then
+downloads and verifies that Android bundle before promoting it. Release notes
+should link to the current Windows release so users can find its archives.
+
 The stable Windows build injects `WFAS_VERSION_NAME`; the preview default and its
 independent publication request remain preview-only. Generate the versioned manual
 in a separate Gradle invocation before resource packaging. Stable Android uses

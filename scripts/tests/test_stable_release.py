@@ -57,11 +57,7 @@ class StableReleaseTest(unittest.TestCase):
                 info.size = len(data)
                 package.addfile(info, io.BytesIO(data))
 
-    def valid_bundle(self):
-        self.archives()
-        windows = self.root / "windows"
-        with patch.object(stable, "source_identity", return_value=self.record):
-            stable.collect_windows(self.root, windows, self.source, self.version)
+    def valid_bundle(self, platforms=stable.ANDROID_WINDOWS):
         apk = self.root / "fixture.apk"
         apk.write_bytes(b"signed APK fixture")
         actual = {"package": stable.PACKAGE, "versionName": self.version, "versionCode": self.code,
@@ -69,14 +65,21 @@ class StableReleaseTest(unittest.TestCase):
         android = self.root / "android"
         with patch.object(stable, "source_identity", return_value=self.record), patch.object(stable, "inspect_apk", return_value=actual):
             stable.collect_android(self.root, android, self.source, self.version, self.code, apk, Path("aapt2"), Path("apksigner"))
+        directories = [android]
+        if platforms == stable.ANDROID_WINDOWS:
+            self.archives()
+            windows = self.root / "windows"
+            with patch.object(stable, "source_identity", return_value=self.record):
+                stable.collect_windows(self.root, windows, self.source, self.version)
+            directories.append(windows)
         inputs = self.root / "inputs"
         inputs.mkdir()
-        for directory in (android, windows):
+        for directory in directories:
             for path in directory.iterdir():
                 shutil.copyfile(path, inputs / path.name)
         output = self.root / "release"
         with patch.object(stable, "source_identity", return_value=self.record):
-            stable.bundle(self.root, inputs, output, self.source, self.version, self.code)
+            stable.bundle(self.root, inputs, output, self.source, self.version, self.code, platforms)
         return output
 
     def test_request_requires_same_repository_head_explicit_boolean_and_stable_version(self):
@@ -105,6 +108,18 @@ class StableReleaseTest(unittest.TestCase):
         request.write_text(json.dumps({"version": self.version, "publish": True}), encoding="utf-8-sig")
         self.assertTrue(stable.release_request(self.root, self.event, "pull_request", self.source,
                                              "mu23XR/AudioBridge")["publish"])
+
+    def test_android_only_scope_matches_the_explicit_request_and_tag(self):
+        requested = {"version": self.version, "publish": True, "platforms": "android"}
+        path = self.notes / "stable-build-request.json"
+        stable.write_json(path, requested)
+        self.assertEqual(requested, stable.release_request(self.root, self.event, "pull_request",
+                                                           self.source, "mu23XR/AudioBridge"))
+        self.assertEqual(requested, stable.release_request(self.root, {}, "push", self.source,
+                                                           "mu23XR/AudioBridge", "v" + self.version))
+        stable.write_json(path, {**requested, "platforms": "windows"})
+        with self.assertRaisesRegex(ValueError, "Invalid stable release request"):
+            stable.release_request(self.root, self.event, "pull_request", self.source, "mu23XR/AudioBridge")
 
     def test_actual_android_identity_must_be_release_package_version_code_and_permanent_signer(self):
         actual = {"package": stable.PACKAGE, "versionName": self.version, "versionCode": self.code,
@@ -206,6 +221,24 @@ class StableReleaseTest(unittest.TestCase):
         operations = [call[1] for call in calls if call[0] == "release"]
         self.assertEqual(["create", "upload", "download", "edit"], operations)
         self.assertNotIn("--clobber", [item for call in calls for item in call])
+
+    def test_android_only_publish_rejects_windows_assets_and_verifies_downloads(self):
+        request = self.notes / "stable-build-request.json"
+        stable.write_json(request, {"version": self.version, "publish": True, "platforms": "android"})
+        output = self.valid_bundle(stable.ANDROID_ONLY)
+        self.assertEqual({"AudioBridge-Android-2.0.1.apk", "android-build.json", "SOURCE_COMMIT.txt",
+                          "release-notes.md", "provenance.json", "SHA256SUMS.txt"}, {p.name for p in output.iterdir()})
+        calls = self.publish_fixture(output)
+        self.assertEqual(["create", "upload", "download", "edit"], [c[1] for c in calls if c[0] == "release"])
+        extra = output / (self.stem + ".zip")
+        extra.write_bytes(b"wrong platform")
+        with self.assertRaisesRegex(ValueError, "Unexpected stable bundle files"):
+            self.publish_fixture(output)
+        self.assertEqual([], self.calls)
+        extra.unlink()
+        with self.assertRaisesRegex(ValueError, "Downloaded stable asset differs"):
+            self.publish_fixture(output, tamper=True)
+        self.assertFalse(any(call[:2] == ("release", "edit") for call in self.calls))
 
     def test_failed_download_never_promotes_and_existing_publication_or_other_tag_source_is_immutable(self):
         output = self.valid_bundle()

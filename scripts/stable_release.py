@@ -22,6 +22,9 @@ SOURCE = re.compile(r"[0-9a-f]{40}")
 PACKAGE = "io.github.mu23xr.audiobridge"
 SIGNER = "4ddf267d25a73f0a28446c9e77293204e32f6777c63417feb7bd925040fefb63"
 GENERATED = transport.GENERATED
+ANDROID_WINDOWS = "android-windows"
+ANDROID_ONLY = "android"
+PLATFORMS = (ANDROID_WINDOWS, ANDROID_ONLY)
 
 
 def require(condition, message):
@@ -56,31 +59,48 @@ def source_identity(root, source, generated=False):
             "desktopTree": transport.git(root, "rev-parse", "HEAD:desktop")}
 
 
+def configured_request(path):
+    require(path.stat().st_size <= 4096, "Stable request is too large")
+    data = read_json(path)
+    require(isinstance(data, dict) and set(data) in ({"version", "publish"}, {"version", "publish", "platforms"})
+            and type(data["publish"]) is bool and data.get("platforms", ANDROID_WINDOWS) in PLATFORMS,
+            "Invalid stable release request")
+    return data
+
+
 def release_request(root, event, event_name, source, repository, ref_name="", inputs=None):
     inputs = inputs or {}
+    path = root / "docs/releases/stable-build-request.json"
+    platforms = ANDROID_WINDOWS
     if event_name == "pull_request":
         pr = event["pull_request"]
         require(pr["head"]["repo"]["full_name"] == repository and pr["head"]["sha"] == source,
                 "Fork or changed PR source cannot request a stable release")
-        path = root / "docs/releases/stable-build-request.json"
-        require(path.stat().st_size <= 4096, "Stable request is too large")
-        data = read_json(path)
-        require(isinstance(data, dict) and set(data) == {"version", "publish"}
-                and type(data["publish"]) is bool, "Invalid stable release request")
+        data = configured_request(path)
         version, publish = data["version"], data["publish"]
+        platforms = data.get("platforms", ANDROID_WINDOWS)
     elif event_name == "push":
         require(ref_name.startswith("v"), "Stable release requires a version tag")
         version, publish = ref_name[1:], True
+        if path.is_file():
+            data = configured_request(path)
+            if data["version"] == version:
+                platforms = data.get("platforms", ANDROID_WINDOWS)
     else:
         require(event_name == "workflow_dispatch", "Unsupported stable release event")
         tag = str(inputs.get("release_tag", ""))
         version = inputs.get("version") or tag.removeprefix("v")
         publish = str(inputs.get("publish", "false")).lower() == "true"
+        platforms = inputs.get("platforms", ANDROID_WINDOWS)
     identity(version, source)
     require(repository == "mu23XR/AudioBridge", "Unexpected release repository")
+    require(platforms in PLATFORMS, "Unknown stable release platforms")
     notes = root / "docs/releases" / (version + ".md")
     require(notes.is_file() and 0 < notes.stat().st_size <= 64 * 1024, "Missing or oversized stable release notes")
-    return {"version": version, "publish": publish}
+    request = {"version": version, "publish": publish}
+    if platforms != ANDROID_WINDOWS:
+        request["platforms"] = platforms
+    return request
 
 
 def prepare(root):
@@ -94,7 +114,7 @@ def prepare(root):
     code = (now.year - 2020) * 100_000_000 + int(now.strftime("%m%d%H%M"))
     require(0 <= now.year - 2020 <= 20 and 0 < code <= 2_100_000_000, "Android versionCode outside supported range")
     result = {"source": source, "version": request["version"], "code": str(code),
-              "publish": str(request["publish"]).lower()}
+              "publish": str(request["publish"]).lower(), "platforms": request.get("platforms", ANDROID_WINDOWS)}
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         stream.write("".join(key + "=" + value + "\n" for key, value in result.items()))
     print(json.dumps(result))
@@ -184,14 +204,21 @@ def collect_windows(root, output, source, version):
                "assets": {p.name: {"bytes": p.stat().st_size, "sha256": sha256(p)} for p in archives}})
 
 
-def bundle(root, inputs, output, source, version, code):
+def platform_files(version, platforms):
+    require(platforms in PLATFORMS, "Unknown stable bundle platforms")
+    names = {"AudioBridge-Android-" + version + ".apk", "android-build.json"}
+    if platforms == ANDROID_WINDOWS:
+        stem = "AudioBridge-" + version + "-windows-x86_64"
+        names.update({stem + ".zip", stem + ".tar.gz", "windows-build.json"})
+    return names
+
+
+def bundle(root, inputs, output, source, version, code, platforms=ANDROID_WINDOWS):
     identity(version, source)
     record = source_identity(root, source)
-    stem = "AudioBridge-" + version + "-windows-x86_64"
-    expected = {"AudioBridge-Android-" + version + ".apk", stem + ".zip", stem + ".tar.gz",
-                "android-build.json", "windows-build.json"}
+    expected = platform_files(version, platforms)
     require({p.name for p in inputs.iterdir()} == expected, "Unexpected or missing platform assets")
-    for name in ("android-build.json", "windows-build.json"):
+    for name in sorted(name for name in expected if name.endswith("-build.json")):
         actual = read_json(inputs / name)
         require(all(actual.get(key) == value for key, value in {**record, "version": version}.items()),
                 "Platform source/version differs: " + name)
@@ -204,18 +231,18 @@ def bundle(root, inputs, output, source, version, code):
     (output / "SOURCE_COMMIT.txt").write_text(source + "\n", encoding="utf-8")
     shutil.copyfile(root / "docs/releases" / (version + ".md"), output / "release-notes.md")
     write_json(output / "provenance.json", {**record, "version": version, "channel": "stable", "versionCode": code,
+               "platforms": platforms,
                "runId": os.environ.get("GITHUB_RUN_ID"), "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
                "assets": {p.name: {"bytes": p.stat().st_size, "sha256": sha256(p)} for p in output.iterdir()}})
     (output / "SHA256SUMS.txt").write_text("".join(sha256(p) + "  " + p.name + "\n"
                                          for p in sorted(output.iterdir())), encoding="utf-8")
-    verify(output, source, version)
+    verify(output, source, version, platforms)
 
 
-def verify(output, source, version):
+def verify(output, source, version, platforms=ANDROID_WINDOWS):
     identity(version, source)
-    stem = "AudioBridge-" + version + "-windows-x86_64"
-    expected = {"AudioBridge-Android-" + version + ".apk", stem + ".zip", stem + ".tar.gz", "android-build.json",
-                "windows-build.json", "SOURCE_COMMIT.txt", "release-notes.md", "provenance.json"}
+    platform_names = platform_files(version, platforms)
+    expected = platform_names | {"SOURCE_COMMIT.txt", "release-notes.md", "provenance.json"}
     require({p.name for p in output.iterdir()} == expected | {"SHA256SUMS.txt"}, "Unexpected stable bundle files")
     require(all(p.is_file() and not p.is_symlink() for p in output.iterdir()), "Stable bundle contains links/directories")
     parsed = {}
@@ -228,25 +255,28 @@ def verify(output, source, version):
     require((output / "SOURCE_COMMIT.txt").read_text(encoding="utf-8") == source + "\n", "Wrong stable source")
     provenance = read_json(output / "provenance.json")
     require(provenance.get("sourceCommit") == source and provenance.get("version") == version
-            and provenance.get("channel") == "stable", "Wrong stable provenance")
-    for platform in ("android", "windows"):
-        record = read_json(output / (platform + "-build.json"))
+            and provenance.get("channel") == "stable"
+            and provenance.get("platforms", ANDROID_WINDOWS) == platforms, "Wrong stable provenance")
+    for name in sorted(name for name in platform_names if name.endswith("-build.json")):
+        record = read_json(output / name)
         require(all(record.get(key) == provenance.get(key) for key in ("sourceCommit", "androidTree", "desktopTree", "version")),
-                "Platform provenance differs: " + platform)
+                "Platform provenance differs: " + name)
     android = read_json(output / "android-build.json")
     validate_android(android["android"], version, provenance["versionCode"])
     apk = output / ("AudioBridge-Android-" + version + ".apk")
     require(android["android"]["sha256"] == sha256(apk) and android["android"]["bytes"] == apk.stat().st_size,
             "Android build record differs from asset")
-    windows = read_json(output / "windows-build.json")
-    require(windows.get("channel") == "stable", "Wrong Windows build channel")
-    for name in (stem + ".zip", stem + ".tar.gz"):
-        require(windows["assets"][name] == {"bytes": (output / name).stat().st_size, "sha256": sha256(output / name)},
-                "Windows build record differs from asset")
+    if platforms == ANDROID_WINDOWS:
+        windows = read_json(output / "windows-build.json")
+        require(windows.get("channel") == "stable", "Wrong Windows build channel")
+        stem = "AudioBridge-" + version + "-windows-x86_64"
+        for name in (stem + ".zip", stem + ".tar.gz"):
+            require(windows["assets"][name] == {"bytes": (output / name).stat().st_size, "sha256": sha256(output / name)},
+                    "Windows build record differs from asset")
+        check_windows_tar(output / (stem + ".tar.gz"), check_windows_zip(output / (stem + ".zip"), version))
     require(set(provenance["assets"]) == expected - {"provenance.json"}, "Incomplete asset provenance")
     for name, asset in provenance["assets"].items():
         require(asset == {"bytes": (output / name).stat().st_size, "sha256": sha256(output / name)}, "Asset provenance differs")
-    check_windows_tar(output / (stem + ".tar.gz"), check_windows_zip(output / (stem + ".zip"), version))
 
 
 def publish(root, output, source, version):
@@ -255,9 +285,11 @@ def publish(root, output, source, version):
     event = read_json(Path(os.environ["GITHUB_EVENT_PATH"]))
     request = release_request(root, event, os.environ["GITHUB_EVENT_NAME"], source, repository,
                               os.environ.get("GITHUB_REF_NAME", ""), event.get("inputs", {}))
-    require(request == {"version": version, "publish": True}, "Stable publication was not explicitly requested")
+    require(request["version"] == version and request["publish"] is True,
+            "Stable publication was not explicitly requested")
+    platforms = request.get("platforms", ANDROID_WINDOWS)
     source_identity(root, source)
-    verify(output, source, version)
+    verify(output, source, version, platforms)
     prefix, tag = "repos/" + repository, "v" + version
     reference = transport.api(prefix + "/git/ref/tags/" + tag, optional=True)
     if reference is None:
@@ -271,8 +303,9 @@ def publish(root, output, source, version):
         require(target["type"] == "commit" and target["sha"] == source, "Existing stable tag has another source")
     release = transport.find_release(repository, tag)
     if release is None:
+        title = "AudioBridge " + version + (" (Android)" if platforms == ANDROID_ONLY else "")
         transport.gh_ok("release", "create", tag, "--repo", repository, "--verify-tag", "--target", source,
-                        "--title", "AudioBridge " + version, "--notes-file", str(output / "release-notes.md"),
+                        "--title", title, "--notes-file", str(output / "release-notes.md"),
                         "--draft", "--prerelease", "--latest=false")
         release = transport.find_release(repository, tag)
     require(release is not None and release["draft"] and release["target_commitish"] == source,
@@ -291,7 +324,7 @@ def publish(root, output, source, version):
         require({p.name for p in downloaded.iterdir()} == set(files), "Downloaded stable asset list differs")
         for name, path in files.items():
             require(sha256(downloaded / name) == sha256(path), "Downloaded stable asset differs: " + name)
-        verify(downloaded, source, version)
+        verify(downloaded, source, version, platforms)
     transport.gh_ok("release", "edit", tag, "--repo", repository, "--draft=false", "--prerelease=false", "--latest")
     final = transport.find_release(repository, tag)
     require(final is not None and not final["draft"] and not final["prerelease"], "Stable release promotion failed")
@@ -306,6 +339,7 @@ def main():
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--source")
     parser.add_argument("--version")
+    parser.add_argument("--platforms", choices=PLATFORMS, default=ANDROID_WINDOWS)
     parser.add_argument("--code", type=int)
     parser.add_argument("--input", type=Path)
     parser.add_argument("--output", type=Path, default=Path("out/stable-release"))
@@ -320,9 +354,9 @@ def main():
     elif args.command == "windows":
         collect_windows(args.root, args.output, args.source, args.version)
     elif args.command == "bundle":
-        bundle(args.root, args.input, args.output, args.source, args.version, args.code)
+        bundle(args.root, args.input, args.output, args.source, args.version, args.code, args.platforms)
     elif args.command == "verify":
-        verify(args.output, args.source, args.version)
+        verify(args.output, args.source, args.version, args.platforms)
     else:
         publish(args.root, args.output, args.source, args.version)
 
