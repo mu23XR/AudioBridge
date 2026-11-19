@@ -78,7 +78,9 @@ jobs:
           test -f .github/PULL_REQUEST_TEMPLATE.md
           test -f CONTRIBUTING.md
           test -f SECURITY.md
-          test -f .github/dependabot.yml
+          # The owner explicitly disabled automatic dependency upgrades.
+          test ! -e .github/dependabot.yml
+          test ! -e .github/dependabot.yaml
 
       - name: Reject upstream product links
         run: |
